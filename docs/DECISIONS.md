@@ -432,6 +432,20 @@ Append-only. Newest at the bottom. Format: date — decision — why.
     file is world-readable anyway. There's no pkexec fallback for settings.
   - Keys `s`, space, `+`/`-`, `e`, `a`, `x`, `w` are new; `x` was the tests' example of an
     unmapped key, now `z`. In iced 0.14 space arrives as a character, not `Named::Space`.
+- 2026-09-25 - The `--window` window is resizable (user request), replacing the fixed 720 x 520.
+  It opens at 720 x 520, minimum 640 x 440 (the settings footer, the widest, still fits), no
+  maximum, 8 px resize border (`cosmic::app::Settings::resizable`). The panel popup is
+  unchanged.
+  - **Starting floating** (user asked, "if possible"). From cosmic-comp's source (e5010c2,
+    cloned read-only into `.scratch/` with the user's OK): `Shell::map_window` decides floating
+    or tiled once, when the window first maps. It floats a dialog (`layout::is_dialog`: a parent,
+    or min size == max size), a floating exception (app ID and title regexes in COSMIC's window
+    rules), or anything when tiling is off. Nothing re-checks later. So the window maps with
+    min = max = 720 x 520 (floats, like the old fixed window), and on its first `Focused` event
+    (or 1.5 s after start, if focus never comes) Apsis drops the maximum and sets the minimum to
+    640 x 440 (`window::set_max_size` / `set_min_size`). It stays in the floating layer and
+    becomes resizable. If focus and the timer both came before the map, it would tile as any
+    window does; not seen, and not testable in unit tests.
 
 ## Open
 

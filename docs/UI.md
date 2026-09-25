@@ -138,8 +138,12 @@ shows in the panel settings.
   without `--window`: on its own the panel button would be a tiny square. "In a panel" is
   libcosmic's own test: cosmic-panel sets `COSMIC_PANEL_NAME` for its applets.
 - COSMIC header bar with the title `Apsis` and a close button; no maximize or minimize.
-- Fixed 720 x 520 (min size = max size) and not resizable, so COSMIC floats it instead of tiling.
-  The snapshots and details panes fill the height; the list scrolls past what fits.
+- Opens at 720 x 520 and can be resized by dragging its edges and corners, down to 640 x 440
+  (the footer hints still fit). It starts floating even with tiling on: it appears with a
+  fixed size, which COSMIC floats, and becomes resizable once it's on screen. The snapshots and details
+  panes fill the extra height and share the width 3:2 (details wraps and scrolls); the activity
+  pane, `>` line and footer stay at the bottom. Row comments are cut only by the pane width
+  (the popup also cuts them at 28 characters).
 - Same keys and focus as the popup: command keys work at once, `[c]` focuses the `>` line. Esc
   backs out of a prompt or overlay first, then closes the window (and quits).
 - Lists as soon as it opens.

@@ -33,9 +33,20 @@ use crate::settings_view::{Row, Section, SettingsView};
 
 /// Popup width in logical pixels (UI.md: ~720, room for the list and details side by side).
 const POPUP_WIDTH: f32 = 720.0;
-/// Window mode: the popup's width, and a fixed height (the panes fill it). Fixed size, so COSMIC
-/// floats the window instead of tiling it.
+/// Window mode: the size it opens at (the popup's width). The panes fill whatever size it's
+/// dragged to.
 const WINDOW_SIZE: Size = Size::new(POPUP_WIDTH, 520.0);
+/// Window mode: the smallest it can be dragged to, with the footer hints (the settings view's
+/// are the widest) and a few rows still in view.
+const WINDOW_MIN_SIZE: Size = Size::new(640.0, 440.0);
+// The window opens no smaller than it may be dragged to.
+const _: () = assert!(
+    WINDOW_MIN_SIZE.width <= WINDOW_SIZE.width && WINDOW_MIN_SIZE.height <= WINDOW_SIZE.height
+);
+/// Width of the edge that resizes the window when dragged, in logical pixels.
+const WINDOW_RESIZE_BORDER: f64 = 8.0;
+/// If the window never reports focus, it becomes resizable this long after starting anyway.
+const WINDOW_SHOWN_FALLBACK: Duration = Duration::from_millis(1500);
 /// Width of the right-click menu.
 const MENU_WIDTH: f32 = 240.0;
 /// Height of one snapshot row: monotext line height (20) plus vertical padding.
@@ -58,8 +69,8 @@ const HELP_KEY_WIDTH: f32 = 80.0;
 const SETTINGS_KEY_WIDTH: f32 = 72.0;
 /// Longest filter typed at the `>` line.
 const FILTER_CHARS: usize = 512;
-/// Longest comment shown in a row; the row also ellipsizes to the pane width, and the details
-/// pane shows all of it.
+/// Longest comment shown in a popup row; the row also ellipsizes to the pane width, and the
+/// details pane shows all of it. A window can be wider, so there only the pane width cuts it.
 const ROW_COMMENT_CHARS: usize = 28;
 /// Longest answer kept at the `[y/N]` prompt; only `y` means yes.
 const CONFIRM_CHARS: usize = 3;
@@ -98,7 +109,12 @@ pub enum Mode {
     Window,
 }
 
-/// Runs the popup's UI in a normal, fixed-size window. Esc closes it.
+/// Runs the popup's UI in a normal window, resizable by its edges and corners. Esc closes it.
+///
+/// It starts floating, even with tiling on: COSMIC (cosmic-comp `Shell::map_window`) decides
+/// floating or tiled once, when a window first appears, and floats one whose minimum and
+/// maximum size are equal. So it opens with both at [`WINDOW_SIZE`], and once it's on screen
+/// ([`Message::WindowShown`]) the maximum goes and the minimum drops to [`WINDOW_MIN_SIZE`].
 pub fn run_window() -> cosmic::iced::Result {
     let settings = cosmic::app::Settings::default()
         .size(WINDOW_SIZE)
@@ -109,7 +125,7 @@ pub fn run_window() -> cosmic::iced::Result {
                 .min_height(WINDOW_SIZE.height)
                 .max_height(WINDOW_SIZE.height),
         )
-        .resizable(None);
+        .resizable(Some(WINDOW_RESIZE_BORDER));
     cosmic::app::run::<AppModel>(settings, Mode::Window)
 }
 
@@ -147,6 +163,9 @@ pub struct AppModel {
     settings: SettingsLoad,
     /// A settings write is running in the helper.
     saving_settings: bool,
+    /// Window mode: the window is on screen and its size limits are relaxed (see
+    /// [`run_window`]).
+    window_resizable: bool,
     /// The symbolic Apsis icon, from the icon theme or embedded.
     icon: icon::Handle,
 }
@@ -369,6 +388,8 @@ pub enum Message {
     SettingsActivate(usize),
     /// A settings hint button.
     SettingsKey(KeyAction),
+    /// Window mode: the window is on screen (first focus, or the fallback timer).
+    WindowShown,
 }
 
 impl cosmic::Application for AppModel {
@@ -411,6 +432,7 @@ impl cosmic::Application for AppModel {
             overlay: Overlay::None,
             settings: SettingsLoad::NotLoaded,
             saving_settings: false,
+            window_resizable: false,
             icon: symbolic_icon(),
         };
         let task = match mode {
@@ -477,6 +499,10 @@ impl cosmic::Application for AppModel {
         if self.popup.is_some() || self.menu.is_some() {
             subscriptions.push(event::listen_with(key_action));
         }
+        if self.mode == Mode::Window && !self.window_resizable {
+            subscriptions.push(event::listen_with(window_focused));
+            subscriptions.push(time::every(WINDOW_SHOWN_FALLBACK).map(|_| Message::WindowShown));
+        }
         let settings_busy =
             self.saving_settings || matches!(self.settings, SettingsLoad::Loading { .. });
         if self.popup.is_some() && (self.loading || self.running.is_some() || settings_busy) {
@@ -505,6 +531,7 @@ impl cosmic::Application for AppModel {
             Message::SettingsSelect(index) => return self.select_setting(index, false),
             Message::SettingsActivate(index) => return self.select_setting(index, true),
             Message::SettingsKey(action) => return self.on_key(action),
+            Message::WindowShown => return self.make_window_resizable(),
             Message::MenuPanelSettings => {
                 let close = self.close_menu();
                 let mut settings = std::process::Command::new("cosmic-settings");
@@ -608,6 +635,22 @@ impl AppModel {
         self.core.set_header_title(fl!("app-title"));
         self.popup = self.core.main_window_id();
         Task::batch([focus_input(), self.start_list()])
+    }
+
+    /// Window mode, once the window is on screen: drops the maximum size and lowers the minimum,
+    /// so it can be resized. COSMIC has already placed it floating (see [`run_window`]).
+    fn make_window_resizable(&mut self) -> Task<cosmic::Action<Message>> {
+        if self.mode != Mode::Window || self.window_resizable {
+            return Task::none();
+        }
+        let Some(id) = self.core.main_window_id() else {
+            return Task::none();
+        };
+        self.window_resizable = true;
+        Task::batch([
+            window::set_max_size(id, None),
+            window::set_min_size(id, Some(WINDOW_MIN_SIZE)),
+        ])
     }
 
     /// Closes the popup, or in window mode the window (which quits Apsis).
@@ -1262,6 +1305,14 @@ impl AppModel {
         }
     }
 
+    /// How much of a comment a snapshot row shows before the pane width cuts it.
+    fn row_comment_chars(&self) -> usize {
+        match self.mode {
+            Mode::Applet => ROW_COMMENT_CHARS,
+            Mode::Window => MAX_COMMENT_CHARS,
+        }
+    }
+
     /// In window mode the panes fill the window's height instead.
     fn pane_height(&self) -> Length {
         match self.mode {
@@ -1410,7 +1461,7 @@ impl AppModel {
             "{}   {:<4}  {}",
             fmt::when(snapshot.created),
             fmt::tag_letters(&snapshot.tags),
-            fmt::truncate(&fmt::quoted_comment(snapshot), ROW_COMMENT_CHARS),
+            fmt::truncate(&fmt::quoted_comment(snapshot), self.row_comment_chars()),
         );
         let line = widget::row::with_children(vec![
             monotext(if selected { "▸" } else { " " })
@@ -2271,6 +2322,15 @@ fn key_action(event: event::Event, status: event::Status, window: Id) -> Option<
     Some(Message::Key(window, action))
 }
 
+/// Window mode: the main window got focus, so it's on screen.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the signature event::listen_with takes"
+)]
+fn window_focused(event: event::Event, _status: event::Status, _window: Id) -> Option<Message> {
+    matches!(event, event::Event::Window(window::Event::Focused)).then_some(Message::WindowShown)
+}
+
 /// Debug aid: popup keyboard focus changes, as the Wayland backend reports them.
 fn log_focus_event(event: &event::Event, window: Id) {
     use cosmic::iced::event::PlatformSpecific;
@@ -2478,6 +2538,7 @@ mod tests {
             overlay: Overlay::None,
             settings: SettingsLoad::NotLoaded,
             saving_settings: false,
+            window_resizable: false,
             icon: symbolic_icon(),
         }
     }
@@ -2569,6 +2630,38 @@ mod tests {
         assert!(app.popup.is_some());
         assert_eq!(app.popup, app.core.main_window_id());
         assert!(app.loading);
+    }
+
+    #[test]
+    fn window_opens_at_the_popup_size_and_can_shrink_but_not_below_the_footer() {
+        assert_eq!(WINDOW_SIZE.width, POPUP_WIDTH);
+        let app = window_model();
+        assert_eq!(app.pane_height(), Length::Fill);
+    }
+
+    #[test]
+    fn window_becomes_resizable_once_shown() {
+        let mut app = window_model();
+        assert!(!app.window_resizable);
+        send(&mut app, Message::WindowShown);
+        assert!(app.window_resizable);
+        // Later focus changes and ticks change nothing.
+        send(&mut app, Message::WindowShown);
+        assert!(app.window_resizable);
+        let focused = event::Event::Window(window::Event::Focused);
+        assert!(window_focused(focused, event::Status::Ignored, Id::unique()).is_some());
+
+        let mut applet = model();
+        send(&mut applet, Message::WindowShown);
+        assert!(!applet.window_resizable);
+    }
+
+    #[test]
+    fn window_rows_leave_long_comments_to_the_pane_width() {
+        let mut app = window_model();
+        assert_eq!(app.row_comment_chars(), MAX_COMMENT_CHARS);
+        app.mode = Mode::Applet;
+        assert_eq!(app.row_comment_chars(), ROW_COMMENT_CHARS);
     }
 
     #[test]
