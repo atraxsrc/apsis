@@ -59,8 +59,9 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
 | d | delete selected → `> delete 2026-09-18_12-41-00? [y/N] _`; Enter with `y` deletes, anything else cancels |
 | r | refresh list |
 | Enter | make the details pane active, or go back to the list |
+| s | settings view (see below) |
 | ? | help overlay |
-| Esc | cancel input, then go back from details/help/about, then close the popup |
+| Esc | cancel input, then go back from details/help/about/settings, then close the popup |
 
 ## States
 
@@ -91,6 +92,40 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
 
   No "Quit": the panel owns the applet process. Only one of popup and menu is open at a time.
   Esc closes the menu.
+
+## Settings view (Phase 4.5)
+
+`s`, the `[s]ettings` hint, or **Settings…** in the right-click menu shows Timeshift's settings
+in the left pane (title `settings`, `settings (unsaved)` with changes). The right pane explains
+the selected row. Needs `apsis-helper`: it reads and writes `/etc/timeshift/timeshift.json`.
+
+```
+ ╭─ settings (unsaved) ──────────────────────────╮ ╭─ details ────────────────────╮
+ │ ▸ device    sdb1  ext4  931.5G  Backup        │ │ path   /dev/sdb1             │
+ │   mode      rsync                             │ │ type   ext4                  │
+ │   schedule  [ ] monthly  keep 2               │ │ ...                          │
+ │             [x] daily    keep 5               │ │                              │
+ │   home      root       everything             │ │                              │
+ │   filters   + /root/**                        │ │                              │
+ │             + add filter…                     │ │                              │
+ ╰───────────────────────────────────────────────╯ ╰──────────────────────────────╯
+ [space]change  [+]  [-]  [a]dd  [x]remove  [w]rite  [r]eload                [esc]
+```
+
+- Rows: device (space picks the next device that can hold snapshots), mode (rsync/btrfs; btrfs
+  only when a btrfs filesystem exists), `@home` (btrfs mode), the five schedules (space on/off,
+  `+`/`-` or `e` for the count), home folders per user (rsync mode; space cycles excluded /
+  hidden files only / everything, as Timeshift's Users tab), the filters (`x` removes), and
+  `+ add filter…` (`a` anywhere).
+- `> add filter: _` and `> keep daily: _` use the `>` line; Enter sets, Esc cancels. A bad value
+  stays in the prompt with the reason in the activity pane.
+- `w` checks the changes, then the helper writes them (password once, cached like create). The
+  activity pane shows `writing settings ⠹`, then the result; the settings are read back and the
+  list refreshed. `r` reads them again, dropping changes.
+- Esc with unsaved changes warns once; the second Esc drops them.
+- If Timeshift's own window is open, the activity pane warns: it saves its settings over these
+  when it closes.
+- Keys that act on snapshots (`c`, `d`) do nothing here.
 
 ## Window mode
 

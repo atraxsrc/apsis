@@ -42,6 +42,16 @@ pub enum Error {
     /// [`MAX_OUTPUT_LINES`]: crate::MAX_OUTPUT_LINES
     #[error("timeshift failed (exit code {code:?}): {output}")]
     Failed { code: Option<i32>, output: String },
+    /// Timeshift's settings file can't be edited safely (not JSON, or a field Timeshift reads
+    /// as a string isn't one).
+    #[error("timeshift.json: {0}")]
+    InvalidConfig(String),
+    /// Settings that mustn't be written (see `settings::validate`).
+    #[error("{0}")]
+    InvalidSettings(String),
+    /// Timeshift's settings file changed since it was read (Timeshift itself saved it).
+    #[error("timeshift.json changed since it was read; reload the settings")]
+    SettingsChanged,
     #[error(transparent)]
     Io(#[from] io::Error),
 }

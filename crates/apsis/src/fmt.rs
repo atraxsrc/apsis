@@ -81,6 +81,22 @@ pub fn short_uuid(uuid: &str) -> String {
     truncate(uuid, 5)
 }
 
+/// A device size the way lsblk prints it: `931.5G`, `512M`, binary units.
+#[must_use]
+pub fn size(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "K", "M", "G", "T", "P"];
+    #[allow(clippy::cast_precision_loss, reason = "one decimal shown")]
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    let text = format!("{value:.1}");
+    let text = text.strip_suffix(".0").unwrap_or(&text);
+    format!("{text}{}", UNITS[unit])
+}
+
 /// The last `n` non-blank lines of `text`, trimmed on the right.
 #[must_use]
 pub fn tail(text: &str, n: usize) -> Vec<String> {
@@ -99,6 +115,14 @@ pub fn tail(text: &str, n: usize) -> Vec<String> {
 mod tests {
     use super::*;
     use jiff::civil::date;
+
+    #[test]
+    fn sizes_like_lsblk() {
+        assert_eq!(size(0), "0B");
+        assert_eq!(size(512 * 1024 * 1024), "512M");
+        assert_eq!(size(1_000_203_837_440), "931.5G");
+        assert_eq!(size(2 * 1024_u64.pow(4)), "2T");
+    }
 
     #[test]
     fn ago_buckets() {

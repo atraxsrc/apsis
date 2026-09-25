@@ -5,6 +5,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use apsis_core::helper::HelperClient;
+use apsis_core::settings::{HomeState, Level, Settings, SettingsInfo};
 use apsis_core::{
     Backend, MAX_COMMENT_CHARS, PkexecRunner, Snapshot, SnapshotList, TimeshiftCli,
     validate_comment,
@@ -28,6 +29,7 @@ use cosmic::{Theme, theme};
 use crate::config::Config;
 use crate::fl;
 use crate::fmt;
+use crate::settings_view::{Row, Section, SettingsView};
 
 /// Popup width in logical pixels (UI.md: ~720, room for the list and details side by side).
 const POPUP_WIDTH: f32 = 720.0;
@@ -52,6 +54,10 @@ const TITLE_INSET: f32 = 10.0;
 const DETAILS_KEY_WIDTH: f32 = 64.0;
 /// Key column in the help and About views.
 const HELP_KEY_WIDTH: f32 = 80.0;
+/// Section column in the settings view (`schedule` is the longest).
+const SETTINGS_KEY_WIDTH: f32 = 72.0;
+/// Longest filter typed at the `>` line.
+const FILTER_CHARS: usize = 512;
 /// Longest comment shown in a row; the row also ellipsizes to the pane width, and the details
 /// pane shows all of it.
 const ROW_COMMENT_CHARS: usize = 28;
@@ -74,6 +80,7 @@ const LICENSE: &str = env!("CARGO_PKG_LICENSE");
 const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 
 static LIST_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("snapshot-list"));
+static SETTINGS_LIST_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("settings-list"));
 /// The `>` input line. Keeping it focused gives the popup a focused widget for key input.
 static INPUT_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("prompt-input"));
 /// `APSIS_DEBUG_KEYS=1` logs key and popup focus events to stderr, to see where keys get lost.
@@ -136,8 +143,24 @@ pub struct AppModel {
     /// Index into the displayed (newest first) snapshots.
     selected: usize,
     overlay: Overlay,
+    /// Timeshift's settings, for the settings view.
+    settings: SettingsLoad,
+    /// A settings write is running in the helper.
+    saving_settings: bool,
     /// The symbolic Apsis icon, from the icon theme or embedded.
     icon: icon::Handle,
+}
+
+/// Where the settings view's data is.
+#[derive(Debug, Clone)]
+enum SettingsLoad {
+    NotLoaded,
+    /// Keeps the selected row across a reload.
+    Loading {
+        cursor: usize,
+    },
+    Failed(String),
+    Ready(Box<SettingsView>),
 }
 
 /// What the last list produced.
@@ -197,6 +220,10 @@ enum Prompt {
     Comment(String),
     /// `> delete <name>? [y/N] _`. Enter with `y` deletes, anything else cancels.
     ConfirmDelete { name: String, typed: String },
+    /// Settings: `> add filter: _`. Enter adds it.
+    Filter(String),
+    /// Settings: `> keep daily: 5_`. Enter sets the count.
+    Count { level: Level, typed: String },
 }
 
 /// A create or delete, run as root.
@@ -263,6 +290,7 @@ enum Overlay {
     Details,
     Help,
     About,
+    Settings,
 }
 
 /// Keys the popup reacts to (see UI.md).
@@ -278,6 +306,19 @@ pub enum KeyAction {
     Create,
     Delete,
     Escape,
+    /// `s`: the settings view.
+    Settings,
+    /// Settings: space changes the selected row.
+    Toggle,
+    /// Settings: `+` / `-` change a schedule's count, `e` types it.
+    More,
+    Less,
+    Edit,
+    /// Settings: `a` adds a filter, `x` removes the selected one.
+    Add,
+    Remove,
+    /// Settings: `w` writes them to Timeshift.
+    Write,
 }
 
 /// Messages emitted by the application and its widgets.
@@ -290,6 +331,8 @@ pub enum Message {
     MenuRefresh,
     /// Menu: open the popup on the About view.
     MenuAbout,
+    /// Menu: open the popup on the settings view.
+    MenuSettings,
     /// Menu: `cosmic-settings panel`.
     MenuPanelSettings,
     /// The repository link in the About view.
@@ -316,6 +359,16 @@ pub enum Message {
     OpenDetails(usize),
     ToggleHelp,
     Escape,
+    /// `[s]ettings` hint.
+    OpenSettings,
+    SettingsRead(Result<SettingsInfo, CliError>),
+    /// A settings write finished: a note from the helper (empty when all went well).
+    SettingsWritten(Result<String, CliError>),
+    /// A click on a settings row, and a double-click (changes it, like space).
+    SettingsSelect(usize),
+    SettingsActivate(usize),
+    /// A settings hint button.
+    SettingsKey(KeyAction),
 }
 
 impl cosmic::Application for AppModel {
@@ -356,6 +409,8 @@ impl cosmic::Application for AppModel {
             spinner: 0,
             selected: 0,
             overlay: Overlay::None,
+            settings: SettingsLoad::NotLoaded,
+            saving_settings: false,
             icon: symbolic_icon(),
         };
         let task = match mode {
@@ -422,7 +477,9 @@ impl cosmic::Application for AppModel {
         if self.popup.is_some() || self.menu.is_some() {
             subscriptions.push(event::listen_with(key_action));
         }
-        if self.popup.is_some() && (self.loading || self.running.is_some()) {
+        let settings_busy =
+            self.saving_settings || matches!(self.settings, SettingsLoad::Loading { .. });
+        if self.popup.is_some() && (self.loading || self.running.is_some() || settings_busy) {
             subscriptions.push(time::every(Duration::from_millis(80)).map(|_| Message::Tick));
         }
         Subscription::batch(subscriptions)
@@ -441,6 +498,13 @@ impl cosmic::Application for AppModel {
                 return Task::batch([open, self.start_list()]);
             }
             Message::MenuAbout => return self.open_popup(Overlay::About),
+            Message::MenuSettings => return self.open_settings_popup(),
+            Message::OpenSettings => return self.on_key(KeyAction::Settings),
+            Message::SettingsRead(result) => return self.on_settings_read(result),
+            Message::SettingsWritten(result) => return self.on_settings_written(result),
+            Message::SettingsSelect(index) => return self.select_setting(index, false),
+            Message::SettingsActivate(index) => return self.select_setting(index, true),
+            Message::SettingsKey(action) => return self.on_key(action),
             Message::MenuPanelSettings => {
                 let close = self.close_menu();
                 let mut settings = std::process::Command::new("cosmic-settings");
@@ -488,6 +552,12 @@ impl cosmic::Application for AppModel {
                 }
                 Prompt::ConfirmDelete { typed, .. } => {
                     *typed = text.chars().take(CONFIRM_CHARS).collect();
+                }
+                Prompt::Filter(pattern) => {
+                    *pattern = text.chars().take(FILTER_CHARS).collect();
+                }
+                Prompt::Count { typed, .. } => {
+                    *typed = text.chars().filter(char::is_ascii_digit).take(3).collect();
                 }
             },
             Message::Submit => return self.submit(),
@@ -632,7 +702,7 @@ impl AppModel {
     /// Lists in the background, through `apsis-helper` or pkexec. Does nothing while a list,
     /// create or delete is running (Timeshift runs one at a time).
     fn start_list(&mut self) -> Task<cosmic::Action<Message>> {
-        if self.loading || self.running.is_some() {
+        if self.loading || self.running.is_some() || self.saving_settings {
             return Task::none();
         }
         self.loading = true;
@@ -691,6 +761,9 @@ impl AppModel {
                 _ => Task::none(),
             };
         }
+        if self.overlay == Overlay::Settings {
+            return self.settings_key(action);
+        }
         let count = self.snapshots().len();
         let target = match action {
             KeyAction::Up => self.selected.checked_sub(1),
@@ -728,31 +801,233 @@ impl AppModel {
                 None
             }
             KeyAction::Escape => return self.escape(),
+            KeyAction::Settings => {
+                self.overlay = Overlay::Settings;
+                return self.load_settings_if_needed();
+            }
+            // Settings keys.
+            KeyAction::Toggle
+            | KeyAction::More
+            | KeyAction::Less
+            | KeyAction::Edit
+            | KeyAction::Add
+            | KeyAction::Remove
+            | KeyAction::Write => None,
         };
         let Some(index) = target else {
             return Task::none();
         };
         self.selected = index;
-        // Scrolling to selected / (count - 1) of the way down always keeps an equal-height row
-        // in view, from the first row at the top to the last at the bottom.
-        #[allow(clippy::cast_precision_loss, reason = "a handful of rows")]
-        let y = if count > 1 {
-            index as f32 / (count - 1) as f32
-        } else {
-            0.0
+        scroll_to(&LIST_ID, index, count)
+    }
+
+    /// Keys in the settings view. Changes stay in the view until `w` writes them.
+    fn settings_key(&mut self, action: KeyAction) -> Task<cosmic::Action<Message>> {
+        match action {
+            KeyAction::Escape | KeyAction::Settings => return self.escape(),
+            KeyAction::Help => {
+                self.toggle_overlay(Overlay::Help);
+                return Task::none();
+            }
+            // Reads the file again, dropping unsaved changes.
+            KeyAction::Refresh => return self.load_settings(),
+            KeyAction::Write => return self.save_settings(),
+            _ => {}
+        }
+        let SettingsLoad::Ready(view) = &mut self.settings else {
+            return Task::none();
         };
-        snap_to(
-            LIST_ID.clone(),
-            RelativeOffset {
-                x: None,
-                y: Some(y),
+        if self.saving_settings {
+            return Task::none();
+        }
+        let rows = view.rows().len();
+        let result = match action {
+            KeyAction::Up | KeyAction::Down | KeyAction::First | KeyAction::Last => {
+                let index = match action {
+                    KeyAction::Up => view.cursor.saturating_sub(1),
+                    KeyAction::Down => view.cursor + 1,
+                    KeyAction::First => 0,
+                    _ => rows - 1,
+                };
+                view.select(index);
+                return scroll_to(&SETTINGS_LIST_ID, view.cursor, rows);
+            }
+            KeyAction::Details | KeyAction::Toggle if view.current() == Row::AddFilter => {
+                self.prompt = Prompt::Filter(String::new());
+                self.status = None;
+                return focus_input();
+            }
+            KeyAction::Add => {
+                self.prompt = Prompt::Filter(String::new());
+                self.status = None;
+                return focus_input();
+            }
+            KeyAction::Edit => match view.current() {
+                Row::Schedule(level) => {
+                    let typed = view.edited.count(level).to_string();
+                    self.prompt = Prompt::Count { level, typed };
+                    self.status = None;
+                    return focus_input();
+                }
+                _ => Err(fl!("settings-edit-hint")),
             },
-        )
+            KeyAction::Details | KeyAction::Toggle => view.change(),
+            KeyAction::More => view.adjust_count(true),
+            KeyAction::Less => view.adjust_count(false),
+            KeyAction::Remove => view.remove_filter(),
+            // Snapshot keys do nothing here.
+            _ => Ok(()),
+        };
+        self.status = result.err().map(Status::Error);
+        Task::none()
+    }
+
+    /// Menu: the popup on the settings view.
+    fn open_settings_popup(&mut self) -> Task<cosmic::Action<Message>> {
+        let open = self.open_popup(Overlay::Settings);
+        Task::batch([open, self.load_settings_if_needed()])
+    }
+
+    /// A click on a settings row selects it; a double-click (`change`) changes it, like space.
+    fn select_setting(&mut self, index: usize, change: bool) -> Task<cosmic::Action<Message>> {
+        if let SettingsLoad::Ready(view) = &mut self.settings {
+            view.select(index);
+        }
+        if change {
+            return self.on_key(KeyAction::Toggle);
+        }
+        Task::none()
+    }
+
+    /// Reads the settings unless they're loading, or edited and not saved yet.
+    fn load_settings_if_needed(&mut self) -> Task<cosmic::Action<Message>> {
+        match &self.settings {
+            SettingsLoad::Loading { .. } => Task::none(),
+            SettingsLoad::Ready(view) if view.dirty() => Task::none(),
+            _ => self.load_settings(),
+        }
+    }
+
+    /// Reads Timeshift's settings through the helper, dropping unsaved changes.
+    fn load_settings(&mut self) -> Task<cosmic::Action<Message>> {
+        if self.saving_settings || matches!(self.settings, SettingsLoad::Loading { .. }) {
+            return Task::none();
+        }
+        let cursor = match &self.settings {
+            SettingsLoad::Ready(view) => view.cursor,
+            _ => 0,
+        };
+        self.settings = SettingsLoad::Loading { cursor };
+        self.spinner = 0;
+        cosmic::task::future(async { Message::SettingsRead(read_settings().await) })
+    }
+
+    fn on_settings_read(
+        &mut self,
+        result: Result<SettingsInfo, CliError>,
+    ) -> Task<cosmic::Action<Message>> {
+        let cursor = match self.settings {
+            SettingsLoad::Loading { cursor } => cursor,
+            _ => 0,
+        };
+        self.settings = match result {
+            Ok(info) => {
+                let mut view = SettingsView::new(info);
+                view.select(cursor);
+                SettingsLoad::Ready(Box::new(view))
+            }
+            Err(error) => SettingsLoad::Failed(error_summary(&error, self.known_uuid.as_deref())),
+        };
+        if self.popup.is_some() {
+            return focus_input();
+        }
+        Task::none()
+    }
+
+    /// `w`: checks the edits here first (so a mistake shows before the password dialog), then
+    /// has the helper write them.
+    fn save_settings(&mut self) -> Task<cosmic::Action<Message>> {
+        if self.saving_settings || self.loading || self.running.is_some() {
+            return Task::none();
+        }
+        let SettingsLoad::Ready(view) = &self.settings else {
+            return Task::none();
+        };
+        if !view.dirty() {
+            self.status = Some(Status::Info(fl!("settings-unchanged")));
+            return Task::none();
+        }
+        if let Err(reason) = view.validate() {
+            self.status = Some(Status::Error(reason));
+            return Task::none();
+        }
+        let (expected, settings) = (view.info.text.clone(), view.edited.clone());
+        self.saving_settings = true;
+        self.status = None;
+        self.spinner = 0;
+        cosmic::task::future(async move {
+            Message::SettingsWritten(write_settings(expected, settings).await)
+        })
+    }
+
+    /// Shows how the write went. Once written, reads the settings back and lists again (the
+    /// backup device may have changed).
+    fn on_settings_written(
+        &mut self,
+        result: Result<String, CliError>,
+    ) -> Task<cosmic::Action<Message>> {
+        self.saving_settings = false;
+        let written = result.is_ok();
+        self.status = Some(match result {
+            Ok(note) if note.is_empty() => Status::Info(fl!("settings-saved")),
+            Ok(note) => Status::Error(fl!("settings-saved-note", note = note)),
+            Err(error) => Status::Error(fl!(
+                "settings-failed",
+                reason = error_summary(&error, self.known_uuid.as_deref())
+            )),
+        });
+        let mut tasks = Vec::new();
+        if written {
+            tasks.push(self.load_settings());
+            tasks.push(self.start_list());
+        }
+        // The polkit dialog took keyboard focus; hand it back to the `>` line.
+        if self.popup.is_some() {
+            tasks.push(focus_input());
+        }
+        Task::batch(tasks)
     }
 
     /// Enter: runs what the prompt asked for, or shows details.
     fn submit(&mut self) -> Task<cosmic::Action<Message>> {
         match std::mem::replace(&mut self.prompt, Prompt::Command) {
+            Prompt::Command if self.overlay == Overlay::Settings => {
+                self.settings_key(KeyAction::Toggle)
+            }
+            Prompt::Filter(pattern) => {
+                if let SettingsLoad::Ready(view) = &mut self.settings {
+                    match view.add_filter(&pattern) {
+                        Ok(()) => self.status = None,
+                        Err(reason) => {
+                            self.status = Some(Status::Error(reason));
+                            self.prompt = Prompt::Filter(pattern);
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Prompt::Count { level, typed } => {
+                if let SettingsLoad::Ready(view) = &mut self.settings {
+                    match view.set_count(level, &typed) {
+                        Ok(()) => self.status = None,
+                        Err(reason) => {
+                            self.status = Some(Status::Error(reason));
+                            self.prompt = Prompt::Count { level, typed };
+                        }
+                    }
+                }
+                Task::none()
+            }
             Prompt::Command => {
                 if !self.snapshots().is_empty() {
                     self.toggle_overlay(Overlay::Details);
@@ -781,7 +1056,7 @@ impl AppModel {
 
     /// Creates or deletes in the background, through `apsis-helper` or pkexec.
     fn run(&mut self, operation: Operation) -> Task<cosmic::Action<Message>> {
-        if self.loading || self.running.is_some() {
+        if self.loading || self.running.is_some() || self.saving_settings {
             return Task::none();
         }
         self.running = Some(operation.clone());
@@ -844,6 +1119,20 @@ impl AppModel {
             self.status = None;
             // Esc also unfocused the `>` line.
             return focus_input();
+        }
+        if self.overlay == Overlay::Settings
+            && let SettingsLoad::Ready(view) = &mut self.settings
+            && view.dirty()
+        {
+            // Unsaved changes: the first Esc warns, the second drops them.
+            if !view.discard_armed {
+                view.discard_armed = true;
+                self.status = Some(Status::Info(fl!("settings-unsaved")));
+                return focus_input();
+            }
+            view.edited = view.saved();
+            view.discard_armed = false;
+            self.status = None;
         }
         if self.overlay != Overlay::None {
             self.overlay = Overlay::None;
@@ -951,6 +1240,10 @@ impl AppModel {
         match self.overlay {
             Overlay::Help => fl!("pane-help"),
             Overlay::About => fl!("pane-about"),
+            Overlay::Settings => match &self.settings {
+                SettingsLoad::Ready(view) if view.dirty() => fl!("pane-settings-unsaved"),
+                _ => fl!("pane-settings"),
+            },
             Overlay::None | Overlay::Details => fl!("pane-snapshots"),
         }
     }
@@ -959,9 +1252,8 @@ impl AppModel {
     /// [`MIN_ROWS`] and [`VISIBLE_ROWS`] (longer lists scroll), or enough for what's shown instead.
     fn pane_rows(&self) -> u16 {
         match (self.overlay, &self.listing) {
-            (Overlay::Help, _) | (Overlay::None | Overlay::Details, Listing::Failed(_)) => {
-                VISIBLE_ROWS
-            }
+            (Overlay::Help | Overlay::Settings, _)
+            | (Overlay::None | Overlay::Details, Listing::Failed(_)) => VISIBLE_ROWS,
             (Overlay::About, _) => MIN_ROWS + 1,
             (_, Listing::Loaded(list)) => u16::try_from(list.snapshots.len())
                 .unwrap_or(u16::MAX)
@@ -981,6 +1273,7 @@ impl AppModel {
     /// The left pane: the list (or why there is none), help or About.
     fn body(&self) -> Element<'_, Message> {
         let content = match (self.overlay, &self.listing) {
+            (Overlay::Settings, _) => self.settings_body(),
             (Overlay::Help, _) => scroll(help()),
             (Overlay::About, _) => scroll(about()),
             (_, Listing::Loaded(list)) if list.snapshots.is_empty() => {
@@ -1003,9 +1296,10 @@ impl AppModel {
 
     /// The right pane: everything about the selected snapshot.
     fn details(&self) -> Element<'_, Message> {
-        let content = match self.snapshots().get(self.selected) {
-            Some(snapshot) => scroll(details(snapshot)),
-            None => widget::column::with_children(vec![
+        let content = match (self.overlay, self.snapshots().get(self.selected)) {
+            (Overlay::Settings, _) => scroll(self.settings_details()),
+            (_, Some(snapshot)) => scroll(details(snapshot)),
+            (_, None) => widget::column::with_children(vec![
                 monotext(fl!("details-none"))
                     .class(theme::Text::Custom(dim_text))
                     .into(),
@@ -1030,6 +1324,19 @@ impl AppModel {
                 format!("{} {spinner}", fl!("deleting", name = name.clone())),
                 Tone::Normal,
             ),
+            (None, _) if self.saving_settings => (
+                format!("{} {spinner}", fl!("settings-saving")),
+                Tone::Normal,
+            ),
+            (None, _)
+                if self.overlay == Overlay::Settings
+                    && matches!(self.settings, SettingsLoad::Loading { .. }) =>
+            {
+                (
+                    format!("{} {spinner}", fl!("settings-reading")),
+                    Tone::Normal,
+                )
+            }
             (None, Some(Status::Info(text))) => (text.clone(), Tone::Dim),
             (None, Some(Status::Error(text))) => (text.clone(), Tone::Error),
             (None, None) => (fl!("activity-idle"), Tone::Dim),
@@ -1062,9 +1369,20 @@ impl AppModel {
                 .class(theme::Text::Custom(warning_text))
                 .into()
         }));
+        if self.overlay == Overlay::Settings
+            && let SettingsLoad::Ready(view) = &self.settings
+            && view.info.timeshift_gui_open
+        {
+            lines.push(
+                monotext(fl!("settings-gui-open"))
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .class(theme::Text::Custom(warning_text))
+                    .into(),
+            );
+        }
         pane(
             fl!("pane-activity"),
-            self.running.is_some(),
+            self.running.is_some() || self.saving_settings,
             Length::Fill,
             widget::column::with_children(lines)
                 .spacing(2)
@@ -1123,6 +1441,9 @@ impl AppModel {
     /// The footer: `[c]reate  [d]elete  [r]efresh  [?]help            [esc]`. Each hint is a
     /// button.
     fn hints(&self) -> Element<'_, Message> {
+        if self.overlay == Overlay::Settings {
+            return self.settings_hints();
+        }
         let refresh = if matches!(self.listing, Listing::Failed(_)) {
             "[r]etry"
         } else {
@@ -1139,6 +1460,7 @@ impl AppModel {
                 self.can_delete().then_some(Message::StartDelete),
             ),
             hint(refresh, idle.then_some(Message::Refresh)),
+            hint("[s]ettings", Some(Message::OpenSettings)),
             hint("[?]help", Some(Message::ToggleHelp)),
             widget::space::horizontal().into(),
             hint("[esc]", Some(Message::Escape)),
@@ -1148,11 +1470,158 @@ impl AppModel {
         .into()
     }
 
+    /// The footer in the settings view: `[space]change [+] [-] [a]dd [x]remove [w]rite
+    /// [r]eload            [esc]`.
+    fn settings_hints(&self) -> Element<'_, Message> {
+        let ready = matches!(self.settings, SettingsLoad::Ready(_)) && !self.saving_settings;
+        let key = |label, action| hint(label, ready.then_some(Message::SettingsKey(action)));
+        let reload =
+            !self.saving_settings && !matches!(self.settings, SettingsLoad::Loading { .. });
+        widget::row::with_children(vec![
+            key("[space]change", KeyAction::Toggle),
+            key("[+]", KeyAction::More),
+            key("[-]", KeyAction::Less),
+            key("[a]dd", KeyAction::Add),
+            key("[x]remove", KeyAction::Remove),
+            key("[w]rite", KeyAction::Write),
+            hint(
+                "[r]eload",
+                reload.then_some(Message::SettingsKey(KeyAction::Refresh)),
+            ),
+            widget::space::horizontal().into(),
+            hint("[esc]", Some(Message::Escape)),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+    }
+
+    /// The settings view's left pane: one row per setting, or why there are none.
+    fn settings_body(&self) -> Element<'_, Message> {
+        match &self.settings {
+            SettingsLoad::NotLoaded | SettingsLoad::Loading { .. } => {
+                lines([fl!("settings-reading")])
+            }
+            SettingsLoad::Failed(reason) => scroll(
+                widget::column::with_children(vec![
+                    monotext(fl!("settings-read-failed"))
+                        .class(theme::Text::Custom(error_text))
+                        .into(),
+                    monotext(reason.clone())
+                        .wrapping(Wrapping::WordOrGlyph)
+                        .into(),
+                ])
+                .spacing(2)
+                .padding([4, 6]),
+            ),
+            SettingsLoad::Ready(view) => {
+                let rows = view.rows();
+                let lines = rows.iter().enumerate().map(|(index, &row)| {
+                    let first = index == 0 || rows[index - 1].section() != row.section();
+                    settings_row(view, index, row, first)
+                });
+                widget::scrollable(widget::column::with_children(lines))
+                    .id(SETTINGS_LIST_ID.clone())
+                    .padding(0.0)
+                    .direction(Direction::Vertical(thin_scrollbar()))
+                    .height(Length::Shrink)
+                    .into()
+            }
+        }
+    }
+
+    /// The settings view's right pane: what the selected row means.
+    fn settings_details(&self) -> Element<'_, Message> {
+        let SettingsLoad::Ready(view) = &self.settings else {
+            return lines([]);
+        };
+        let row = view.current();
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        let note = match row {
+            Row::Device => match view.device() {
+                Some(device) => {
+                    pairs.extend([
+                        (fl!("settings-key-path"), device.path()),
+                        (fl!("settings-key-type"), device.fstype.clone()),
+                        (fl!("settings-key-size"), fmt::size(device.size)),
+                        (fl!("settings-key-label"), device.label.clone()),
+                        (fl!("settings-key-uuid"), device.uuid.clone()),
+                    ]);
+                    fl!("settings-device-note")
+                }
+                None if view.edited.backup_device_uuid.is_empty() => fl!("settings-device-none"),
+                None => {
+                    let uuid = view.edited.backup_device_uuid.clone();
+                    pairs.push((fl!("settings-key-uuid"), uuid));
+                    fl!("settings-device-missing-note")
+                }
+            },
+            Row::Mode if view.edited.btrfs_mode => fl!("settings-mode-btrfs"),
+            Row::Mode if view.btrfs_available() => fl!("settings-mode-rsync"),
+            Row::Mode => fl!("settings-mode-rsync-only"),
+            Row::BtrfsHome => fl!("settings-btrfs-home-note"),
+            Row::Schedule(level) => {
+                pairs.push((
+                    fl!("settings-key-keep"),
+                    view.edited.count(level).to_string(),
+                ));
+                fl!("settings-schedule-note", level = level.name())
+            }
+            Row::Home(index) => {
+                let user = view.user(index);
+                pairs.extend([
+                    (fl!("settings-key-user"), user.name.clone()),
+                    (fl!("settings-key-home"), user.home.clone()),
+                    (
+                        fl!("settings-key-backup"),
+                        home_state_name(view.home_state(index)),
+                    ),
+                ]);
+                if user.encrypted_home {
+                    fl!("settings-home-encrypted")
+                } else {
+                    fl!("settings-home-note")
+                }
+            }
+            Row::Filter(index) => {
+                let pattern = &view.edited.exclude[index];
+                let kind = if pattern.starts_with("+ ") {
+                    fl!("settings-filter-include")
+                } else {
+                    fl!("settings-filter-exclude")
+                };
+                pairs.push((fl!("settings-key-kind"), kind));
+                fl!("settings-filter-note")
+            }
+            Row::AddFilter => fl!("settings-add-note"),
+        };
+        let mut rows: Vec<Element<'_, Message>> = pairs
+            .into_iter()
+            .map(|(key, value)| {
+                let value = monotext(value).wrapping(Wrapping::WordOrGlyph);
+                key_value_row(key, value.into(), DETAILS_KEY_WIDTH)
+            })
+            .collect();
+        rows.push(
+            monotext(note)
+                .wrapping(Wrapping::WordOrGlyph)
+                .class(theme::Text::Custom(dim_text))
+                .into(),
+        );
+        widget::column::with_children(rows)
+            .spacing(4)
+            .padding([4, 6])
+            .into()
+    }
+
     /// The right-click menu: a standard COSMIC applet menu, not the terminal look.
     fn menu_view(&self) -> Element<'_, Message> {
         let content = widget::column::with_children(vec![
             menu_button(body(fl!("menu-refresh")))
                 .on_press(Message::MenuRefresh)
+                .into(),
+            menu_button(body(fl!("menu-settings")))
+                .on_press(Message::MenuSettings)
                 .into(),
             menu_button(body(fl!("menu-about")))
                 .on_press(Message::MenuAbout)
@@ -1201,6 +1670,14 @@ impl AppModel {
                 typed.as_str(),
                 String::new(),
             ),
+            Prompt::Filter(pattern) => {
+                (Some(fl!("prompt-filter")), pattern.as_str(), String::new())
+            }
+            Prompt::Count { level, typed } => (
+                Some(fl!("prompt-count", level = level.name())),
+                typed.as_str(),
+                String::new(),
+            ),
             Prompt::Command if self.loading => (None, "", format!("timeshift --list {spinner}")),
             Prompt::Command => (None, "", String::new()),
         };
@@ -1224,6 +1701,131 @@ impl AppModel {
         ])
         .align_y(Alignment::Center)
         .into()
+    }
+}
+
+/// `▸ schedule  [x] daily    keep 5`: one settings row, the section name on the first row of
+/// each section. Click selects, double-click changes it like space.
+fn settings_row<'a>(
+    view: &SettingsView,
+    index: usize,
+    row: Row,
+    first: bool,
+) -> Element<'a, Message> {
+    let selected = index == view.cursor;
+    let section = if first {
+        section_name(row.section())
+    } else {
+        String::new()
+    };
+    let check = |on: bool| if on { "[x]" } else { "[ ]" };
+    let (text, dim) = match row {
+        Row::Device => match view.device() {
+            Some(device) => {
+                let mut parts = vec![
+                    device.name.clone(),
+                    device.fstype.clone(),
+                    fmt::size(device.size),
+                ];
+                if !device.label.is_empty() {
+                    parts.push(device.label.clone());
+                }
+                (parts.join("  "), false)
+            }
+            None if view.edited.backup_device_uuid.is_empty() => {
+                (fl!("settings-device-unset"), true)
+            }
+            None => (
+                fl!(
+                    "settings-device-away",
+                    id = fmt::short_uuid(&view.edited.backup_device_uuid)
+                ),
+                true,
+            ),
+        },
+        Row::Mode if view.edited.btrfs_mode => ("btrfs".to_owned(), false),
+        Row::Mode if view.btrfs_available() => ("rsync".to_owned(), false),
+        Row::Mode => (fl!("settings-rsync-only"), false),
+        Row::BtrfsHome => (
+            format!(
+                "{} {}",
+                check(view.edited.include_btrfs_home),
+                fl!("settings-btrfs-home")
+            ),
+            false,
+        ),
+        Row::Schedule(level) => (
+            format!(
+                "{} {:<8} {}",
+                check(view.edited.scheduled(level)),
+                level.name(),
+                fl!("settings-keep", count = view.edited.count(level))
+            ),
+            !view.edited.scheduled(level),
+        ),
+        Row::Home(index) => {
+            let user = view.user(index);
+            let state = view.home_state(index);
+            let encrypted = if user.encrypted_home {
+                format!("  {}", fl!("settings-encrypted"))
+            } else {
+                String::new()
+            };
+            let text = format!("{:<10} {}{encrypted}", user.name, home_state_name(state));
+            (text, state == HomeState::Excluded)
+        }
+        Row::Filter(index) => (view.edited.exclude[index].clone(), false),
+        Row::AddFilter => (fl!("settings-add-filter"), true),
+    };
+    let text = monotext(text)
+        .width(Length::Fill)
+        .wrapping(Wrapping::None)
+        .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)));
+    let text = if dim {
+        text.class(theme::Text::Custom(dim_text))
+    } else {
+        text
+    };
+    let line = widget::row::with_children(vec![
+        monotext(if selected { "▸" } else { " " })
+            .class(theme::Text::Accent)
+            .into(),
+        monotext(section)
+            .width(Length::Fixed(SETTINGS_KEY_WIDTH))
+            .class(theme::Text::Custom(dim_text))
+            .into(),
+        text.into(),
+    ])
+    .spacing(8);
+    let mut line = container(line)
+        .width(Length::Fill)
+        .height(Length::Fixed(ROW_HEIGHT))
+        .padding([2, 6]);
+    if selected {
+        line = line.class(theme::Container::custom(selected_row));
+    }
+    widget::mouse_area(line)
+        .on_press(Message::SettingsSelect(index))
+        .on_double_click(Message::SettingsActivate(index))
+        .interaction(mouse::Interaction::Pointer)
+        .into()
+}
+
+fn section_name(section: Section) -> String {
+    match section {
+        Section::Device => fl!("settings-device"),
+        Section::Mode => fl!("settings-mode"),
+        Section::Schedule => fl!("settings-schedule"),
+        Section::Home => fl!("settings-home"),
+        Section::Filters => fl!("settings-filters"),
+    }
+}
+
+fn home_state_name(state: HomeState) -> String {
+    match state {
+        HomeState::Excluded => fl!("settings-home-excluded"),
+        HomeState::Hidden => fl!("settings-home-hidden"),
+        HomeState::All => fl!("settings-home-all"),
     }
 }
 
@@ -1389,6 +1991,45 @@ async fn operate(pkexec: Arc<Cli>, operation: Operation) -> Result<(), CliError>
     .await
 }
 
+/// Timeshift's settings, the devices and the users, through `apsis-helper` (there's no pkexec
+/// fallback: writing the file safely needs the helper).
+async fn read_settings() -> Result<SettingsInfo, CliError> {
+    let helper = HelperClient::connect()
+        .await
+        .ok_or_else(|| CliError::Other(fl!("settings-need-helper")))?;
+    helper.read_settings().await.map_err(CliError::from)
+}
+
+/// Writes `settings` through `apsis-helper` if the file still reads `expected`.
+async fn write_settings(expected: String, settings: Settings) -> Result<String, CliError> {
+    let helper = HelperClient::connect()
+        .await
+        .ok_or_else(|| CliError::Other(fl!("settings-need-helper")))?;
+    helper
+        .write_settings(&expected, &settings)
+        .await
+        .map_err(CliError::from)
+}
+
+/// Scrolls list `id` so row `index` of `count` equal-height rows is in view: selected /
+/// (count - 1) of the way down keeps it there, from the first row at the top to the last at
+/// the bottom.
+fn scroll_to(id: &widget::Id, index: usize, count: usize) -> Task<cosmic::Action<Message>> {
+    #[allow(clippy::cast_precision_loss, reason = "a handful of rows")]
+    let y = if count > 1 {
+        index as f32 / (count - 1) as f32
+    } else {
+        0.0
+    };
+    snap_to(
+        id.clone(),
+        RelativeOffset {
+            x: None,
+            y: Some(y),
+        },
+    )
+}
+
 /// Runs blocking pkexec work off the UI's runtime.
 async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> apsis_core::Result<T> + Send + 'static,
@@ -1461,8 +2102,15 @@ fn help() -> Element<'static, Message> {
         ("c", fl!("help-create")),
         ("d", fl!("help-delete")),
         ("r", fl!("help-refresh")),
+        ("s", fl!("help-settings")),
         ("?", fl!("help-help")),
         ("Esc", fl!("help-escape")),
+        ("", String::new()),
+        ("space", fl!("help-settings-change")),
+        ("+ - e", fl!("help-settings-count")),
+        ("a x", fl!("help-settings-filters")),
+        ("w", fl!("help-settings-write")),
+        ("r", fl!("help-settings-reload")),
     ];
     key_value_rows(keys.map(|(k, v)| (k.to_owned(), v)), HELP_KEY_WIDTH)
 }
@@ -1568,6 +2216,14 @@ fn char_action(c: char) -> Option<KeyAction> {
         'c' => Some(KeyAction::Create),
         'd' => Some(KeyAction::Delete),
         '?' => Some(KeyAction::Help),
+        's' => Some(KeyAction::Settings),
+        ' ' => Some(KeyAction::Toggle),
+        '+' | '=' => Some(KeyAction::More),
+        '-' => Some(KeyAction::Less),
+        'e' => Some(KeyAction::Edit),
+        'a' => Some(KeyAction::Add),
+        'x' => Some(KeyAction::Remove),
+        'w' => Some(KeyAction::Write),
         _ => None,
     }
 }
@@ -1748,7 +2404,15 @@ mod tests {
         assert_eq!(char_action('?'), Some(KeyAction::Help));
         assert_eq!(char_action('c'), Some(KeyAction::Create));
         assert_eq!(char_action('d'), Some(KeyAction::Delete));
-        assert_eq!(char_action('x'), None);
+        assert_eq!(char_action('s'), Some(KeyAction::Settings));
+        assert_eq!(char_action(' '), Some(KeyAction::Toggle));
+        assert_eq!(char_action('+'), Some(KeyAction::More));
+        assert_eq!(char_action('-'), Some(KeyAction::Less));
+        assert_eq!(char_action('e'), Some(KeyAction::Edit));
+        assert_eq!(char_action('a'), Some(KeyAction::Add));
+        assert_eq!(char_action('x'), Some(KeyAction::Remove));
+        assert_eq!(char_action('w'), Some(KeyAction::Write));
+        assert_eq!(char_action('z'), None);
         assert_eq!(char_action('J'), None);
     }
 
@@ -1761,7 +2425,8 @@ mod tests {
             action(Key::Named(Named::Enter), ignored),
             Some(KeyAction::Details)
         );
-        assert_eq!(action(character("x"), ignored), None);
+        assert_eq!(action(character(" "), ignored), Some(KeyAction::Toggle));
+        assert_eq!(action(character("z"), ignored), None);
         assert_eq!(action(character("jj"), ignored), None);
     }
 
@@ -1811,6 +2476,8 @@ mod tests {
             spinner: 0,
             selected: 0,
             overlay: Overlay::None,
+            settings: SettingsLoad::NotLoaded,
+            saving_settings: false,
             icon: symbolic_icon(),
         }
     }
@@ -2312,6 +2979,181 @@ mod tests {
         assert_eq!(LICENSE, "GPL-3.0-only");
         assert!(REPOSITORY.starts_with("https://"));
         assert!(!VERSION.is_empty());
+    }
+
+    const CONFIG: &str = include_str!("../../apsis-core/tests/fixtures/config-rsync.json");
+    const LSBLK: &str = include_str!("../../apsis-core/tests/fixtures/lsblk.json");
+
+    fn settings_info() -> SettingsInfo {
+        let users = vec![("root".to_owned(), "/root".to_owned(), false)];
+        apsis_core::helper::info_from_wire((CONFIG.to_owned(), LSBLK.to_owned(), users, false))
+            .unwrap()
+    }
+
+    /// The popup on the settings view, read from the fixtures.
+    fn in_settings() -> AppModel {
+        let mut app = listed(DEVICE_LIST);
+        typed(&mut app, "s");
+        assert_eq!(app.overlay, Overlay::Settings);
+        assert!(matches!(app.settings, SettingsLoad::Loading { .. }));
+        send(&mut app, Message::SettingsRead(Ok(settings_info())));
+        app
+    }
+
+    fn view(app: &AppModel) -> &SettingsView {
+        match &app.settings {
+            SettingsLoad::Ready(view) => view,
+            other => panic!("settings not ready: {other:?}"),
+        }
+    }
+
+    /// Moves the cursor to `row` with j.
+    fn go_to(app: &mut AppModel, row: Row) {
+        while view(app).current() != row {
+            let before = view(app).cursor;
+            typed(app, "j");
+            assert_ne!(view(app).cursor, before, "no row {row:?}");
+        }
+    }
+
+    #[test]
+    fn settings_keys_leave_snapshots_alone() {
+        let mut app = in_settings();
+        typed(&mut app, "c");
+        typed(&mut app, "d");
+        assert_eq!(app.prompt, Prompt::Command);
+        assert_eq!(app.selected, 0);
+        // r reads the settings again, it doesn't list.
+        typed(&mut app, "r");
+        assert!(!app.loading);
+        assert!(matches!(app.settings, SettingsLoad::Loading { .. }));
+    }
+
+    #[test]
+    fn space_enter_and_double_click_change_a_row() {
+        let mut app = in_settings();
+        go_to(&mut app, Row::Mode);
+        typed(&mut app, " ");
+        assert!(view(&app).edited.btrfs_mode);
+        send(&mut app, Message::Submit);
+        assert!(!view(&app).edited.btrfs_mode);
+        send(&mut app, Message::SettingsActivate(1));
+        assert!(view(&app).edited.btrfs_mode);
+        assert_eq!(app.body_title(), fl!("pane-settings-unsaved"));
+    }
+
+    #[test]
+    fn filters_are_added_at_the_prompt() {
+        let mut app = in_settings();
+        typed(&mut app, "a");
+        assert_eq!(app.prompt, Prompt::Filter(String::new()));
+        typed(&mut app, "+ ");
+        send(&mut app, Message::Submit);
+        // Blank: stays in the prompt, says why.
+        assert_eq!(app.prompt, Prompt::Filter("+ ".to_owned()));
+        assert!(matches!(app.status, Some(Status::Error(_))));
+        typed(&mut app, "*.mp3");
+        send(&mut app, Message::Submit);
+        assert_eq!(app.prompt, Prompt::Command);
+        assert_eq!(view(&app).edited.exclude.last().unwrap(), "*.mp3");
+        assert_eq!(view(&app).current(), Row::Filter(4));
+        typed(&mut app, "x");
+        assert_eq!(view(&app).edited.exclude.len(), 4);
+    }
+
+    #[test]
+    fn counts_take_digits_at_the_prompt() {
+        let mut app = in_settings();
+        go_to(&mut app, Row::Schedule(Level::Daily));
+        typed(&mut app, "e");
+        assert_eq!(
+            app.prompt,
+            Prompt::Count {
+                level: Level::Daily,
+                typed: "5".to_owned()
+            }
+        );
+        typed(&mut app, "12x");
+        send(&mut app, Message::Submit);
+        assert_eq!(view(&app).edited.count(Level::Daily), 12);
+        typed(&mut app, "+");
+        typed(&mut app, "+");
+        typed(&mut app, "-");
+        assert_eq!(view(&app).edited.count(Level::Daily), 13);
+    }
+
+    #[test]
+    fn esc_with_unsaved_changes_asks_first() {
+        let mut app = in_settings();
+        go_to(&mut app, Row::Schedule(Level::Boot));
+        typed(&mut app, " ");
+        let popup = app.popup.unwrap();
+        send(&mut app, Message::Key(popup, KeyAction::Escape));
+        assert_eq!(app.overlay, Overlay::Settings);
+        assert!(matches!(app.status, Some(Status::Info(_))));
+        send(&mut app, Message::Key(popup, KeyAction::Escape));
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(!view(&app).dirty());
+        assert_eq!(app.popup, Some(popup));
+    }
+
+    #[test]
+    fn write_checks_first_then_reads_back_and_lists() {
+        let mut app = in_settings();
+        // Nothing to write.
+        typed(&mut app, "w");
+        assert!(!app.saving_settings);
+        go_to(&mut app, Row::Schedule(Level::Daily));
+        typed(&mut app, " ");
+        typed(&mut app, "w");
+        assert!(app.saving_settings);
+        // Keys wait while it writes.
+        typed(&mut app, " ");
+        assert!(view(&app).edited.scheduled(Level::Daily));
+
+        send(&mut app, Message::SettingsWritten(Ok(String::new())));
+        assert!(!app.saving_settings);
+        assert!(matches!(app.status, Some(Status::Info(_))));
+        assert!(matches!(app.settings, SettingsLoad::Loading { .. }));
+        assert!(app.loading);
+    }
+
+    #[test]
+    fn a_refused_write_keeps_the_edits() {
+        let mut app = in_settings();
+        go_to(&mut app, Row::Schedule(Level::Daily));
+        typed(&mut app, " ");
+        typed(&mut app, "w");
+        send(
+            &mut app,
+            Message::SettingsWritten(Err(CliError::from(apsis_core::Error::SettingsChanged))),
+        );
+        assert!(matches!(app.status, Some(Status::Error(_))));
+        assert!(view(&app).dirty());
+        assert!(!app.loading);
+    }
+
+    #[test]
+    fn menu_settings_opens_the_popup_on_settings() {
+        let mut app = model();
+        send(&mut app, Message::ToggleMenu);
+        send(&mut app, Message::MenuSettings);
+        assert!(app.menu.is_none() && app.popup.is_some());
+        assert_eq!(app.overlay, Overlay::Settings);
+        assert!(matches!(app.settings, SettingsLoad::Loading { .. }));
+    }
+
+    #[test]
+    fn failed_settings_read_is_shown() {
+        let mut app = listed(DEVICE_LIST);
+        typed(&mut app, "s");
+        send(
+            &mut app,
+            Message::SettingsRead(Err(CliError::Other("no helper".to_owned()))),
+        );
+        assert!(
+            matches!(&app.settings, SettingsLoad::Failed(reason) if reason.contains("no helper"))
+        );
     }
 
     #[test]

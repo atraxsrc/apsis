@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 futures-util.workspace = true
 jiff.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 zbus.workspace = true
 

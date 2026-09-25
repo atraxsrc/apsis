@@ -71,6 +71,29 @@ Look and feel only; the terminal style, keys and theme rules stay. Visual refere
 - Ship `resources/` files: D-Bus system service + policy, polkit `.policy`, systemd unit.
 - Applet talks to the helper; `pkexec` path kept as fallback.
 
+## Phase 4.5 - Settings
+
+Edit Timeshift's own config from Apsis, so `timeshift-launcher` and Apsis stay interchangeable.
+
+- `apsis-helper` reads and writes `/etc/timeshift/timeshift.json` (root-owned). Keep Timeshift's
+  exact JSON structure and field names; never invent fields, and keep fields Apsis doesn't edit
+  as they were.
+- Exposed settings:
+  - backup device: a picker from `timeshift --list-devices`
+  - mode: rsync / btrfs (read-only when Btrfs isn't available on this system)
+  - include `/home` toggle
+  - include/exclude filters: list, add, remove
+  - schedule and retention counts: hourly, daily, weekly, monthly, boot
+- polkit: a new action `io.github.atraxsrc.Apsis.configure`, `auth_admin_keep` like create/delete.
+- Validate before writing: the device must exist, filters must be plausible paths, retention
+  counts are non-negative integers. Never write a file that would make Timeshift refuse to start.
+- The helper writes atomically (temp file, fsync, rename) and keeps one backup of the previous
+  config, `timeshift.json.bak`.
+- UI: a Settings view in the popup and window, reached from the right-click menu or a key, in the
+  same style (theme colours, monospace, keyboard and mouse).
+- **Done when:** a setting changed in Apsis shows up in Timeshift's own settings window (and the
+  other way round), and Timeshift still starts and lists.
+
 ## Phase 5 — Native backend (optional, after Timeshift path is solid)
 
 - btrfs: read-only subvolume snapshots of `@` / `@home` directly.

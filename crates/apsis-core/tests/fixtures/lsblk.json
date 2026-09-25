@@ -1,0 +1,14 @@
+{
+   "blockdevices": [
+      {"name":"nvme0n1", "kname":"nvme0n1", "pkname":null, "type":"disk", "fstype":null, "uuid":null, "size":512110190592, "label":null},
+      {"name":"nvme0n1p1", "kname":"nvme0n1p1", "pkname":"nvme0n1", "type":"part", "fstype":"vfat", "uuid":"AAAA-0001", "size":1073741824, "label":null},
+      {"name":"nvme0n1p2", "kname":"nvme0n1p2", "pkname":"nvme0n1", "type":"part", "fstype":"ext4", "uuid":"11111111-1111-1111-1111-111111111111", "size":500000000000, "label":null},
+      {"name":"sdb", "kname":"sdb", "pkname":null, "type":"disk", "fstype":null, "uuid":null, "size":1000204886016, "label":null},
+      {"name":"sdb1", "kname":"sdb1", "pkname":"sdb", "type":"part", "fstype":"ext4", "uuid":"00000000-0000-0000-0000-000000000000", "size":1000203837440, "label":"Backup"},
+      {"name":"sdc", "kname":"sdc", "pkname":null, "type":"disk", "fstype":null, "uuid":null, "size":500107862016, "label":null},
+      {"name":"sdc1", "kname":"sdc1", "pkname":"sdc", "type":"part", "fstype":"crypto_LUKS", "uuid":"22222222-2222-2222-2222-222222222222", "size":500106813440, "label":null},
+      {"name":"luks-2222", "kname":"dm-0", "pkname":"sdc1", "type":"crypt", "fstype":"ext4", "uuid":"33333333-3333-3333-3333-333333333333", "size":500090036224, "label":"Vault"},
+      {"name":"sdd", "kname":"sdd", "pkname":null, "type":"disk", "fstype":null, "uuid":null, "size":256060514304, "label":null},
+      {"name":"sdd1", "kname":"sdd1", "pkname":"sdd", "type":"part", "fstype":"btrfs", "uuid":"44444444-4444-4444-4444-444444444444", "size":"256059465728", "label":"Spare"}
+   ]
+}

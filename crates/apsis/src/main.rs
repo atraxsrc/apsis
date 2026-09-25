@@ -4,6 +4,7 @@ mod app;
 mod config;
 mod fmt;
 mod i18n;
+mod settings_view;
 
 use app::Mode;
 use cosmic::applet::PanelType;

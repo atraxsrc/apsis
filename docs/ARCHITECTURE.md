@@ -57,6 +57,7 @@ The applet calls the backend on a background task (libcosmic `Task`) and never b
 - Phase 4: `apsis-helper` system service, D-Bus activated. Each method checks a polkit action:
   - `<app-id>.list` → `allow_active=yes`
   - `<app-id>.create`, `<app-id>.delete` → `auth_admin_keep`
+  - `<app-id>.configure` (phase 4.5, writing Timeshift's settings) → `auth_admin_keep`
   - `<app-id>.restore` (phase 6) → `auth_admin` (no caching)
 - Input validation in the helper: snapshot names must match Timeshift's pattern
   (`YYYY-MM-DD_HH-MM-SS`); comments are length-limited and passed as argv, never a shell.
@@ -74,8 +75,10 @@ constants in `apsis_core::helper::names`; the helper's tests check its interface
 | `List() -> (sssa(sss)as)` | `(device, uuid, mode, [(name, tags, comment)], warnings)`; polkit `list`, not interactive |
 | `Create(s comment)` | polkit `create`, interactive; returns once started |
 | `Delete(s name)` | polkit `delete`, interactive; returns once started |
+| `ReadSettings() -> (ssa(ssb)b)` | `(timeshift.json text, lsblk JSON, [(user, home, encrypted)], timeshift-gtk open)`; polkit `list`, not interactive |
+| `WriteSettings(s expected, (sbbabauas) settings) -> s` | polkit `configure`, interactive; writes `/etc/timeshift/timeshift.json`, returns once done (see below) |
 | `Finished(s op, b ok, s message)` | signal, sent only to the caller that started the create/delete |
-| errors | `...Helper1.Error.{NotAuthorized,Busy,InvalidInput,NotInstalled,DeviceNotFound,Failed}` |
+| errors | `...Helper1.Error.{NotAuthorized,Busy,InvalidInput,NotInstalled,DeviceNotFound,Failed,Changed}` |
 
 Each call, in order:
 1. Input checked again (`validate_comment`, snapshot name pattern); the applet isn't trusted.
@@ -102,6 +105,29 @@ The helper exits after 60 s with no call open and nothing running. It never exit
 Timeshift runs or a call (including one waiting for the password dialog) is open, and it waits
 until each `Finished` is sent. The next call starts it again.
 
+### Settings (phase 4.5)
+
+`WriteSettings(expected, settings)` edits `/etc/timeshift/timeshift.json` and nothing else. The
+settings are `(backup device UUID, btrfs mode, include @home, [5 schedules], [5 counts],
+[filters])`, levels monthly, weekly, daily, hourly, boot. In order:
+
+1. Refused with `Busy` if Timeshift is running, then polkit `configure` (password, cached).
+2. The single-operation lock is taken, so no list, create or delete runs meanwhile.
+3. `lsblk` (fixed argv, `settings::LSBLK_ARGS`) for the connected devices.
+4. The file is read; if it isn't exactly `expected` (what the caller read), `Changed`.
+5. `settings::edit` checks and applies them (`InvalidInput` with the reason if not): a new
+   device must be connected, unencrypted and a Linux filesystem (btrfs in btrfs mode); btrfs mode
+   needs a btrfs filesystem; counts 1-999; filters not blank, no control characters, no
+   duplicates. Only Timeshift's own fields change, all written as strings like Timeshift writes
+   them; every other field stays in place. The result must read back as exactly the settings.
+6. The old file is copied to `timeshift.json.bak`, then the new text replaces the file: temp file
+   in `/etc/timeshift/`, `fsync`, `rename`, `fsync` of the folder. The mode is kept. The file is
+   checked against `expected` again just before the swap.
+7. The remembered `--snapshot-device` is dropped, and one `timeshift --list` runs: every Timeshift
+   run syncs its cron jobs (`/etc/cron.d/timeshift-{hourly,boot}`) with the settings on exit, so
+   this puts the new schedule in place. If that list fails, the settings stay written and the
+   returned text says so; an empty text means all went well.
+
 The applet asks the bus before each list/create/delete whether the helper is installed
 (activatable) or running. If it is, the helper is used. If not, or there's no system bus, it
 falls back to pkexec. An installed helper that fails is reported as an error, not replaced by
@@ -124,7 +150,7 @@ pkexec.
 - `/usr/share/dbus-1/system.d/io.github.atraxsrc.Apsis.Helper.conf` - bus policy
 - `/usr/lib/systemd/system/apsis-helper.service` - `Type=dbus`, no `[Install]`, not sandboxed
   (Timeshift needs the whole filesystem and mounts)
-- `/usr/share/polkit-1/actions/io.github.atraxsrc.Apsis.policy` - the three actions
+- `/usr/share/polkit-1/actions/io.github.atraxsrc.Apsis.policy` - the four actions
 
 The activation file and unit come from `resources/helper/*.in` with `@libexecdir@` filled in.
 Afterwards `just install` runs `systemctl daemon-reload` and the bus's `ReloadConfig` (dbus-broker

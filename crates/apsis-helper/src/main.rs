@@ -4,13 +4,15 @@
 //!
 //! A system D-Bus service, started as root by D-Bus activation (through
 //! `apsis-helper.service`) when the applet calls it, and gone again after a minute idle. It
-//! offers exactly `List`, `Create(comment)` and `Delete(name)`; each checks its own polkit
-//! action for the caller, checks its input again, and runs `timeshift` with a fixed argv, no
-//! shell. See `docs/ARCHITECTURE.md`.
+//! offers exactly `List`, `Create(comment)`, `Delete(name)`, `ReadSettings` and
+//! `WriteSettings`; each checks its own polkit action for the caller, checks its input again,
+//! and runs `timeshift` (or `lsblk`) with a fixed argv, no shell. `WriteSettings` edits
+//! `/etc/timeshift/timeshift.json`, nothing else. See `docs/ARCHITECTURE.md`.
 
 mod polkit;
 mod runner;
 mod service;
+mod settings;
 mod state;
 
 use std::process::ExitCode;
@@ -53,7 +55,8 @@ async fn serve() -> zbus::Result<()> {
 #[cfg(test)]
 mod resource_tests {
     use apsis_core::helper::names::{
-        ACTION_CREATE, ACTION_DELETE, ACTION_LIST, BUS_NAME, INTERFACE, SYSTEMD_UNIT,
+        ACTION_CONFIGURE, ACTION_CREATE, ACTION_DELETE, ACTION_LIST, BUS_NAME, INTERFACE,
+        SYSTEMD_UNIT,
     };
 
     const ACTIVATION: &str =
@@ -111,19 +114,19 @@ mod resource_tests {
     #[test]
     fn polkit_actions_match_and_prompt_as_apsis() {
         assert!(action(ACTION_LIST).contains("<allow_active>yes</allow_active>"));
-        for id in [ACTION_CREATE, ACTION_DELETE] {
+        for id in [ACTION_CREATE, ACTION_DELETE, ACTION_CONFIGURE] {
             assert!(
                 action(id).contains("<allow_active>auth_admin_keep</allow_active>"),
                 "{id}"
             );
         }
-        for id in [ACTION_LIST, ACTION_CREATE, ACTION_DELETE] {
+        for id in [ACTION_LIST, ACTION_CREATE, ACTION_DELETE, ACTION_CONFIGURE] {
             let action = action(id);
             assert!(action.contains("<message>Apsis "), "{id}");
             assert!(!action.to_lowercase().contains("timeshift"), "{id}");
             assert!(!action.contains("<allow_any>yes"), "{id}");
             assert!(!action.contains("<allow_inactive>yes"), "{id}");
         }
-        assert_eq!(POLKIT.matches("<action id=").count(), 3);
+        assert_eq!(POLKIT.matches("<action id=").count(), 4);
     }
 }

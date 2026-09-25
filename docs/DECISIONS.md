@@ -379,6 +379,59 @@ Append-only. Newest at the bottom. Format: date — decision — why.
   - The applet's entry already had `NoDisplay=true` (from the template), in the source and in
     `target/xdgen/app.desktop`. If the launcher still showed it, the cause is elsewhere (an older
     installed copy, or a launcher ignoring `NoDisplay`); not verified by Claude.
+- 2026-09-25 - Phase 4.5 Settings (written and unit-tested by Claude; nothing written to the
+  real `/etc/timeshift/timeshift.json` by Claude). Read from Timeshift's source
+  (linuxmint/timeshift e7e54ab, cloned read-only into `.scratch/` with the user's OK) and the
+  user's real settings file (pasted, redacted).
+  - **Placement.** "After Phase 4, before the superfile phase" couldn't both hold (3.5 comes
+    before 4); the user chose after Phase 4.
+  - **File format.** Every value is a JSON string (`"true"`, `"5"`); Timeshift reads them with
+    `get_string_member`, which a JSON bool or number breaks. Apsis refuses to edit a file where a
+    Timeshift field isn't a string, writes only strings, and writes like json-glib (2-space
+    indent, `"key" : value`, no final newline), so an unchanged file stays byte for byte the
+    same. Fields Apsis doesn't edit (including unknown ones) stay in place. The legacy
+    `include_btrfs_home` field wins over `include_btrfs_home_for_backup` in Timeshift; when it's
+    there, both are written.
+  - **Fixture.** `tests/fixtures/config-rsync.json` is the user's file with the device UUID
+    zeroed and usernames replaced (`user1`, `user2`). `parent_device_uuid` was `""` before
+    redaction (user confirmed; a plain partition, whose disk has no UUID). The user's redaction
+    had `"key": value` on two lines; the fixture uses json-glib's `"key" : value` throughout.
+    `tests/fixtures/lsblk.json` is synthetic (placeholder UUIDs).
+  - **Schedule = cron.** Timeshift schedules through `/etc/cron.d/timeshift-{hourly,boot}`, not
+    the JSON. Every CLI run calls `cron_job_update()` on exit (and never saves the JSON in CLI
+    mode), so the helper runs one `timeshift --list` after writing. The GUI (`timeshift-gtk`)
+    does save the JSON when it closes, so the view warns while it's open.
+  - **User decisions** (2026-09-25):
+    - `/home`: mirror Timeshift. btrfs mode: the `@home` flag. rsync mode: per user (root and
+      uid >= 1000 except 65534, from `/etc/passwd`), three states written with Timeshift's exact
+      patterns (`<home>/**` exclude, `+ <home>/.**` hidden only, `+ <home>/**` everything); the
+      chosen one is appended, the other two removed. ecryptfs homes use other patterns and are
+      shown read-only.
+    - Retention counts 1-999, like Timeshift's spin buttons. 0 would make Timeshift's cleanup
+      untag, and so delete, every uncommented snapshot of that level. The spec said
+      "non-negative"; changed at the user's choice.
+    - Filters: anything Timeshift's editor takes (not blank after an optional `+ `), plus no
+      control characters or line breaks (they'd break rsync's filter file), no duplicates. Not
+      "absolute paths only": Timeshift's own example is `*.mp3`.
+    - Devices: `timeshift --list-devices` prints no UUIDs, so the helper runs `lsblk --json`
+      (Timeshift runs lsblk too) and applies Timeshift's `has_linux_filesystem` list. Only
+      unencrypted filesystems with a UUID are selectable (not LUKS/LVM/ZFS containers, not
+      inside a `crypt` mapping). A LUKS device already in the file is kept as is.
+  - **Device rule.** A *changed* device must be connected; an unchanged one may be unplugged
+    (Timeshift keeps it too), so the schedule can be edited with the USB disk away. Switching to
+    btrfs mode needs the device connected and btrfs. `parent_device_uuid` comes from lsblk when
+    the device changes, as Timeshift sets it, and stays when it doesn't.
+  - **Found while building.** The helper remembers the last listed device and passes it as
+    `--snapshot-device`; after a device change, lists and creates would have kept targeting the
+    old disk until the helper exited. It now forgets the device after a write
+    (`TimeshiftCli::forget_device`).
+  - **Concurrency.** `WriteSettings` sends the file text the view read; the helper refuses
+    (`Changed`) if the file differs, checked again just before the rename. It holds the
+    single-operation lock throughout, and refuses while a list, create or delete runs.
+  - `ReadSettings` uses the `list` polkit action (no password for the active session): the
+    file is world-readable anyway. There's no pkexec fallback for settings.
+  - Keys `s`, space, `+`/`-`, `e`, `a`, `x`, `w` are new; `x` was the tests' example of an
+    unmapped key, now `z`. In iced 0.14 space arrives as a character, not `Named::Space`.
 
 ## Open
 

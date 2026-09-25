@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The D-Bus interface: `List`, `Create`, `Delete` and the `Finished` signal. Nothing else.
+//! The D-Bus interface: `List`, `Create`, `Delete`, `ReadSettings`, `WriteSettings` and the
+//! `Finished` signal. Nothing else.
 //!
 //! Every call is logged with its result on stderr, which systemd puts in the journal
 //! (`journalctl -u apsis-helper`). Comments are cut to [`LOGGED_COMMENT_CHARS`].
@@ -8,9 +9,11 @@
 use std::sync::Arc;
 
 use apsis_core::helper::names::{
-    ACTION_CREATE, ACTION_DELETE, ACTION_LIST, OBJECT_PATH, OP_CREATE, OP_DELETE,
+    ACTION_CONFIGURE, ACTION_CREATE, ACTION_DELETE, ACTION_LIST, OBJECT_PATH, OP_CREATE, OP_DELETE,
 };
-use apsis_core::helper::{WireList, encode_error, to_wire};
+use apsis_core::helper::{
+    WireList, WireSettings, WireSettingsInfo, encode_error, settings_from_wire, to_wire,
+};
 use apsis_core::{Error, SnapshotList, parse_snapshot_name, validate_comment};
 use zbus::message::Header;
 use zbus::names::UniqueName;
@@ -19,6 +22,7 @@ use zbus::{Connection, DBusError, interface};
 
 use crate::polkit;
 use crate::runner::DirectRunner;
+use crate::settings::{self, Files};
 use crate::state::{Running, State};
 
 /// Longest part of a comment that goes into the journal.
@@ -47,6 +51,8 @@ pub enum HelperError {
     NotInstalled(String),
     /// The backup disk isn't there; the message is from [`encode_error`].
     DeviceNotFound(String),
+    /// `WriteSettings`: the settings file changed since the caller read it.
+    Changed(String),
     /// The message is from [`encode_error`] (exit code and Timeshift's last lines).
     Failed(String),
 }
@@ -56,9 +62,11 @@ impl From<Error> for HelperError {
         match error {
             Error::NotAuthorized => Self::NotAuthorized(error.to_string()),
             Error::Busy => Self::Busy(error.to_string()),
-            Error::InvalidComment(_) | Error::InvalidSnapshotName(_) | Error::NoSuchSnapshot(_) => {
-                Self::InvalidInput(error.to_string())
-            }
+            Error::InvalidComment(_)
+            | Error::InvalidSnapshotName(_)
+            | Error::NoSuchSnapshot(_)
+            | Error::InvalidSettings(_) => Self::InvalidInput(error.to_string()),
+            Error::SettingsChanged => Self::Changed(error.to_string()),
             Error::NotInstalled => Self::NotInstalled(error.to_string()),
             Error::DeviceNotFound { .. } => Self::DeviceNotFound(encode_error(&error)),
             _ => Self::Failed(encode_error(&error)),
@@ -154,6 +162,85 @@ impl Helper {
         )
     }
 
+    /// Timeshift's settings file, the block devices and the users, for the settings view
+    /// (polkit: `list`, no password for the active session).
+    async fn read_settings(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+    ) -> Result<WireSettingsInfo, HelperError> {
+        let _call = self.state.call();
+        let caller = caller(&header)?;
+        let result = async {
+            authorize(connection, &caller, ACTION_LIST, false).await?;
+            blocking(|| settings::info(&Files::system(), &DirectRunner)).await
+        }
+        .await;
+        if let Err(error) = &result {
+            log(&format!(
+                "read settings for {caller}: {}",
+                describe_error(error)
+            ));
+        }
+        Ok(result?)
+    }
+
+    /// Writes Timeshift's settings (polkit: `configure`) if the file still reads `expected`,
+    /// keeping the previous file as `.bak`. Then lists once: every Timeshift run syncs its
+    /// cron jobs with the settings on exit. Returns once done; the text says if that list
+    /// failed (the settings are written either way).
+    async fn write_settings(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+        expected: String,
+        settings: WireSettings,
+    ) -> Result<String, HelperError> {
+        let _call = self.state.call();
+        let caller = caller(&header)?;
+        let label = format!("write settings for {caller}");
+        let result = async {
+            let settings = settings_from_wire(settings)?;
+            self.refuse_if_running()?;
+            authorize(connection, &caller, ACTION_CONFIGURE, true).await?;
+            let running = self.state.begin()?;
+            blocking(move || {
+                if !Files::system().write(&DirectRunner, &expected, &settings)? {
+                    return Ok(Written::Unchanged);
+                }
+                // The backup device may have changed: list the one the settings name now.
+                running.forget_device();
+                Ok(match running.list() {
+                    Ok(_) => Written::Synced,
+                    Err(error) => Written::ListFailed(format!(
+                        "written, but timeshift --list afterwards failed: {error}"
+                    )),
+                })
+            })
+            .await
+        }
+        .await;
+        let note = match result {
+            Ok(Written::Unchanged) => {
+                log(&format!("{label}: unchanged"));
+                String::new()
+            }
+            Ok(Written::Synced) => {
+                log(&format!("{label}: written, schedule synced"));
+                String::new()
+            }
+            Ok(Written::ListFailed(note)) => {
+                log(&format!("{label}: {note}"));
+                note
+            }
+            Err(error) => {
+                log(&format!("{label}: {}", describe_error(&error)));
+                return Err(error.into());
+            }
+        };
+        Ok(note)
+    }
+
     /// A create or delete ended. Sent only to the caller that started it.
     #[zbus(signal)]
     async fn finished(
@@ -226,6 +313,16 @@ impl Helper {
     }
 }
 
+/// How a `WriteSettings` went.
+enum Written {
+    /// The settings were already so; nothing was written.
+    Unchanged,
+    /// Written, and the list after it (which syncs Timeshift's cron jobs) worked.
+    Synced,
+    /// Written, but that list failed; the text says how.
+    ListFailed(String),
+}
+
 fn log(line: &str) {
     eprintln!("apsis-helper: {line}");
 }
@@ -246,7 +343,10 @@ fn describe_error(error: &Error) -> String {
         Error::NotAuthorized
         | Error::Busy
         | Error::InvalidComment(_)
-        | Error::InvalidSnapshotName(_) => format!("refused: {error}"),
+        | Error::InvalidSnapshotName(_)
+        | Error::InvalidSettings(_)
+        | Error::InvalidConfig(_)
+        | Error::SettingsChanged => format!("refused: {error}"),
         Error::Failed { code, output } => {
             let code = code.map_or_else(|| "none (signal)".to_owned(), |c| c.to_string());
             let output: Vec<&str> = output.lines().collect();
@@ -307,9 +407,9 @@ async fn blocking<T: Send + 'static>(
 mod tests {
     use apsis_core::helper::decode_error;
     use apsis_core::helper::names::{
-        ERROR_BUSY, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
+        ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
         ERROR_NOT_AUTHORIZED, ERROR_NOT_INSTALLED, INTERFACE, METHOD_CREATE, METHOD_DELETE,
-        METHOD_LIST, SIGNAL_FINISHED,
+        METHOD_LIST, METHOD_READ_SETTINGS, METHOD_WRITE_SETTINGS, SIGNAL_FINISHED,
     };
     use zbus::object_server::Interface;
 
@@ -320,7 +420,13 @@ mod tests {
         assert_eq!(Helper::name().as_str(), INTERFACE);
         let mut xml = String::new();
         Helper::new(State::new(DirectRunner)).introspect_to_writer(&mut xml, 0);
-        for method in [METHOD_LIST, METHOD_CREATE, METHOD_DELETE] {
+        for method in [
+            METHOD_LIST,
+            METHOD_CREATE,
+            METHOD_DELETE,
+            METHOD_READ_SETTINGS,
+            METHOD_WRITE_SETTINGS,
+        ] {
             assert!(
                 xml.contains(&format!("<method name=\"{method}\">")),
                 "{method}\n{xml}"
@@ -330,11 +436,14 @@ mod tests {
             xml.contains(&format!("<signal name=\"{SIGNAL_FINISHED}\">")),
             "{xml}"
         );
-        // Nothing else: exactly three methods and one signal.
-        assert_eq!(xml.matches("<method ").count(), 3, "{xml}");
+        // Nothing else: exactly five methods and one signal.
+        assert_eq!(xml.matches("<method ").count(), 5, "{xml}");
         assert_eq!(xml.matches("<signal ").count(), 1, "{xml}");
         // List returns the list with its warnings.
         assert!(xml.contains("type=\"(sssa(sss)as)\""), "{xml}");
+        // The settings types.
+        assert!(xml.contains("type=\"(ssa(ssb)b)\""), "{xml}");
+        assert!(xml.contains("type=\"(sbbabauas)\""), "{xml}");
     }
 
     #[test]
@@ -358,6 +467,7 @@ mod tests {
                 ERROR_DEVICE_NOT_FOUND,
             ),
             (HelperError::Failed(String::new()), ERROR_FAILED),
+            (HelperError::Changed(String::new()), ERROR_CHANGED),
         ];
         for (error, name) in cases {
             assert_eq!(zbus::DBusError::name(&error).as_str(), name);
@@ -394,6 +504,7 @@ mod tests {
             Error::InvalidComment("too long"),
             Error::InvalidSnapshotName("x".to_owned()),
             Error::NoSuchSnapshot("2001-01-01_00-00-00".to_owned()),
+            Error::InvalidSettings("keep 1 to 999".to_owned()),
         ] {
             assert!(matches!(
                 HelperError::from(error),

@@ -167,6 +167,21 @@ fn unconfigured_list_forgets_previous_device() {
 }
 
 #[test]
+fn forgetting_the_device_lists_the_configured_one_again() {
+    let runner = FakeRunner::replying([ok(DEVICE), ok(DEVICE)]);
+    let cli = TimeshiftCli::new(&runner);
+    cli.list().unwrap();
+    assert_eq!(cli.snapshot_device().as_deref(), Some(UUID));
+    cli.forget_device();
+    assert_eq!(cli.snapshot_device(), None);
+    cli.list().unwrap();
+    assert_eq!(
+        runner.calls()[1],
+        argv(&["timeshift", "--list", "--scripted"])
+    );
+}
+
+#[test]
 fn create_passes_comment_as_one_argument() {
     let runner = FakeRunner::default();
     listed(&runner, [ok("")])

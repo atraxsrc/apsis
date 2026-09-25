@@ -4,6 +4,8 @@
 //!
 //! - [`names`]: the shared bus, interface, error and polkit names.
 //! - [`WireList`]: what `List` returns, and conversions to and from [`SnapshotList`].
+//! - [`WireSettingsInfo`] and [`WireSettings`]: what `ReadSettings` returns and `WriteSettings`
+//!   takes.
 //! - [`encode_error`] / [`decode_error`]: how a Timeshift failure crosses the bus.
 //! - [`HelperClient`]: the applet's side.
 
@@ -14,6 +16,7 @@ pub use client::HelperClient;
 
 use crate::error::{Error, Result};
 use crate::model::{Mode, Snapshot, SnapshotList, Tag, parse_snapshot_name};
+use crate::settings::{Config, Settings, SettingsInfo, User, parse_lsblk};
 
 /// One snapshot on the bus: `(name, tags, comment)`. Tags are Timeshift's letters (`OB`); an
 /// empty comment means none.
@@ -88,6 +91,71 @@ pub fn from_wire(wire: WireList) -> Result<SnapshotList> {
         mode,
         snapshots,
         warnings,
+    })
+}
+
+/// A user on the bus: `(name, home, encrypted_home)`.
+pub type WireUser = (String, String, bool);
+
+/// What `ReadSettings` returns, D-Bus type `(ssa(ssb)b)`: `(settings file, lsblk JSON, users,
+/// timeshift-gtk open)`. The applet parses the file and lsblk's output itself.
+pub type WireSettingsInfo = (String, String, Vec<WireUser>, bool);
+
+/// [`Settings`] on the bus, D-Bus type `(sbbabauas)`: `(backup device UUID, btrfs mode, include
+/// @home, schedule per level, count per level, filters)`, levels in `Level::ALL` order.
+pub type WireSettings = (String, bool, bool, Vec<bool>, Vec<u32>, Vec<String>);
+
+/// The [`SettingsInfo`] the helper sent.
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] for a settings file Apsis can't edit safely, [`Error::Helper`] for
+/// output that isn't lsblk's.
+pub fn info_from_wire(wire: WireSettingsInfo) -> Result<SettingsInfo> {
+    let (text, lsblk, users, timeshift_gui_open) = wire;
+    Ok(SettingsInfo {
+        config: Config::parse(&text)?,
+        text,
+        devices: parse_lsblk(&lsblk)?,
+        users: users
+            .into_iter()
+            .map(|(name, home, encrypted_home)| User {
+                name,
+                home,
+                encrypted_home,
+            })
+            .collect(),
+        timeshift_gui_open,
+    })
+}
+
+#[must_use]
+pub fn settings_to_wire(settings: &Settings) -> WireSettings {
+    (
+        settings.backup_device_uuid.clone(),
+        settings.btrfs_mode,
+        settings.include_btrfs_home,
+        settings.schedule.to_vec(),
+        settings.counts.to_vec(),
+        settings.exclude.clone(),
+    )
+}
+
+/// The [`Settings`] a caller sent.
+///
+/// # Errors
+///
+/// [`Error::InvalidSettings`] unless there are exactly five schedules and five counts.
+pub fn settings_from_wire(wire: WireSettings) -> Result<Settings> {
+    let (backup_device_uuid, btrfs_mode, include_btrfs_home, schedule, counts, exclude) = wire;
+    let five = || Error::InvalidSettings("expected five schedule levels".to_owned());
+    Ok(Settings {
+        backup_device_uuid,
+        btrfs_mode,
+        include_btrfs_home,
+        schedule: schedule.try_into().map_err(|_| five())?,
+        counts: counts.try_into().map_err(|_| five())?,
+        exclude,
     })
 }
 
@@ -190,6 +258,43 @@ mod tests {
                 other => panic!("{other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn settings_survive_the_bus() {
+        let settings = Settings {
+            backup_device_uuid: "uuid".to_owned(),
+            btrfs_mode: true,
+            include_btrfs_home: false,
+            schedule: [true, false, true, false, true],
+            counts: [1, 2, 3, 4, 999],
+            exclude: vec!["+ /root/**".to_owned(), "*.mp3".to_owned()],
+        };
+        assert_eq!(
+            settings_from_wire(settings_to_wire(&settings)).unwrap(),
+            settings
+        );
+        let mut short = settings_to_wire(&settings);
+        short.4.pop();
+        assert!(matches!(
+            settings_from_wire(short),
+            Err(Error::InvalidSettings(_))
+        ));
+    }
+
+    #[test]
+    fn settings_info_is_parsed_on_arrival() {
+        let config = include_str!("../../tests/fixtures/config-rsync.json");
+        let lsblk = include_str!("../../tests/fixtures/lsblk.json");
+        let users = vec![("user1".to_owned(), "/home/user1".to_owned(), false)];
+        let info =
+            info_from_wire((config.to_owned(), lsblk.to_owned(), users.clone(), true)).unwrap();
+        assert_eq!(info.text, config);
+        assert_eq!(info.devices.len(), 10);
+        assert_eq!(info.users[0].home, "/home/user1");
+        assert!(info.timeshift_gui_open);
+        let bad = info_from_wire(("[]".to_owned(), lsblk.to_owned(), users, false));
+        assert!(matches!(bad, Err(Error::InvalidConfig(_))));
     }
 
     #[test]

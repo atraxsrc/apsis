@@ -10,6 +10,7 @@ pub mod helper;
 mod model;
 mod parse;
 mod pkexec;
+pub mod settings;
 mod timeshift;
 
 pub use backend::Backend;

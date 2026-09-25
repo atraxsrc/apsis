@@ -6,13 +6,17 @@ use zbus::names::BusName;
 use zbus::{Connection, Proxy};
 
 use super::names::{
-    BUS_NAME, ERROR_BUSY, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_NOT_AUTHORIZED,
-    ERROR_NOT_INSTALLED, INTERFACE, METHOD_CREATE, METHOD_DELETE, METHOD_LIST, OBJECT_PATH,
-    OP_CREATE, OP_DELETE, SIGNAL_FINISHED,
+    BUS_NAME, ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
+    ERROR_NOT_AUTHORIZED, ERROR_NOT_INSTALLED, INTERFACE, METHOD_CREATE, METHOD_DELETE,
+    METHOD_LIST, METHOD_READ_SETTINGS, METHOD_WRITE_SETTINGS, OBJECT_PATH, OP_CREATE, OP_DELETE,
+    SIGNAL_FINISHED,
 };
-use super::{WireList, decode_error, from_wire};
+use super::{
+    WireList, WireSettingsInfo, decode_error, from_wire, info_from_wire, settings_to_wire,
+};
 use crate::error::{Error, Result};
 use crate::model::SnapshotList;
+use crate::settings::{Settings, SettingsInfo};
 
 /// The applet's side of `apsis-helper`, on the system bus.
 ///
@@ -68,6 +72,39 @@ impl HelperClient {
     /// What the helper reported (see [`Error`]).
     pub async fn delete(&self, name: &str) -> Result<()> {
         self.operate(METHOD_DELETE, OP_DELETE, name).await
+    }
+
+    /// Reads Timeshift's settings, the devices and the users. No password for the active
+    /// session.
+    ///
+    /// # Errors
+    ///
+    /// What the helper reported, or a settings file Apsis can't edit safely.
+    pub async fn read_settings(&self) -> Result<SettingsInfo> {
+        let wire: WireSettingsInfo = self
+            .proxy()
+            .await?
+            .call(METHOD_READ_SETTINGS, &())
+            .await
+            .map_err(from_zbus)?;
+        info_from_wire(wire)
+    }
+
+    /// Writes `settings` if the file still reads `expected` (asks for the password). Returns
+    /// once written; the text is a problem Timeshift reported afterwards, or empty.
+    ///
+    /// # Errors
+    ///
+    /// What the helper reported: [`Error::SettingsChanged`], [`Error::InvalidSettings`], ...
+    pub async fn write_settings(&self, expected: &str, settings: &Settings) -> Result<String> {
+        self.proxy()
+            .await?
+            .call(
+                METHOD_WRITE_SETTINGS,
+                &(expected, settings_to_wire(settings)),
+            )
+            .await
+            .map_err(from_zbus)
     }
 
     async fn proxy(&self) -> Result<Proxy<'static>> {
@@ -161,6 +198,9 @@ fn from_zbus(error: zbus::Error) -> Error {
                 ERROR_NOT_AUTHORIZED => Error::NotAuthorized,
                 ERROR_BUSY => Error::Busy,
                 ERROR_NOT_INSTALLED => Error::NotInstalled,
+                ERROR_CHANGED => Error::SettingsChanged,
+                // Comments are checked before they're sent, so this is about settings.
+                ERROR_INVALID_INPUT => Error::InvalidSettings(message),
                 ERROR_FAILED | ERROR_DEVICE_NOT_FOUND => decode_error(&message),
                 _ if message.is_empty() => Error::Helper(name.to_string()),
                 _ => Error::Helper(message),

@@ -104,6 +104,11 @@ impl<R: Runner> Running<R> {
         self.0.cli.create(comment)
     }
 
+    /// Timeshift's settings changed: the next list targets the device they name.
+    pub fn forget_device(&self) {
+        self.0.cli.forget_device();
+    }
+
     /// Lists first, and only deletes a snapshot that list has.
     pub fn delete(&self, name: &str) -> Result<()> {
         if parse_snapshot_name(name).is_none() {

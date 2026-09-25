@@ -18,6 +18,12 @@ pub const METHOD_LIST: &str = "List";
 pub const METHOD_CREATE: &str = "Create";
 /// `Delete(s name)`: returns once the delete has started; [`SIGNAL_FINISHED`] follows.
 pub const METHOD_DELETE: &str = "Delete";
+/// `ReadSettings() -> (ssa(ssb)b)`: see [`super::WireSettingsInfo`].
+pub const METHOD_READ_SETTINGS: &str = "ReadSettings";
+/// `WriteSettings(s expected, (sbbabauas) settings) -> s note`: writes Timeshift's settings if
+/// the file still reads `expected`, then lets Timeshift sync its schedule. `note` is empty, or
+/// says what went wrong after the write. See [`super::WireSettings`].
+pub const METHOD_WRITE_SETTINGS: &str = "WriteSettings";
 /// `Finished(s op, b ok, s message)`, sent only to the caller that started the operation.
 pub const SIGNAL_FINISHED: &str = "Finished";
 /// `op` in [`SIGNAL_FINISHED`] after [`METHOD_CREATE`].
@@ -39,6 +45,8 @@ pub const ERROR_NOT_INSTALLED: &str = "io.github.atraxsrc.Apsis.Helper1.Error.No
 pub const ERROR_FAILED: &str = "io.github.atraxsrc.Apsis.Helper1.Error.Failed";
 /// The backup disk isn't there; the message is from [`super::encode_error`].
 pub const ERROR_DEVICE_NOT_FOUND: &str = "io.github.atraxsrc.Apsis.Helper1.Error.DeviceNotFound";
+/// `WriteSettings`: the settings file changed since the caller read it.
+pub const ERROR_CHANGED: &str = "io.github.atraxsrc.Apsis.Helper1.Error.Changed";
 
 /// polkit action for [`METHOD_LIST`]: allowed for the active local session, no password.
 pub const ACTION_LIST: &str = "io.github.atraxsrc.Apsis.list";
@@ -46,6 +54,9 @@ pub const ACTION_LIST: &str = "io.github.atraxsrc.Apsis.list";
 pub const ACTION_CREATE: &str = "io.github.atraxsrc.Apsis.create";
 /// polkit action for [`METHOD_DELETE`]: `auth_admin_keep`.
 pub const ACTION_DELETE: &str = "io.github.atraxsrc.Apsis.delete";
+/// polkit action for [`METHOD_WRITE_SETTINGS`]: `auth_admin_keep`. ([`METHOD_READ_SETTINGS`]
+/// uses [`ACTION_LIST`].)
+pub const ACTION_CONFIGURE: &str = "io.github.atraxsrc.Apsis.configure";
 
 /// The systemd unit D-Bus activation starts.
 pub const SYSTEMD_UNIT: &str = "apsis-helper.service";
@@ -63,6 +74,7 @@ mod tests {
             ERROR_NOT_INSTALLED,
             ERROR_FAILED,
             ERROR_DEVICE_NOT_FOUND,
+            ERROR_CHANGED,
         ] {
             let rest = name.strip_prefix(ERROR_PREFIX).expect(name);
             assert!(rest.starts_with('.') && !rest[1..].contains('.'), "{name}");
@@ -79,6 +91,7 @@ mod tests {
             ACTION_LIST,
             ACTION_CREATE,
             ACTION_DELETE,
+            ACTION_CONFIGURE,
         ] {
             assert!(name.starts_with(app_id), "{name}");
         }

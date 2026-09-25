@@ -63,6 +63,12 @@ impl<R: Runner> TimeshiftCli<R> {
         self.remembered_device().clone()
     }
 
+    /// Forgets the listed device, after Timeshift's settings changed: the next list uses the
+    /// device the settings name now, not the one listed before.
+    pub fn forget_device(&self) {
+        *self.remembered_device() = None;
+    }
+
     /// `timeshift <action...> --scripted [--snapshot-device <dev>]`
     fn command(&self, action: &[&str]) -> Vec<OsString> {
         let device = self.remembered_device().clone();

@@ -14,6 +14,8 @@ futures-util = "0.3"
 i18n-embed-fl = "0.10"
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 rust-embed = "8.11"
+# Timeshift's config: `preserve_order` keeps its fields in the order they were read.
+serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 tokio = { version = "1.52.0", features = ["full"] }
 xdgen = "0.1"
