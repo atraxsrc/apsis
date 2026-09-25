@@ -14,6 +14,7 @@ It works with keyboard or mouse and follows your COSMIC theme.
 > **experimental**; see below.
 
 <p align="center"><img src="docs/screenshot.png" width="560" alt="Apsis popup: snapshot list, details pane and activity pane"></p>
+<p align="center"><img src="docs/screenshot1.png" width="560" alt="Apsis popup: snapshot list, details pane and activity pane"></p>
 
 ## Features
 
