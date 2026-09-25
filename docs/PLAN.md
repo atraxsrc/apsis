@@ -40,7 +40,7 @@ In `apsis-core`:
 
 ## Phase 3 — Create and delete
 
-- `[c]reate`: inline prompt for a comment → `timeshift --create --comments <c> --tags O --scripted`.
+- `[c]reate`: inline prompt for a comment → `timeshift --create --comments <c> --scripted` (no `--tags`: v24.01.1 rejects `O`, and O is the default; see TIMESHIFT-CLI.md).
 - `[d]elete`: inline confirm (type `y`) → `timeshift --delete --snapshot <name> --scripted`.
 - Progress line while running; refresh list after.
 - The user tests these manually. Claude never triggers them.

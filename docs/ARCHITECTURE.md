@@ -10,27 +10,38 @@
 
 `apsis-core` must stay UI-free and testable without root or a COSMIC session.
 
-## Backend trait (sketch — refine in Phase 1)
+## Backend trait (as built in Phase 1)
 
 ```rust
 pub trait Backend {
     fn list(&self) -> Result<SnapshotList>;
-    fn create(&self, comment: &str) -> Result<()>;
-    fn delete(&self, name: &str) -> Result<()>;
+    fn create(&self, comment: &str) -> Result<()>;   // empty comment = no comment
+    fn delete(&self, name: &str) -> Result<()>;      // name must be YYYY-MM-DD_HH-MM-SS
 }
 
 pub struct SnapshotList {
-    pub device: Option<String>,   // as reported by timeshift; never logged in fixtures unredacted
+    pub device: Option<String>,   // as reported by timeshift; None when "Not Selected"
+    pub uuid: Option<String>,     // backup device UUID; preferred for --snapshot-device
     pub mode: Option<Mode>,       // Btrfs | Rsync
     pub snapshots: Vec<Snapshot>,
+}
+
+pub struct Snapshot {
+    pub name: String,             // YYYY-MM-DD_HH-MM-SS
+    pub created: jiff::civil::DateTime,  // local time, from the name
+    pub tags: Vec<Tag>,           // OnDemand | Boot | Hourly | Daily | Weekly | Monthly
+    pub comment: Option<String>,
 }
 ```
 
 Implementations:
-- `TimeshiftCli` — builds argv (`Vec<OsString>`) and runs it through a `Runner` trait so tests can
-  inject canned output. Never passes user text through a shell; the comment is a single argv element.
-- `HelperClient` (phase 4) — same trait over D-Bus.
-- `Native` (phase 5) — btrfs / rsync.
+- `TimeshiftCli<R: Runner>` - builds argv (`Vec<OsString>`, `argv[0] = "timeshift"`) and runs it
+  through the `Runner` trait so tests can inject canned output. Never passes user text through a
+  shell; the comment is a single argv element. After each successful `list()` it remembers the
+  device (UUID, else path) and adds `--snapshot-device` to later calls. Phase 2 adds a runner that
+  prefixes `pkexec`.
+- `HelperClient` (phase 4) - same trait over D-Bus.
+- `Native` (phase 5) - btrfs / rsync.
 
 The applet calls the backend on a background task (libcosmic `Task`) and never blocks the UI thread.
 

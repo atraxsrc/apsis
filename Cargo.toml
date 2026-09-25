@@ -11,7 +11,9 @@ repository = "https://github.com/atraxsrc/apsis"
 [workspace.dependencies]
 apsis-core = { path = "crates/apsis-core" }
 i18n-embed-fl = "0.10"
+jiff = { version = "0.2", default-features = false, features = ["std"] }
 rust-embed = "8.11"
+thiserror = "2"
 tokio = { version = "1.52.0", features = ["full"] }
 xdgen = "0.1"
 

@@ -1,0 +1,5 @@
+Device : Not Selected
+
+
+** (process:99999): CRITICAL **: 11:24:41.486: gee_abstract_collection_get_size: assertion 'self != NULL' failed
+No snapshots found
