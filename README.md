@@ -11,9 +11,7 @@ It works with keyboard or mouse and follows your COSMIC theme.
 
 > **Status:** early development. Not ready for use.
 
-<!-- Screenshot goes here once Phase 2 (popup UI) is done:
 <p align="center"><img src="docs/screenshot.png" width="560" alt="Apsis popup"></p>
--->
 
 ## Name
 
