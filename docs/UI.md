@@ -5,16 +5,38 @@ It's a normal libcosmic popup, so it always floats and follows the theme (colour
 
 ## Mock
 
+Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, no code):
+
 ```
- ~/apsis $ ls --snapshots                     rsync · 3 snapshots
- ────────────────────────────────────────────────────────────────
- ▸ 2026-09-25 03:00   D     boot
-   2026-09-24 03:00   D
-   2026-09-18 12:41   O     "before kernel update"
- ────────────────────────────────────────────────────────────────
- [c]reate  [d]elete  [r]efresh  [?]help                     [esc]
+ ◎ ~/apsis $ ls --snapshots                                      rsync · 3 snapshots
+ ╭─ snapshots ──────────────────────────────────╮ ╭─ details ────────────────────╮
+ │ ▸ 2026-09-25 03:00   D     boot              │ │ name     2026-09-25_03-00-01 │
+ │   2026-09-24 03:00   D                       │ │ created  2026-09-25 03:00:01 │
+ │   2026-09-18 12:41   O     "before kernel u… │ │ age      3h ago              │
+ │                                              │ │ tags     D daily             │
+ │                                              │ │ comment  boot                │
+ ╰──────────────────────────────────────────────╯ ╰──────────────────────────────╯
+ ╭─ activity ───────────────────────────────────────────────────────────────────╮
+ │ snapshot created                                                             │
+ ╰──────────────────────────────────────────────────────────────────────────────╯
  > _
+ [c]reate  [d]elete  [r]efresh  [?]help                                     [esc]
 ```
+
+- Panes are rounded, bordered containers with the title set into the top border. The border
+  radius is the theme's small corner radius. The active pane's border and title use the accent
+  colour, the others the theme's divider colour (title dimmed).
+- Left pane (3/5 of the width): the snapshot list, or help / About in its place (title `help` /
+  `about`). Right pane (2/5): details of the selected snapshot, always shown. The left pane fits
+  the list: at least 5 rows, at most 8, then it scrolls (help and errors use 8, About 6). The
+  details pane has the same height; longer content scrolls.
+- Each pane is opaque, filled with the theme's background colour.
+- Enter or a double-click makes the details pane active; Enter again, Esc or a click on a row
+  goes back to the list.
+- Activity pane: the running create/delete with a spinner (accent border while it runs), else the
+  last result, else `idle` (dimmed).
+- The `>` line stays the input line (comment, `[y/N]`, and the `timeshift --list` spinner). The
+  key hints are the footer, the last row.
 
 ## Rules
 
@@ -24,7 +46,8 @@ It's a normal libcosmic popup, so it always floats and follows the theme (colour
 - The bottom `>` line is the input line: used for the create comment and delete confirm.
   `[c]reate` and `[d]elete` are only enabled once a list has shown a snapshot device, and
   nothing else is running; delete also needs a selected snapshot.
-- Width ~ 520 px logical, height fits up to ~8 rows then scrolls.
+- Width ~ 720 px logical, height fits up to ~8 rows then scrolls. A row's comment is cut to the
+  pane width with `…`; the details pane shows all of it.
 
 ## Keys
 
@@ -34,9 +57,9 @@ It's a normal libcosmic popup, so it always floats and follows the theme (colour
 | c | create → input line becomes `> comment: _`, Enter runs, Esc cancels |
 | d | delete selected → `> delete 2026-09-18_12-41-00? [y/N] _`; Enter with `y` deletes, anything else cancels |
 | r | refresh list |
-| Enter | show details (tags, comment, full name) |
+| Enter | make the details pane active, or go back to the list |
 | ? | help overlay |
-| Esc | cancel input, then close details/help, then the popup |
+| Esc | cancel input, then go back from details/help/about, then close the popup |
 
 ## States
 
@@ -44,8 +67,8 @@ It's a normal libcosmic popup, so it always floats and follows the theme (colour
 |---|---|
 | loading | `> timeshift --list` then a spinner character cycling `⠋⠙⠹⠸…` |
 | empty | `no snapshots yet — press [c] to create one` |
-| running | `> creating snapshot… ⠹` / `> deleting <name>… ⠹` in the input line, keys disabled except Esc (does not cancel root op) |
-| result | one line above `>`: `snapshot created` / `deleted <name>` (dimmed), or `create failed: <last stderr line>` (error colour); stays until the next create/delete |
+| running | `creating snapshot… ⠹` / `deleting <name>… ⠹` in the activity pane, keys disabled except Esc (does not cancel root op) |
+| result | in the activity pane: `snapshot created` / `deleted <name>` (dimmed), or `create failed: <last stderr line>` (error colour); stays until the next create/delete |
 | error | `error:` + last lines of stderr, `[r]etry` |
 | not installed | `timeshift not found — install it or wait for the native backend` |
 

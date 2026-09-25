@@ -18,19 +18,29 @@ failed-signal = timeshift was killed by a signal
 failed-auth = not authorised, or the password dialog was dismissed
 failed-other = { $message }
 
+pane-snapshots = snapshots
+pane-details = details
+pane-activity = activity
+pane-help = help
+pane-about = about
+
 details-name = name
 details-created = created
+details-age = age
 details-tags = tags
 details-comment = comment
+details-none = no snapshot selected
+
+activity-idle = idle
 
 help-move = move selection
 help-ends = first / last snapshot
-help-details = show or hide details
-help-create = create a snapshot (asks for a comment)
-help-delete = delete the selected snapshot (asks you to type y)
+help-details = focus details, or back to list
+help-create = create a snapshot, with a comment
+help-delete = delete selected (confirm with y)
 help-refresh = refresh the list
 help-help = show or hide this help
-help-escape = cancel the prompt, close details or help, then the popup
+help-escape = cancel, go back, close the popup
 
 menu-refresh = Refresh
 menu-about = About Apsis

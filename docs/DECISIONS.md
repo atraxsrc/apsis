@@ -208,6 +208,48 @@ Append-only. Newest at the bottom. Format: date — decision — why.
     same position rather than jumping to the top.
   - Esc order is now: cancel the prompt, close details/help/about, close the popup.
 
+- 2026-09-25 - Phase 3.5 superfile-style layout (look and feel only; written and unit-tested by
+  Claude, not yet looked at on a real panel).
+  - Panes are a libcosmic/iced `Stack`: the base layer is a bordered container pushed down by
+    half a line, the top layer is the title on a small backdrop in the popup's own background
+    colour (`background(transparent).base`, as `popup_container` uses), so the title cuts the
+    border. No per-side borders exist in iced, so this is the simplest way to set a title into a
+    border. On a translucent theme the border may show faintly through the title.
+  - Borders: accent when the pane is active, else `background(transparent).divider` (the same
+    colour as the popup's own border). Radius `corner_radii.radius_s`. No new colours.
+  - The details view is no longer an overlay that replaces the list: the details pane is always
+    there. `Overlay::Details` now only marks the details pane as active, so Enter, double-click
+    and Esc keep doing what they did (toggle, open, go back). Help and About still replace the
+    list, in the left pane, and rename its title.
+  - Create/delete progress and results moved from the `>` placeholder and the status line into
+    the activity pane (the status line is gone). The list spinner stays in the `>` placeholder:
+    a list is not an operation, and showing it in the activity pane would replace a create's
+    result with the refresh that follows it.
+  - Popup 720 px wide; the list and details panes are a fixed 8 rows (192 px) high so the
+    popup doesn't change height as snapshots come and go. Help, About, the error view and
+    details scroll if they don't fit.
+  - Rows use iced's `ellipsize` (one line, `…` at the end) with wrapping off, so a long comment
+    can't wrap into a second line of a fixed-height row. The old 28-character cut stays as an
+    upper bound.
+  - Help strings shortened to fit the narrower left pane.
+  - The `>` line moved below the activity pane; the key hints are now the last row (footer).
+
+- 2026-09-25 - Phase 3.5 fixes after the user's first look in the panel.
+  - Reported: every pane was see-through (the desktop showed through it), and the pane borders
+    were square. The view was still wrapped in `applet.popup_container`, so the popup
+    background hadn't changed. The only new rendering in Phase 3.5 was the `Stack`: its title
+    layer is drawn with `renderer.with_layer`, above a `Border`-only container. The cause wasn't
+    confirmed (Claude can't see the panel); the fix removes that construct.
+  - Panes are now built from plain filled containers in the popup's own layer, with no `Stack` and
+    no `Border` lines: each piece is a fill in the line colour (accent or
+    `background(transparent).divider`) holding a fill in `background(transparent).base`, inset by
+    1 px on the sides that show a line. The top row is a corner piece, the title, and a top-right
+    piece, half a line high and bottom-aligned so the line runs through the title's middle. Outer
+    corners use `corner_radii.radius_s`, the inner fill that minus 1 px. So each pane is opaque
+    in the theme background, with the theme's corners, whatever the popup's own fill does.
+  - Pane height: the snapshots pane fits the list, `clamp(len, 5, 8)` rows, then scrolls; help
+    and errors use 8 rows, About 6, the other states 5. The details pane takes the same height.
+
 ## Open
 
 - ~~App ID~~ - resolved 2026-09-25, see above.
