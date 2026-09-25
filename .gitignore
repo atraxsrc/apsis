@@ -1,0 +1,19 @@
+/target
+/vendor
+/vendor.tar
+/.scratch
+/.cargo/config.toml
+
+# Claude Code personal settings
+/.claude/settings.local.json
+
+# never commit
+.env
+.env.*
+*.log
+*.pem
+*.key
+*.sqlite
+*.db
+.config/
+.local/
