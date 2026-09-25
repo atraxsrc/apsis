@@ -29,3 +29,10 @@ help-details = show or hide details
 help-refresh = refresh the list
 help-help = show or hide this help
 help-escape = close details or help, then the popup
+
+menu-refresh = Refresh
+menu-about = About Apsis
+menu-panel-settings = Panel settings…
+
+about-license = license
+about-source = source

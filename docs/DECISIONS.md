@@ -149,6 +149,34 @@ Append-only. Newest at the bottom. Format: date — decision — why.
     and on reopen. So the focused, always-active input fixed it, whatever the reading of the
     source suggested; no popup re-creation needed.
 
+- 2026-09-25 - Right-click menu on the panel button (Refresh, About Apsis, Panel settings…).
+  - How COSMIC does it, from what's in the cargo cache (libcosmic 03d7dcb, cosmic-panel b5cc19e;
+    cosmic-applets itself wasn't fetched, only cargo may use the network): libcosmic has no
+    ready-made context menu for applets, and cosmic-panel just forwards the right button to the
+    applet. libcosmic does ship the pieces the system applets build their menus from:
+    `applet::menu_button` (the `AppletMenu` button style), `applet::padded_control` for dividers,
+    and `process::spawn` for launching settings. The applet button only handles the left
+    button, so a `mouse_area(...).on_right_release` around it takes the right one.
+  - The menu is a second popup (`menu: Option<Id>`), with its own 240 px width. Only one popup
+    has the grab at a time, so opening either one first destroys the other (`chain`, so the
+    destroy happens before the create). `view_window` picks by id.
+  - The menu uses the normal COSMIC look (`text::body` in `menu_button`), not monotext: it's a
+    system menu, and it then matches other applets' menus.
+  - Refresh and About open the popup, since that's where their output is shown: Refresh starts
+    a list (the same as `r`, still a password prompt), About sets a new `Overlay::About`.
+    Esc goes back to the list, as for help and details.
+  - About: name and version, the app comment, license and a repository link, all from
+    `Cargo.toml` via `env!("CARGO_PKG_*")`. The link is a `Button::Link` (accent text) that runs
+    `xdg-open <repository>`.
+  - `cosmic-settings panel` and `xdg-open` go through `cosmic::process::spawn` (double fork +
+    setsid, no zombie, survives a panel restart). This needed libcosmic's `process` feature,
+    which pulls in `libc` and `rustix`, both already in the dependency tree. A missing program
+    is logged to stderr, nothing else.
+  - Keys: the event subscription also runs while the menu is open; only Esc does anything there.
+  - Sandbox note: cargo only builds here with `HOME` pointed at a temp dir (and `--offline`):
+    with `~/.gitconfig` unreadable, libgit2 treats the libcosmic git db as broken and cargo
+    tries to re-create it in the read-only cargo home.
+
 ## Open
 
 - ~~App ID~~ - resolved 2026-09-25, see above.

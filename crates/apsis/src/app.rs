@@ -5,6 +5,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use apsis_core::{Backend, PkexecRunner, Snapshot, SnapshotList, TimeshiftCli};
+use cosmic::applet::{menu_button, padded_control};
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::keyboard::{self, Key, key::Named};
 use cosmic::iced::platform_specific::shell::wayland::commands::popup::{destroy_popup, get_popup};
@@ -14,7 +15,7 @@ use cosmic::iced::widget::text as iced_text;
 use cosmic::iced::{Alignment, Background, Border, Color, Length, Limits, Subscription};
 use cosmic::iced::{event, mouse, time, window::Id};
 use cosmic::prelude::*;
-use cosmic::widget::text::monotext;
+use cosmic::widget::text::{body, monotext};
 use cosmic::widget::{self, container, icon};
 use cosmic::{Theme, theme};
 
@@ -24,6 +25,8 @@ use crate::fmt;
 
 /// Popup width in logical pixels (UI.md: ~520).
 const POPUP_WIDTH: f32 = 520.0;
+/// Width of the right-click menu.
+const MENU_WIDTH: f32 = 240.0;
 /// Height of one snapshot row: monotext line height (20) plus vertical padding.
 const ROW_HEIGHT: f32 = 24.0;
 /// Rows shown before the list scrolls.
@@ -43,6 +46,11 @@ const SYMBOLIC_ICON_SVG: &[u8] = include_bytes!(
 /// Size of the icon in the popup header, matching the monotext line height.
 const HEADER_ICON_SIZE: u16 = 16;
 
+/// For the About view, from `Cargo.toml`.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const LICENSE: &str = env!("CARGO_PKG_LICENSE");
+const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+
 static LIST_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("snapshot-list"));
 /// The `>` input line. Keeping it focused gives the popup a focused widget for key input.
 static INPUT_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("prompt-input"));
@@ -58,6 +66,8 @@ pub struct AppModel {
     core: cosmic::Core,
     /// The popup id.
     popup: Option<Id>,
+    /// The right-click menu's popup id. At most one of `popup` and `menu` is open.
+    menu: Option<Id>,
     /// Configuration data that persists between application runs.
     config: Config,
     /// Shared with the background task that runs `pkexec timeshift --list`.
@@ -113,6 +123,7 @@ enum Overlay {
     None,
     Details,
     Help,
+    About,
 }
 
 /// Keys the popup reacts to (see UI.md).
@@ -132,6 +143,16 @@ pub enum KeyAction {
 #[derive(Debug, Clone)]
 pub enum Message {
     TogglePopup,
+    /// Right-click on the panel button.
+    ToggleMenu,
+    /// Menu: open the popup and refresh, like `r`.
+    MenuRefresh,
+    /// Menu: open the popup on the About view.
+    MenuAbout,
+    /// Menu: `cosmic-settings panel`.
+    MenuPanelSettings,
+    /// The repository link in the About view.
+    OpenRepository,
     PopupClosed(Id),
     Surface(cosmic::surface::Action<Message>),
     UpdateConfig(Config),
@@ -177,6 +198,7 @@ impl cosmic::Application for AppModel {
         let app = AppModel {
             core,
             popup: None,
+            menu: None,
             config,
             backend: Arc::new(TimeshiftCli::new(PkexecRunner)),
             listing: Listing::NotLoaded,
@@ -193,27 +215,32 @@ impl cosmic::Application for AppModel {
         Some(Message::PopupClosed(id))
     }
 
-    /// The panel button, with a tooltip saying how old the newest snapshot is.
+    /// The panel button, with a tooltip saying how old the newest snapshot is. Left click opens
+    /// the popup, right click the menu. The button itself only reacts to the left button.
     fn view(&self) -> Element<'_, Self::Message> {
         let button = self
             .core
             .applet
             .icon_button_from_handle(self.icon.clone())
             .on_press(Message::TogglePopup);
+        let button = widget::mouse_area(button).on_right_release(Message::ToggleMenu);
         self.core
             .applet
             .applet_tooltip(
                 button,
                 self.tooltip(),
-                self.popup.is_some(),
+                self.popup.is_some() || self.menu.is_some(),
                 Message::Surface,
                 None,
             )
             .into()
     }
 
-    /// The terminal-style popup.
-    fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
+    /// The terminal-style popup, or the right-click menu.
+    fn view_window(&self, id: Id) -> Element<'_, Self::Message> {
+        if self.menu == Some(id) {
+            return self.menu_view();
+        }
         let content = widget::column::with_children(vec![
             self.header(),
             widget::divider::horizontal::default().into(),
@@ -244,11 +271,11 @@ impl cosmic::Application for AppModel {
                 .watch_config::<Config>(Self::APP_ID)
                 .map(|update| Message::UpdateConfig(update.config)),
         ];
-        if self.popup.is_some() {
+        if self.popup.is_some() || self.menu.is_some() {
             subscriptions.push(event::listen_with(key_action));
-            if self.loading {
-                subscriptions.push(time::every(Duration::from_millis(80)).map(|_| Message::Tick));
-            }
+        }
+        if self.popup.is_some() && self.loading {
+            subscriptions.push(time::every(Duration::from_millis(80)).map(|_| Message::Tick));
         }
         Subscription::batch(subscriptions)
     }
@@ -260,13 +287,36 @@ impl cosmic::Application for AppModel {
                 return cosmic::task::message(cosmic::Action::Surface(action));
             }
             Message::TogglePopup => return self.toggle_popup(),
+            Message::ToggleMenu => return self.toggle_menu(),
+            Message::MenuRefresh => {
+                let open = self.open_popup(Overlay::None);
+                return Task::batch([open, self.start_list()]);
+            }
+            Message::MenuAbout => return self.open_popup(Overlay::About),
+            Message::MenuPanelSettings => {
+                let close = self.close_menu();
+                let mut settings = std::process::Command::new("cosmic-settings");
+                settings.arg("panel");
+                return Task::batch([close, spawn(settings)]);
+            }
+            Message::OpenRepository => {
+                let mut open = std::process::Command::new("xdg-open");
+                open.arg(REPOSITORY);
+                return spawn(open);
+            }
             Message::PopupClosed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;
                     self.overlay = Overlay::None;
                 }
+                if self.menu == Some(id) {
+                    self.menu = None;
+                }
             }
             Message::Key(id, action) if self.popup == Some(id) => return self.on_key(action),
+            Message::Key(id, KeyAction::Escape) if self.menu == Some(id) => {
+                return self.close_menu();
+            }
             Message::Key(id, action) => {
                 if *DEBUG_KEYS {
                     eprintln!(
@@ -320,8 +370,55 @@ impl AppModel {
             self.overlay = Overlay::None;
             return destroy_popup(popup);
         }
+        self.open_popup(Overlay::None)
+    }
+
+    /// Opens the right-click menu, closing the popup first; or closes the menu.
+    fn toggle_menu(&mut self) -> Task<cosmic::Action<Message>> {
+        if self.menu.is_some() {
+            return self.close_menu();
+        }
         let Some(parent) = self.core.main_window_id() else {
             return Task::none();
+        };
+        let close = match self.popup.take() {
+            Some(popup) => {
+                self.overlay = Overlay::None;
+                destroy_popup(popup)
+            }
+            None => Task::none(),
+        };
+        let id = Id::unique();
+        self.menu = Some(id);
+        let mut settings = self
+            .core
+            .applet
+            .get_popup_settings(parent, id, None, None, None);
+        settings.positioner.size_limits = Limits::NONE
+            .min_width(MENU_WIDTH)
+            .max_width(MENU_WIDTH)
+            .min_height(1.0)
+            .max_height(1080.0);
+        close.chain(get_popup(settings))
+    }
+
+    fn close_menu(&mut self) -> Task<cosmic::Action<Message>> {
+        match self.menu.take() {
+            Some(menu) => destroy_popup(menu),
+            None => Task::none(),
+        }
+    }
+
+    /// Opens the popup on `overlay`, closing the menu first. If the popup is already open, only
+    /// switches the overlay. The first opening also starts the first list.
+    fn open_popup(&mut self, overlay: Overlay) -> Task<cosmic::Action<Message>> {
+        let close = self.close_menu();
+        self.overlay = overlay;
+        if self.popup.is_some() {
+            return close;
+        }
+        let Some(parent) = self.core.main_window_id() else {
+            return close;
         };
         let id = Id::unique();
         self.popup = Some(id);
@@ -334,7 +431,7 @@ impl AppModel {
             .max_width(POPUP_WIDTH)
             .min_height(1.0)
             .max_height(1080.0);
-        let open = Task::batch([get_popup(settings), focus_input()]);
+        let open = close.chain(Task::batch([get_popup(settings), focus_input()]));
         if matches!(self.listing, Listing::NotLoaded) {
             Task::batch([open, self.start_list()])
         } else {
@@ -493,6 +590,7 @@ impl AppModel {
     fn body(&self) -> Element<'_, Message> {
         match self.overlay {
             Overlay::Help => return help(),
+            Overlay::About => return about(),
             Overlay::Details => {
                 if let Some(snapshot) = self.snapshots().get(self.selected) {
                     return details(snapshot);
@@ -578,6 +676,34 @@ impl AppModel {
         .spacing(8)
         .align_y(Alignment::Center)
         .into()
+    }
+
+    /// The right-click menu: a standard COSMIC applet menu, not the terminal look.
+    fn menu_view(&self) -> Element<'_, Message> {
+        let content = widget::column::with_children(vec![
+            menu_button(body(fl!("menu-refresh")))
+                .on_press(Message::MenuRefresh)
+                .into(),
+            menu_button(body(fl!("menu-about")))
+                .on_press(Message::MenuAbout)
+                .into(),
+            padded_control(widget::divider::horizontal::default()).into(),
+            menu_button(body(fl!("menu-panel-settings")))
+                .on_press(Message::MenuPanelSettings)
+                .into(),
+        ])
+        .padding([8, 0]);
+        self.core
+            .applet
+            .popup_container(content)
+            .limits(
+                Limits::NONE
+                    .min_width(MENU_WIDTH)
+                    .max_width(MENU_WIDTH)
+                    .min_height(1.0)
+                    .max_height(1000.0),
+            )
+            .into()
     }
 
     /// The `>` input line: a focused, always-empty text input. While listing, its placeholder
@@ -684,22 +810,55 @@ fn help() -> Element<'static, Message> {
     key_value_rows(keys.map(|(k, v)| (k.to_owned(), v)))
 }
 
-fn key_value_rows<'a>(rows: impl IntoIterator<Item = (String, String)>) -> Element<'a, Message> {
-    let rows = rows.into_iter().map(|(key, value)| {
+/// ```text
+/// Apsis 0.1.0
+/// Timeshift-style system snapshots for the COSMIC™ desktop
+///
+/// license   GPL-3.0-only
+/// source    https://github.com/atraxsrc/apsis
+/// ```
+fn about() -> Element<'static, Message> {
+    let link = widget::button::custom(monotext(REPOSITORY))
+        .class(theme::Button::Link)
+        .padding(0)
+        .on_press(Message::OpenRepository);
+    widget::column::with_children(vec![
         widget::row::with_children(vec![
-            monotext(key)
-                .class(theme::Text::Accent)
-                .width(Length::Fixed(96.0))
-                .into(),
-            monotext(value).into(),
+            monotext(fl!("app-title")).class(theme::Text::Accent).into(),
+            monotext(VERSION).into(),
         ])
         .spacing(8)
-        .into()
-    });
+        .into(),
+        monotext(fl!("app-comment")).into(),
+        widget::space::vertical().height(Length::Fixed(10.0)).into(),
+        key_value_row(fl!("about-license"), monotext(LICENSE).into()),
+        key_value_row(fl!("about-source"), link.into()),
+    ])
+    .spacing(2)
+    .padding([4, 6])
+    .into()
+}
+
+fn key_value_rows<'a>(rows: impl IntoIterator<Item = (String, String)>) -> Element<'a, Message> {
+    let rows = rows
+        .into_iter()
+        .map(|(key, value)| key_value_row(key, monotext(value).into()));
     widget::column::with_children(rows)
         .spacing(2)
         .padding([4, 6])
         .into()
+}
+
+fn key_value_row(key: String, value: Element<'_, Message>) -> Element<'_, Message> {
+    widget::row::with_children(vec![
+        monotext(key)
+            .class(theme::Text::Accent)
+            .width(Length::Fixed(96.0))
+            .into(),
+        value,
+    ])
+    .spacing(8)
+    .into()
 }
 
 /// The installed symbolic icon, or the embedded copy when the icon theme doesn't have it.
@@ -714,6 +873,18 @@ fn symbolic_icon() -> icon::Handle {
     let mut handle = icon::from_svg_bytes(SYMBOLIC_ICON_SVG);
     handle.symbolic = true;
     handle
+}
+
+/// Starts `command` detached from the applet (double fork), so it outlives a panel restart and
+/// leaves no zombie. A missing program is only logged.
+fn spawn(command: std::process::Command) -> Task<cosmic::Action<Message>> {
+    Task::future(async move {
+        let program = command.get_program().to_owned();
+        if cosmic::process::spawn(command).await.is_none() {
+            eprintln!("apsis: could not start {}", program.display());
+        }
+    })
+    .discard()
 }
 
 /// Focuses the `>` line.
@@ -908,6 +1079,105 @@ mod tests {
                 assert_eq!(action(Key::Named(named), status), Some(want), "{named:?}");
             }
         }
+    }
+
+    /// An applet with a main window, nothing open, and a failed list (so opening the popup
+    /// doesn't start one by itself). Tasks returned by `update` are never run.
+    fn model() -> AppModel {
+        let mut core = cosmic::Core::default();
+        core.set_main_window_id(Some(Id::unique()));
+        AppModel {
+            core,
+            popup: None,
+            menu: None,
+            config: Config::default(),
+            backend: Arc::new(TimeshiftCli::new(PkexecRunner)),
+            listing: Listing::Failed(ListError::NotInstalled),
+            loading: false,
+            spinner: 0,
+            selected: 0,
+            overlay: Overlay::None,
+            icon: symbolic_icon(),
+        }
+    }
+
+    fn send(app: &mut AppModel, message: Message) {
+        let _ = cosmic::Application::update(app, message);
+    }
+
+    #[test]
+    fn right_click_swaps_the_popup_for_the_menu() {
+        let mut app = model();
+        send(&mut app, Message::TogglePopup);
+        send(&mut app, Message::ToggleHelp);
+        send(&mut app, Message::ToggleMenu);
+        assert!(app.popup.is_none());
+        assert!(app.menu.is_some());
+        assert_eq!(app.overlay, Overlay::None);
+        send(&mut app, Message::ToggleMenu);
+        assert!(app.menu.is_none());
+    }
+
+    #[test]
+    fn left_click_swaps_the_menu_for_the_popup() {
+        let mut app = model();
+        send(&mut app, Message::ToggleMenu);
+        send(&mut app, Message::TogglePopup);
+        assert!(app.menu.is_none());
+        assert!(app.popup.is_some());
+    }
+
+    #[test]
+    fn menu_about_opens_the_popup_on_the_about_view() {
+        let mut app = model();
+        send(&mut app, Message::ToggleMenu);
+        send(&mut app, Message::MenuAbout);
+        assert!(app.menu.is_none());
+        assert!(app.popup.is_some());
+        assert_eq!(app.overlay, Overlay::About);
+        send(&mut app, Message::Escape);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(app.popup.is_some());
+    }
+
+    #[test]
+    fn menu_refresh_opens_the_popup_and_lists() {
+        let mut app = model();
+        send(&mut app, Message::ToggleMenu);
+        send(&mut app, Message::MenuRefresh);
+        assert!(app.menu.is_none());
+        assert!(app.popup.is_some());
+        assert!(app.loading);
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn menu_keys_only_escape_counts() {
+        let mut app = model();
+        send(&mut app, Message::ToggleMenu);
+        let menu = app.menu.expect("menu open");
+        send(&mut app, Message::Key(menu, KeyAction::Refresh));
+        assert!(!app.loading);
+        assert_eq!(app.menu, Some(menu));
+        send(&mut app, Message::Key(menu, KeyAction::Escape));
+        assert!(app.menu.is_none());
+    }
+
+    #[test]
+    fn menu_dismissed_by_the_compositor_leaves_the_popup_state_alone() {
+        let mut app = model();
+        send(&mut app, Message::ToggleMenu);
+        let menu = app.menu.expect("menu open");
+        send(&mut app, Message::PopupClosed(menu));
+        assert!(app.menu.is_none());
+        assert!(app.popup.is_none());
+    }
+
+    #[test]
+    fn about_values_come_from_cargo() {
+        assert_eq!(LICENSE, "GPL-3.0-only");
+        assert!(REPOSITORY.starts_with("https://"));
+        assert!(!VERSION.is_empty());
     }
 
     #[test]

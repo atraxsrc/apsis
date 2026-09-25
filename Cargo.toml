@@ -32,6 +32,8 @@ features = [
     "dbus-config",
     # Support creating additional application windows.
     "multi-window",
+    # Detached process spawning (`cosmic-settings panel`, `xdg-open`)
+    "process",
     # Uses tokio as the executor for the runtime
     "tokio",
     # Add Wayland support to winit

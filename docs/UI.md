@@ -51,3 +51,29 @@ It's a normal libcosmic popup, so it always floats and follows the theme (colour
 - Symbolic icon `io.github.atraxsrc.Apsis-symbolic` (an orbit with its two apsides), tinted by
   the theme. The popup header shows it in the accent colour before `~/apsis`.
 - Tooltip: `Apsis — last snapshot 3h ago` or `Apsis — no snapshots`.
+- Left click: the popup. Right click: a small menu (a standard COSMIC applet menu, not the
+  terminal look):
+
+  ```
+  Refresh              opens the popup and lists, like [r]
+  About Apsis          opens the popup on the About view
+  ─────────────────
+  Panel settings…      cosmic-settings panel
+  ```
+
+  No "Quit": the panel owns the applet process. Only one of popup and menu is open at a time.
+  Esc closes the menu.
+
+## About view
+
+Shown inside the popup, like help and details; Esc goes back to the list.
+
+```
+ Apsis 0.1.0
+ Timeshift-style system snapshots for the COSMIC™ desktop
+
+ license   GPL-3.0-only
+ source    https://github.com/atraxsrc/apsis
+```
+
+Version, license and repository come from `Cargo.toml`. The link opens with `xdg-open`.
