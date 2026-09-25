@@ -102,11 +102,32 @@ Append-only. Newest at the bottom. Format: date — decision — why.
   - Fluent's Unicode isolation marks are turned off; they render as stray glyphs in monospace text.
   - The applet enables `jiff`'s `tz-system` + `tzdb-zoneinfo` to get local "now" for "3h ago".
 
+- 2026-09-25 - Icons (artwork by the user, made outside the repo):
+  - `resources/icons/hicolor/scalable/apps/io.github.atraxsrc.Apsis.svg` is the full-colour app
+    icon; `resources/icons/hicolor/symbolic/apps/io.github.atraxsrc.Apsis-symbolic.svg` is the
+    single-colour panel icon. The template's empty `resources/icon.svg` is gone.
+  - `just install` puts them in `$prefix/share/icons/hicolor/{scalable,symbolic}/apps/`;
+    `uninstall` removes both. The metainfo now installs to `share/metainfo` (was `share/appdata`).
+  - Desktop entry `Icon=` and metainfo `<icon type="stock">` both use the app ID. The old
+    `type="remote"` icon pointed at a file that never existed.
+  - Panel button: `io.github.atraxsrc.Apsis-symbolic` from the icon theme, drawn as symbolic so
+    libcosmic tints it with the theme text colour. Looked up once at startup, with libcosmic's
+    name fallback **off**: by default it retries the name cut at each `-`, which would pick the
+    full-colour `io.github.atraxsrc.Apsis` when only the symbolic one is missing. If the lookup
+    fails (`just run` before `just install`), the applet uses the same SVG embedded with
+    `include_bytes!`, so there is one copy of the artwork.
+  - Popup header: the same symbolic icon, 16 px, tinted with `accent_text_color()`, the colour
+    of the `~/apsis` text beside it (the theme's accent, adjusted for contrast).
+  - These are pre-existing template leftovers, not caused by the icon change; `appstreamcli
+    validate` and `desktop-file-validate` report the same things before and after. For Phase 7:
+    the metainfo has no `<description>` (an error for appstream), no homepage `url`, and no
+    `developer` element, and `COSMIC` isn't a registered category (`X-COSMIC` or a main category).
+
 ## Open
 
 - ~~App ID~~ - resolved 2026-09-25, see above.
 - ~~License~~ - resolved 2026-09-25, see above.
-- Icon artwork.
+- ~~Icon artwork~~ - resolved 2026-09-25, see above.
 - Phase 4 helper vs. shipping a narrow pkexec wrapper script — decide after Phase 3.
 - ~~`--snapshot-device`: device path or UUID?~~ - resolved 2026-09-25, see above.
 - ~~Does `--scripted` change the `--list` format?~~ - resolved 2026-09-25, see above.
@@ -116,4 +137,5 @@ Append-only. Newest at the bottom. Format: date — decision — why.
   it uses on failure (Apsis treats any non-zero exit as failure). Apsis parses stdout only; if the
   popup says "unrecognised `timeshift --list` output", the table is probably on stderr.
 - Phase 2: confirm on a real panel that the popup gets keyboard focus (keys were only reasoned
-  about, not run, by Claude) and that `document-open-recent-symbolic` exists in the icon theme.
+  about, not run, by Claude). ~~Check that `document-open-recent-symbolic` exists~~ - replaced by
+  the Apsis symbolic icon, 2026-09-25.

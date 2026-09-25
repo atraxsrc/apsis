@@ -5,9 +5,7 @@
   <project_license>GPL-3.0-only</project_license>
   <name>Apsis</name>
   <summary>Timeshift-style system snapshots for the COSMIC™ desktop</summary>
-  <icon type="remote" width="64" height="64" scale="1">
-    https://github.com/atraxsrc/apsis/raw/main/resources/icons/hicolor/scalable/apps/icon.svg
-  </icon>
+  <icon type="stock">io.github.atraxsrc.Apsis</icon>
   <url type="vcs-browser">https://github.com/atraxsrc/apsis</url>
   <launchable type="desktop-id">io.github.atraxsrc.Apsis.desktop</launchable>
   <provides>

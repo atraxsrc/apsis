@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -8,12 +9,13 @@ use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::keyboard::{self, Key, key::Named};
 use cosmic::iced::platform_specific::shell::wayland::commands::popup::{destroy_popup, get_popup};
 use cosmic::iced::widget::scrollable::{Direction, RelativeOffset, Scrollbar, snap_to};
+use cosmic::iced::widget::svg as iced_svg;
 use cosmic::iced::widget::text as iced_text;
 use cosmic::iced::{Alignment, Background, Border, Color, Length, Limits, Subscription};
 use cosmic::iced::{event, mouse, time, window::Id};
 use cosmic::prelude::*;
 use cosmic::widget::text::monotext;
-use cosmic::widget::{self, container};
+use cosmic::widget::{self, container, icon};
 use cosmic::{Theme, theme};
 
 use crate::config::Config;
@@ -31,6 +33,15 @@ const ROW_COMMENT_CHARS: usize = 28;
 /// Lines of stderr shown in the error state.
 const STDERR_LINES: usize = 6;
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Themed name of the panel icon; installed by `just install`.
+const SYMBOLIC_ICON: &str = "io.github.atraxsrc.Apsis-symbolic";
+/// The same SVG, for when it isn't installed yet (`just run`).
+const SYMBOLIC_ICON_SVG: &[u8] = include_bytes!(
+    "../../../resources/icons/hicolor/symbolic/apps/io.github.atraxsrc.Apsis-symbolic.svg"
+);
+/// Size of the icon in the popup header, matching the monotext line height.
+const HEADER_ICON_SIZE: u16 = 16;
 
 static LIST_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("snapshot-list"));
 
@@ -53,6 +64,8 @@ pub struct AppModel {
     /// Index into the displayed (newest first) snapshots.
     selected: usize,
     overlay: Overlay,
+    /// The symbolic Apsis icon, from the icon theme or embedded.
+    icon: icon::Handle,
 }
 
 /// What the last list produced.
@@ -162,6 +175,7 @@ impl cosmic::Application for AppModel {
             spinner: 0,
             selected: 0,
             overlay: Overlay::None,
+            icon: symbolic_icon(),
         };
         (app, Task::none())
     }
@@ -175,7 +189,7 @@ impl cosmic::Application for AppModel {
         let button = self
             .core
             .applet
-            .icon_button("document-open-recent-symbolic")
+            .icon_button_from_handle(self.icon.clone())
             .on_press(Message::TogglePopup);
         self.core
             .applet
@@ -427,6 +441,10 @@ impl AppModel {
             Listing::NotLoaded | Listing::Failed(_) => String::new(),
         };
         widget::row::with_children(vec![
+            icon::icon(self.icon.clone())
+                .size(HEADER_ICON_SIZE)
+                .class(theme::Svg::Custom(Rc::new(accent_svg)))
+                .into(),
             monotext("~/apsis").class(theme::Text::Accent).into(),
             monotext("$ ls --snapshots").into(),
             widget::space::horizontal().into(),
@@ -640,6 +658,20 @@ fn key_value_rows<'a>(rows: impl IntoIterator<Item = (String, String)>) -> Eleme
         .into()
 }
 
+/// The installed symbolic icon, or the embedded copy when the icon theme doesn't have it.
+///
+/// No name fallback: libcosmic would otherwise retry `io.github.atraxsrc.Apsis` (the full-colour
+/// icon) when only the `-symbolic` one is missing.
+fn symbolic_icon() -> icon::Handle {
+    let named = icon::from_name(SYMBOLIC_ICON).fallback(None);
+    if named.clone().path().is_some() {
+        return named.symbolic(true).handle();
+    }
+    let mut handle = icon::from_svg_bytes(SYMBOLIC_ICON_SVG);
+    handle.symbolic = true;
+    handle
+}
+
 /// Maps key presses to [`KeyAction`]s. Ctrl/Alt/Super combinations are left alone.
 fn key_action(event: event::Event, _status: event::Status, window: Id) -> Option<Message> {
     let event::Event::Keyboard(keyboard::Event::KeyPressed {
@@ -679,6 +711,13 @@ fn selected_row(theme: &Theme) -> container::Style {
             ..Border::default()
         },
         ..container::Style::default()
+    }
+}
+
+/// Symbolic icons in the accent colour, like the accent text beside them.
+fn accent_svg(theme: &Theme) -> iced_svg::Style {
+    iced_svg::Style {
+        color: Some(theme.cosmic().accent_text_color().into()),
     }
 }
 

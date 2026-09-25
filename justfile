@@ -4,16 +4,18 @@ appid := 'io.github.atraxsrc.Apsis'
 rootdir := ''
 prefix := '/usr'
 
-appdata := appid + '.metainfo.xml'
+metainfo := appid + '.metainfo.xml'
 desktop := appid + '.desktop'
 
 # Installation paths
 base-dir := absolute_path(clean(rootdir / prefix))
 cargo-target-dir := env('CARGO_TARGET_DIR', 'target')
-appdata-dst := base-dir / 'share' / 'appdata' / appdata
+metainfo-dst := base-dir / 'share' / 'metainfo' / metainfo
 bin-dst := base-dir / 'bin' / name
 desktop-dst := base-dir / 'share' / 'applications' / desktop
-icon-dst := base-dir / 'share' / 'icons' / 'hicolor' / 'scalable' / 'apps' / appid + '.svg'
+icons-dir := base-dir / 'share' / 'icons' / 'hicolor'
+icon-dst := icons-dir / 'scalable' / 'apps' / appid + '.svg'
+icon-symbolic-dst := icons-dir / 'symbolic' / 'apps' / appid + '-symbolic.svg'
 
 # Default recipe which runs `just build-release`
 default: build-release
@@ -54,12 +56,13 @@ run *args:
 install:
     install -Dm0755 {{ cargo-target-dir / 'release' / name }} {{bin-dst}}
     install -Dm0644 {{ 'target' / 'xdgen' / 'app.desktop' }} {{desktop-dst}}
-    install -Dm0644 {{ 'target' / 'xdgen' / 'app.metainfo.xml' }} {{appdata-dst}}
-    install -Dm0644 resources/icon.svg {{icon-dst}}
+    install -Dm0644 {{ 'target' / 'xdgen' / 'app.metainfo.xml' }} {{metainfo-dst}}
+    install -Dm0644 {{ 'resources' / 'icons' / 'hicolor' / 'scalable' / 'apps' / appid + '.svg' }} {{icon-dst}}
+    install -Dm0644 {{ 'resources' / 'icons' / 'hicolor' / 'symbolic' / 'apps' / appid + '-symbolic.svg' }} {{icon-symbolic-dst}}
 
 # Uninstalls installed files
 uninstall:
-    rm {{bin-dst}} {{desktop-dst}} {{appdata-dst}} {{icon-dst}}
+    rm {{bin-dst}} {{desktop-dst}} {{metainfo-dst}} {{icon-dst}} {{icon-symbolic-dst}}
 
 # Vendor dependencies locally
 vendor:

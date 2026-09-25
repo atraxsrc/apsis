@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- Apsis: an orbit with its two apsides. Periapsis glows (the point you return to). -->
+  <defs>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#9ef3fb" stop-opacity="0.85"/>
+      <stop offset="0.35" stop-color="#6fe3ef" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#6fe3ef" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="22" fill="#1b1b1b"/>
+  <ellipse cx="64" cy="63" rx="38" ry="15" transform="rotate(-32 64 63)"
+           fill="none" stroke="#8fe8f0" stroke-width="2"/>
+  <circle cx="96.2" cy="42.9" r="2.6" fill="#1b1b1b" stroke="#8fe8f0" stroke-width="1.2"/>
+  <circle cx="31.8" cy="83.1" r="15" fill="url(#glow)"/>
+  <circle cx="31.8" cy="83.1" r="4.2" fill="#ffffff"/>
+</svg>

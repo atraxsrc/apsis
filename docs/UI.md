@@ -48,5 +48,6 @@ It's a normal libcosmic popup, so it always floats and follows the theme (colour
 
 ## Panel button
 
-- Symbolic icon (clock-with-arrow style, original artwork).
+- Symbolic icon `io.github.atraxsrc.Apsis-symbolic` (an orbit with its two apsides), tinted by
+  the theme. The popup header shows it in the accent colour before `~/apsis`.
 - Tooltip: `Apsis — last snapshot 3h ago` or `Apsis — no snapshots`.

@@ -1,16 +1,35 @@
-# Apsis
+<p align="center">
+  <img src="resources/icons/hicolor/scalable/apps/io.github.atraxsrc.Apsis.svg" width="128" alt="Apsis logo">
+</p>
 
-Timeshift-style system snapshots for the COSMIC™ desktop.
+<h1 align="center">Apsis</h1>
 
-A panel applet with a small, keyboard-and-mouse terminal-style popup to list, create and delete
-system snapshots. It follows your COSMIC theme.
+<p align="center">Timeshift-style system snapshots for the COSMIC™ desktop.</p>
 
-> Status: early development. Not ready for use.
+A panel applet with a small terminal-style popup to list, create and delete system snapshots.
+It works with keyboard or mouse and follows your COSMIC theme.
+
+> **Status:** early development. Not ready for use.
+
+<!-- Screenshot goes here once Phase 2 (popup UI) is done:
+<p align="center"><img src="docs/screenshot.png" width="560" alt="Apsis popup"></p>
+-->
+
+## Name
+
+Apsis is not an acronym.
+
+In orbital mechanics an **apsis** (plural *apsides*, pronounced *AP-sis* / *AP-sih-deez*) is a
+turning point on a body's path: **periapsis** at the nearest point, **apoapsis** at the farthest.
+A system snapshot is the same idea: a fixed point on the machine's timeline that you can return to.
+
+The logo shows exactly that: an orbit with its two apsides, the glowing one being the point you
+come back to.
 
 ## Requirements
 
 - COSMIC desktop
-- [Timeshift](https://github.com/linuxmint/timeshift), configured (for now Apsis drives its CLI)
+- [Timeshift](https://github.com/linuxmint/timeshift), configured. For now Apsis drives its CLI.
 
 ## Build
 
@@ -22,4 +41,4 @@ sudo just install
 
 ## License
 
-GPL-3.0-only - see [LICENSE](LICENSE)
+GPL-3.0-only. See [LICENSE](LICENSE).

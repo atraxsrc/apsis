@@ -67,5 +67,6 @@ The applet calls the backend on a background task (libcosmic `Task`) and never b
 
 - `/usr/bin/apsis`
 - `/usr/share/applications/<app-id>.desktop` (with `X-CosmicApplet=true` as the template sets)
-- icons, metainfo
+- `/usr/share/icons/hicolor/{scalable,symbolic}/apps/<app-id>{,-symbolic}.svg`
+- `/usr/share/metainfo/<app-id>.metainfo.xml`
 - phase 4: helper binary, D-Bus service + policy, polkit policy, systemd unit
