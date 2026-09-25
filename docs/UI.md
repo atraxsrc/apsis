@@ -22,6 +22,8 @@ It's a normal libcosmic popup, so it always floats and follows the theme (colour
   colour as a left marker `▸` and a subtle accent background — not a hard-coded colour.
 - Every `[key]` hint is also a clickable button. Every row is clickable (select), double-click = details.
 - The bottom `>` line is the input line: used for the create comment and delete confirm.
+  `[c]reate` and `[d]elete` are only enabled once a list has shown a snapshot device, and
+  nothing else is running; delete also needs a selected snapshot.
 - Width ~ 520 px logical, height fits up to ~8 rows then scrolls.
 
 ## Keys
@@ -30,11 +32,11 @@ It's a normal libcosmic popup, so it always floats and follows the theme (colour
 |---|---|
 | ↑/↓, j/k | move selection |
 | c | create → input line becomes `> comment: _`, Enter runs, Esc cancels |
-| d | delete selected → `> delete 2026-09-18_12-41-00? [y/N] _` |
+| d | delete selected → `> delete 2026-09-18_12-41-00? [y/N] _`; Enter with `y` deletes, anything else cancels |
 | r | refresh list |
 | Enter | show details (tags, comment, full name) |
 | ? | help overlay |
-| Esc | cancel input / close popup |
+| Esc | cancel input, then close details/help, then the popup |
 
 ## States
 
@@ -42,7 +44,8 @@ It's a normal libcosmic popup, so it always floats and follows the theme (colour
 |---|---|
 | loading | `> timeshift --list` then a spinner character cycling `⠋⠙⠹⠸…` |
 | empty | `no snapshots yet — press [c] to create one` |
-| running | `> creating snapshot…` progress line, keys disabled except Esc (does not cancel root op) |
+| running | `> creating snapshot… ⠹` / `> deleting <name>… ⠹` in the input line, keys disabled except Esc (does not cancel root op) |
+| result | one line above `>`: `snapshot created` / `deleted <name>` (dimmed), or `create failed: <last stderr line>` (error colour); stays until the next create/delete |
 | error | `error:` + last lines of stderr, `[r]etry` |
 | not installed | `timeshift not found — install it or wait for the native backend` |
 

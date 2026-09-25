@@ -17,6 +17,9 @@ pub enum Error {
     /// The comment can't be passed to Timeshift safely.
     #[error("invalid comment: {0}")]
     InvalidComment(&'static str),
+    /// Create and delete only run against a device a list has shown; none is known yet.
+    #[error("no snapshot device known; list snapshots first")]
+    NoSnapshotDevice,
     /// The `timeshift` binary wasn't found.
     #[error("timeshift is not installed")]
     NotInstalled,

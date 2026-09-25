@@ -37,6 +37,8 @@ pub trait Runner {
 ///
 /// After each successful [`list`](Backend::list) it remembers the backup device and passes it as
 /// `--snapshot-device` on later calls, so every call targets the device the user is looking at.
+/// [`create`](Backend::create) and [`delete`](Backend::delete) refuse to run until a list has
+/// shown a device ([`Error::NoSnapshotDevice`]), rather than fall back to Timeshift's default.
 pub struct TimeshiftCli<R> {
     runner: R,
     snapshot_device: Mutex<Option<String>>,
@@ -52,14 +54,17 @@ impl<R: Runner> TimeshiftCli<R> {
 
     /// `timeshift <action...> --scripted [--snapshot-device <dev>]`
     fn command(&self, action: &[&str]) -> Vec<OsString> {
-        let mut argv: Vec<OsString> = vec![PROGRAM.into()];
-        argv.extend(action.iter().map(OsString::from));
-        argv.push("--scripted".into());
-        if let Some(device) = self.remembered_device().as_deref() {
-            argv.push("--snapshot-device".into());
-            argv.push(device.into());
-        }
-        argv
+        let device = self.remembered_device().clone();
+        build_command(action, device.as_deref())
+    }
+
+    /// `timeshift <action...> --scripted --snapshot-device <dev>`, only when a device is known.
+    fn targeted_command(&self, action: &[&str]) -> Result<Vec<OsString>> {
+        let device = self
+            .remembered_device()
+            .clone()
+            .ok_or(Error::NoSnapshotDevice)?;
+        Ok(build_command(action, Some(&device)))
     }
 
     /// Runs `argv` and returns stdout, or an error if it couldn't start or reported failure.
@@ -84,8 +89,27 @@ impl<R: Runner> TimeshiftCli<R> {
     }
 }
 
+fn build_command(action: &[&str], device: Option<&str>) -> Vec<OsString> {
+    let mut argv: Vec<OsString> = vec![PROGRAM.into()];
+    argv.extend(action.iter().map(OsString::from));
+    argv.push("--scripted".into());
+    if let Some(device) = device {
+        argv.push("--snapshot-device".into());
+        argv.push(device.into());
+    }
+    argv
+}
+
 /// Trims the comment and checks it's safe to pass as one argument and show in `--list`.
-fn validate_comment(comment: &str) -> Result<&str> {
+///
+/// [`Backend::create`] runs this too; the applet calls it first so a bad comment can be fixed
+/// before any password prompt.
+///
+/// # Errors
+///
+/// [`Error::InvalidComment`] for control characters, a leading `-`, or more than
+/// [`MAX_COMMENT_CHARS`] characters.
+pub fn validate_comment(comment: &str) -> Result<&str> {
     let comment = comment.trim();
     if comment.chars().any(char::is_control) {
         return Err(Error::InvalidComment("must not contain control characters"));
@@ -113,9 +137,9 @@ impl<R: Runner> Backend for TimeshiftCli<R> {
         // No `--tags`: v24.01.1 rejects `--tags O`, and O is the default (see TIMESHIFT-CLI.md).
         let comment = validate_comment(comment)?;
         let argv = if comment.is_empty() {
-            self.command(&["--create"])
+            self.targeted_command(&["--create"])?
         } else {
-            self.command(&["--create", "--comments", comment])
+            self.targeted_command(&["--create", "--comments", comment])?
         };
         self.run(&argv).map(drop)
     }
@@ -125,7 +149,7 @@ impl<R: Runner> Backend for TimeshiftCli<R> {
         if parse_snapshot_name(name).is_none() {
             return Err(Error::InvalidSnapshotName(name.to_owned()));
         }
-        self.run(&self.command(&["--delete", "--snapshot", name]))
+        self.run(&self.targeted_command(&["--delete", "--snapshot", name])?)
             .map(drop)
     }
 }

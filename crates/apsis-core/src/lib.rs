@@ -16,4 +16,4 @@ pub use error::{Error, Result};
 pub use model::{Mode, Snapshot, SnapshotList, Tag, parse_snapshot_name};
 pub use parse::parse_list;
 pub use pkexec::{PkexecRunner, find_in_path, pkexec_command};
-pub use timeshift::{MAX_COMMENT_CHARS, RunOutput, Runner, TimeshiftCli};
+pub use timeshift::{MAX_COMMENT_CHARS, RunOutput, Runner, TimeshiftCli, validate_comment};

@@ -42,9 +42,26 @@ In `apsis-core`:
 
 - `[c]reate`: inline prompt for a comment → `timeshift --create --comments <c> --scripted` (no `--tags`: v24.01.1 rejects `O`, and O is the default; see TIMESHIFT-CLI.md).
 - `[d]elete`: inline confirm (type `y`) → `timeshift --delete --snapshot <name> --scripted`.
+- Both pass `--snapshot-device <uuid>` from the last list, and refuse to run if no list has shown
+  a device.
 - Progress line while running; refresh list after.
 - The user tests these manually. Claude never triggers them.
 - **Done when:** create/delete work end-to-end on the user's machine.
+
+## Phase 3.5 - superfile-style layout
+
+Look and feel only; the terminal style, keys and theme rules stay. Visual reference:
+[superfile](https://github.com/yorukot/superfile) (looked at, no code copied).
+
+- Rounded bordered panels with the title set into the top border: `snapshots`, `details`,
+  `activity`.
+- Details pane for the selected snapshot: full name, age, tags spelled out, full comment.
+- Activity pane: the current or last operation and its result. Create/delete progress moves here
+  from the `>` line.
+- Footer row of key hints. The popup may grow to ~720 px wide.
+- Theme colours only: borders use the theme's divider/accent colours.
+- **Done when:** the three panes and the footer follow the live theme, light and dark, and every
+  Phase 3 action still works from keys and mouse.
 
 ## Phase 4 — Privileged helper (removes repeated password prompts)
 

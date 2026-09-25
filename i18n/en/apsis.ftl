@@ -7,7 +7,7 @@ tooltip-none = Apsis - no snapshots
 
 waiting = waiting for timeshift (authenticate in the polkit dialog)
 not-loaded = press [r] to list snapshots
-empty = no snapshots yet
+empty = no snapshots yet - press [c] to create one
 no-device = no snapshot device selected in Timeshift
 no-device-hint = set one up in Timeshift, then press [r]
 
@@ -26,9 +26,11 @@ details-comment = comment
 help-move = move selection
 help-ends = first / last snapshot
 help-details = show or hide details
+help-create = create a snapshot (asks for a comment)
+help-delete = delete the selected snapshot (asks you to type y)
 help-refresh = refresh the list
 help-help = show or hide this help
-help-escape = close details or help, then the popup
+help-escape = cancel the prompt, close details or help, then the popup
 
 menu-refresh = Refresh
 menu-about = About Apsis
@@ -36,3 +38,13 @@ menu-panel-settings = Panel settings…
 
 about-license = license
 about-source = source
+
+prompt-comment = comment:
+prompt-delete = delete { $name }? [y/N]
+creating = creating snapshot…
+deleting = deleting { $name }…
+created = snapshot created
+deleted = deleted { $name }
+delete-cancelled = delete cancelled
+create-failed = create failed: { $reason }
+delete-failed = delete failed: { $reason }

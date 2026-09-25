@@ -61,6 +61,20 @@ fn argv(args: &[&str]) -> Vec<OsString> {
     args.iter().map(OsString::from).collect()
 }
 
+/// A backend that has listed the fixture device, as the applet always has before a create or
+/// delete. `replies` answer the calls after that list.
+fn listed(
+    runner: &FakeRunner,
+    replies: impl IntoIterator<Item = io::Result<RunOutput>>,
+) -> TimeshiftCli<&FakeRunner> {
+    runner.replies.borrow_mut().push_front(ok(DEVICE));
+    runner.replies.borrow_mut().extend(replies);
+    let cli = TimeshiftCli::new(runner);
+    cli.list().unwrap();
+    runner.calls.borrow_mut().clear();
+    cli
+}
+
 #[test]
 fn first_list_uses_configured_device() {
     let runner = FakeRunner::replying([ok(DEVICE)]);
@@ -137,21 +151,21 @@ fn device_path_is_used_when_list_has_no_uuid() {
 
 #[test]
 fn unconfigured_list_forgets_previous_device() {
-    let runner = FakeRunner::replying([ok(DEVICE), ok(UNCONFIGURED), ok("")]);
+    let runner = FakeRunner::replying([ok(DEVICE), ok(UNCONFIGURED), ok(UNCONFIGURED)]);
     let cli = TimeshiftCli::new(&runner);
     cli.list().unwrap();
     cli.list().unwrap();
-    cli.create("").unwrap();
+    cli.list().unwrap();
     assert_eq!(
         runner.calls()[2],
-        argv(&["timeshift", "--create", "--scripted"])
+        argv(&["timeshift", "--list", "--scripted"])
     );
 }
 
 #[test]
 fn create_passes_comment_as_one_argument() {
-    let runner = FakeRunner::replying([ok("")]);
-    TimeshiftCli::new(&runner)
+    let runner = FakeRunner::default();
+    listed(&runner, [ok("")])
         .create("before kernel update; rm -rf /")
         .unwrap();
     assert_eq!(
@@ -162,14 +176,16 @@ fn create_passes_comment_as_one_argument() {
             "--comments",
             "before kernel update; rm -rf /",
             "--scripted",
+            "--snapshot-device",
+            UUID,
         ])]
     );
 }
 
 #[test]
 fn create_trims_comment() {
-    let runner = FakeRunner::replying([ok("")]);
-    TimeshiftCli::new(&runner).create("  hi there \t").unwrap();
+    let runner = FakeRunner::default();
+    listed(&runner, [ok("")]).create("  hi there \t").unwrap();
     assert_eq!(
         runner.calls(),
         [argv(&[
@@ -177,18 +193,26 @@ fn create_trims_comment() {
             "--create",
             "--comments",
             "hi there",
-            "--scripted"
+            "--scripted",
+            "--snapshot-device",
+            UUID,
         ])]
     );
 }
 
 #[test]
 fn blank_comment_omits_comments_flag() {
-    let runner = FakeRunner::replying([ok("")]);
-    TimeshiftCli::new(&runner).create("   ").unwrap();
+    let runner = FakeRunner::default();
+    listed(&runner, [ok("")]).create("   ").unwrap();
     assert_eq!(
         runner.calls(),
-        [argv(&["timeshift", "--create", "--scripted"])]
+        [argv(&[
+            "timeshift",
+            "--create",
+            "--scripted",
+            "--snapshot-device",
+            UUID
+        ])]
     );
 }
 
@@ -206,8 +230,8 @@ fn comment_with_control_characters_is_rejected_before_running() {
 fn comment_length_is_limited_in_characters() {
     // Multi-byte characters: the limit counts characters, not bytes.
     let at_limit = "é".repeat(MAX_COMMENT_CHARS);
-    let runner = FakeRunner::replying([ok("")]);
-    TimeshiftCli::new(&runner).create(&at_limit).unwrap();
+    let runner = FakeRunner::default();
+    listed(&runner, [ok("")]).create(&at_limit).unwrap();
     assert_eq!(runner.calls().len(), 1);
 
     let over = "é".repeat(MAX_COMMENT_CHARS + 1);
@@ -274,8 +298,8 @@ fn failed_list_reports_exit_code_and_stderr() {
 
 #[test]
 fn failed_create_and_delete_report_failure() {
-    let runner = FakeRunner::replying([failed(), failed()]);
-    let cli = TimeshiftCli::new(&runner);
+    let runner = FakeRunner::default();
+    let cli = listed(&runner, [failed(), failed()]);
     assert!(matches!(cli.create("x"), Err(Error::Failed { .. })));
     assert!(matches!(
         cli.delete("2026-09-19_09-29-57"),
@@ -314,8 +338,8 @@ fn comment_that_looks_like_an_option_is_rejected() {
 
 #[test]
 fn comment_may_contain_dashes_after_the_start() {
-    let runner = FakeRunner::replying([ok("")]);
-    TimeshiftCli::new(&runner)
+    let runner = FakeRunner::default();
+    listed(&runner, [ok("")])
         .create("pre-upgrade - kernel 6.x")
         .unwrap();
     assert_eq!(
@@ -326,6 +350,67 @@ fn comment_may_contain_dashes_after_the_start() {
             "--comments",
             "pre-upgrade - kernel 6.x",
             "--scripted",
+            "--snapshot-device",
+            UUID,
         ])]
     );
+}
+
+#[test]
+fn delete_targets_the_listed_device() {
+    let runner = FakeRunner::default();
+    listed(&runner, [ok("")])
+        .delete("2026-09-19_09-29-57")
+        .unwrap();
+    assert_eq!(
+        runner.calls(),
+        [argv(&[
+            "timeshift",
+            "--delete",
+            "--snapshot",
+            "2026-09-19_09-29-57",
+            "--scripted",
+            "--snapshot-device",
+            UUID,
+        ])]
+    );
+}
+
+#[test]
+fn create_and_delete_need_a_listed_device() {
+    // Nothing listed yet: nothing runs, rather than falling back to Timeshift's default device.
+    let runner = FakeRunner::default();
+    let cli = TimeshiftCli::new(&runner);
+    assert!(matches!(cli.create("x"), Err(Error::NoSnapshotDevice)));
+    assert!(matches!(
+        cli.delete("2026-09-19_09-29-57"),
+        Err(Error::NoSnapshotDevice)
+    ));
+    assert!(runner.calls().is_empty());
+
+    // A list without a configured device forgets the old one, so the same holds after it.
+    let runner = FakeRunner::replying([ok(DEVICE), ok(UNCONFIGURED)]);
+    let cli = TimeshiftCli::new(&runner);
+    cli.list().unwrap();
+    cli.list().unwrap();
+    assert!(matches!(cli.create(""), Err(Error::NoSnapshotDevice)));
+    assert_eq!(runner.calls().len(), 2);
+}
+
+#[test]
+fn bad_input_is_reported_before_a_missing_device() {
+    let runner = FakeRunner::default();
+    let cli = TimeshiftCli::new(&runner);
+    assert!(matches!(cli.create("-x"), Err(Error::InvalidComment(_))));
+    assert!(matches!(
+        cli.delete("--delete-all"),
+        Err(Error::InvalidSnapshotName(_))
+    ));
+}
+
+#[test]
+fn validate_comment_is_what_create_checks() {
+    assert_eq!(apsis_core::validate_comment("  hi  ").unwrap(), "hi");
+    assert!(apsis_core::validate_comment("-x").is_err());
+    assert!(apsis_core::validate_comment("a\nb").is_err());
 }

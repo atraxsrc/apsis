@@ -4,7 +4,10 @@ use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use apsis_core::{Backend, PkexecRunner, Snapshot, SnapshotList, TimeshiftCli};
+use apsis_core::{
+    Backend, MAX_COMMENT_CHARS, PkexecRunner, Snapshot, SnapshotList, TimeshiftCli,
+    validate_comment,
+};
 use cosmic::applet::{menu_button, padded_control};
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::keyboard::{self, Key, key::Named};
@@ -35,6 +38,8 @@ const VISIBLE_ROWS: u16 = 8;
 const ROW_COMMENT_CHARS: usize = 28;
 /// Lines of stderr shown in the error state.
 const STDERR_LINES: usize = 6;
+/// Longest answer kept at the `[y/N]` prompt; only `y` means yes.
+const CONFIRM_CHARS: usize = 3;
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Themed name of the panel icon; installed by `just install`.
@@ -75,6 +80,12 @@ pub struct AppModel {
     listing: Listing,
     /// A list is running in the background.
     loading: bool,
+    /// A create or delete is running in the background (as root, via pkexec).
+    running: Option<Operation>,
+    /// What the `>` line is asking for.
+    prompt: Prompt,
+    /// How the last create or delete went, or why a comment was refused.
+    status: Option<Status>,
     spinner: usize,
     /// Index into the displayed (newest first) snapshots.
     selected: usize,
@@ -91,12 +102,14 @@ enum Listing {
     NotLoaded,
     /// Snapshots newest first.
     Loaded(SnapshotList),
-    Failed(ListError),
+    Failed(CliError),
 }
 
 /// A `Clone`able summary of [`apsis_core::Error`] for messages and the view.
+///
+/// Used for list, create and delete.
 #[derive(Debug, Clone)]
-pub enum ListError {
+pub enum CliError {
     NotInstalled,
     Failed {
         code: Option<i32>,
@@ -105,7 +118,7 @@ pub enum ListError {
     Other(String),
 }
 
-impl From<apsis_core::Error> for ListError {
+impl From<apsis_core::Error> for CliError {
     fn from(error: apsis_core::Error) -> Self {
         match error {
             apsis_core::Error::NotInstalled => Self::NotInstalled,
@@ -116,6 +129,32 @@ impl From<apsis_core::Error> for ListError {
             other => Self::Other(other.to_string()),
         }
     }
+}
+
+/// What the `>` line is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Prompt {
+    /// Each typed character is a command key; the line stays empty.
+    Command,
+    /// `> comment: _` for a new snapshot. Enter creates it, Esc cancels.
+    Comment(String),
+    /// `> delete <name>? [y/N] _`. Enter with `y` deletes, anything else cancels.
+    ConfirmDelete { name: String, typed: String },
+}
+
+/// A create or delete, run as root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Operation {
+    /// With the comment as typed; the backend trims it.
+    Create(String),
+    Delete(String),
+}
+
+/// A line above the `>` line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Status {
+    Info(String),
+    Error(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +175,8 @@ pub enum KeyAction {
     Details,
     Refresh,
     Help,
+    Create,
+    Delete,
     Escape,
 }
 
@@ -162,7 +203,12 @@ pub enum Message {
     /// Enter in the `>` line.
     Submit,
     Refresh,
-    Listed(Result<SnapshotList, ListError>),
+    /// `[c]reate` / `[d]elete` hints.
+    StartCreate,
+    StartDelete,
+    Listed(Result<SnapshotList, CliError>),
+    /// A create or delete finished.
+    Finished(Operation, Result<(), CliError>),
     Tick,
     Select(usize),
     OpenDetails(usize),
@@ -203,6 +249,9 @@ impl cosmic::Application for AppModel {
             backend: Arc::new(TimeshiftCli::new(PkexecRunner)),
             listing: Listing::NotLoaded,
             loading: false,
+            running: None,
+            prompt: Prompt::Command,
+            status: None,
             spinner: 0,
             selected: 0,
             overlay: Overlay::None,
@@ -241,16 +290,18 @@ impl cosmic::Application for AppModel {
         if self.menu == Some(id) {
             return self.menu_view();
         }
-        let content = widget::column::with_children(vec![
+        let mut children = vec![
             self.header(),
             widget::divider::horizontal::default().into(),
             self.body(),
             widget::divider::horizontal::default().into(),
             self.hints(),
-            self.prompt(),
-        ])
-        .spacing(6)
-        .padding([10, 12]);
+        ];
+        children.extend(self.status_line());
+        children.push(self.prompt());
+        let content = widget::column::with_children(children)
+            .spacing(6)
+            .padding([10, 12]);
 
         self.core
             .applet
@@ -274,7 +325,7 @@ impl cosmic::Application for AppModel {
         if self.popup.is_some() || self.menu.is_some() {
             subscriptions.push(event::listen_with(key_action));
         }
-        if self.popup.is_some() && self.loading {
+        if self.popup.is_some() && (self.loading || self.running.is_some()) {
             subscriptions.push(time::every(Duration::from_millis(80)).map(|_| Message::Tick));
         }
         Subscription::batch(subscriptions)
@@ -307,7 +358,7 @@ impl cosmic::Application for AppModel {
             Message::PopupClosed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;
-                    self.overlay = Overlay::None;
+                    self.reset_popup_state();
                 }
                 if self.menu == Some(id) {
                     self.menu = None;
@@ -325,17 +376,28 @@ impl cosmic::Application for AppModel {
                     );
                 }
             }
-            Message::Input(text) => {
-                // The line stays empty in Phase 2: each typed character is a command key.
-                let tasks: Vec<_> = text
-                    .chars()
-                    .filter_map(char_action)
-                    .map(|action| self.on_key(action))
-                    .collect();
-                return Task::batch(tasks);
-            }
-            Message::Submit => return self.on_key(KeyAction::Details),
+            Message::Input(text) => match &mut self.prompt {
+                Prompt::Command => {
+                    // Each typed character is a command key; the line stays empty.
+                    let tasks: Vec<_> = text
+                        .chars()
+                        .filter_map(char_action)
+                        .map(|action| self.on_key(action))
+                        .collect();
+                    return Task::batch(tasks);
+                }
+                Prompt::Comment(comment) => {
+                    *comment = text.chars().take(MAX_COMMENT_CHARS).collect();
+                }
+                Prompt::ConfirmDelete { typed, .. } => {
+                    *typed = text.chars().take(CONFIRM_CHARS).collect();
+                }
+            },
+            Message::Submit => return self.submit(),
             Message::Refresh => return self.start_list(),
+            Message::StartCreate => return self.on_key(KeyAction::Create),
+            Message::StartDelete => return self.on_key(KeyAction::Delete),
+            Message::Finished(operation, result) => return self.on_finished(&operation, result),
             Message::Listed(result) => {
                 self.on_listed(result);
                 // The polkit dialog took keyboard focus; hand it back to the `>` line.
@@ -367,7 +429,7 @@ impl cosmic::Application for AppModel {
 impl AppModel {
     fn toggle_popup(&mut self) -> Task<cosmic::Action<Message>> {
         if let Some(popup) = self.popup.take() {
-            self.overlay = Overlay::None;
+            self.reset_popup_state();
             return destroy_popup(popup);
         }
         self.open_popup(Overlay::None)
@@ -383,7 +445,7 @@ impl AppModel {
         };
         let close = match self.popup.take() {
             Some(popup) => {
-                self.overlay = Overlay::None;
+                self.reset_popup_state();
                 destroy_popup(popup)
             }
             None => Task::none(),
@@ -439,9 +501,17 @@ impl AppModel {
         }
     }
 
-    /// Runs `pkexec timeshift --list` on a blocking thread. Does nothing if one is running.
+    /// The popup closed: drop overlays and any half-typed prompt. A running operation and its
+    /// status line stay.
+    fn reset_popup_state(&mut self) {
+        self.overlay = Overlay::None;
+        self.prompt = Prompt::Command;
+    }
+
+    /// Runs `pkexec timeshift --list` on a blocking thread. Does nothing while a list, create
+    /// or delete is running (Timeshift runs one at a time).
     fn start_list(&mut self) -> Task<cosmic::Action<Message>> {
-        if self.loading {
+        if self.loading || self.running.is_some() {
             return Task::none();
         }
         self.loading = true;
@@ -449,23 +519,25 @@ impl AppModel {
         let backend = Arc::clone(&self.backend);
         cosmic::task::future(async move {
             let result = match tokio::task::spawn_blocking(move || backend.list()).await {
-                Ok(listed) => listed.map_err(ListError::from),
-                Err(join) => Err(ListError::Other(join.to_string())),
+                Ok(listed) => listed.map_err(CliError::from),
+                Err(join) => Err(CliError::Other(join.to_string())),
             };
             Message::Listed(result)
         })
     }
 
-    fn on_listed(&mut self, result: Result<SnapshotList, ListError>) {
+    fn on_listed(&mut self, result: Result<SnapshotList, CliError>) {
         self.loading = false;
         match result {
             Ok(mut list) => {
                 // Keep the same snapshot selected across refreshes when it still exists.
+                // If it was deleted, stay at the same position.
                 let selected_name = self.snapshots().get(self.selected).map(|s| s.name.clone());
                 list.snapshots.sort_by_key(|s| std::cmp::Reverse(s.created));
+                let near = self.selected.min(list.snapshots.len().saturating_sub(1));
                 self.selected = selected_name
                     .and_then(|name| list.snapshots.iter().position(|s| s.name == name))
-                    .unwrap_or(0);
+                    .unwrap_or(near);
                 self.listing = Listing::Loaded(list);
             }
             Err(error) => {
@@ -478,7 +550,31 @@ impl AppModel {
         }
     }
 
+    /// Whether `c` can start a create: a list showed a snapshot device and nothing is running.
+    fn can_create(&self) -> bool {
+        let has_device =
+            matches!(&self.listing, Listing::Loaded(list) if list.snapshot_device().is_some());
+        has_device && !self.loading && self.running.is_none()
+    }
+
+    /// Whether `d` can start a delete: as for create, plus a snapshot is selected.
+    fn can_delete(&self) -> bool {
+        self.can_create() && self.selected < self.snapshots().len()
+    }
+
     fn on_key(&mut self, action: KeyAction) -> Task<cosmic::Action<Message>> {
+        // UI.md: while a create or delete runs, only Esc works (and doesn't cancel it).
+        if self.running.is_some() && action != KeyAction::Escape {
+            return Task::none();
+        }
+        if self.prompt != Prompt::Command {
+            return match action {
+                KeyAction::Escape => self.escape(),
+                // Enter the `>` line didn't capture (it had lost focus).
+                KeyAction::Details => self.submit(),
+                _ => Task::none(),
+            };
+        }
         let count = self.snapshots().len();
         let target = match action {
             KeyAction::Up => self.selected.checked_sub(1),
@@ -492,6 +588,25 @@ impl AppModel {
                 None
             }
             KeyAction::Refresh => return self.start_list(),
+            KeyAction::Create => {
+                if self.can_create() {
+                    self.overlay = Overlay::None;
+                    self.status = None;
+                    self.prompt = Prompt::Comment(String::new());
+                }
+                return focus_input();
+            }
+            KeyAction::Delete => {
+                if self.can_delete() {
+                    self.overlay = Overlay::None;
+                    self.status = None;
+                    self.prompt = Prompt::ConfirmDelete {
+                        name: self.snapshots()[self.selected].name.clone(),
+                        typed: String::new(),
+                    };
+                }
+                return focus_input();
+            }
             KeyAction::Help => {
                 self.toggle_overlay(Overlay::Help);
                 None
@@ -519,15 +634,112 @@ impl AppModel {
         )
     }
 
-    /// Esc closes the overlay if one is open, otherwise the popup.
+    /// Enter: runs what the prompt asked for, or shows details.
+    fn submit(&mut self) -> Task<cosmic::Action<Message>> {
+        match std::mem::replace(&mut self.prompt, Prompt::Command) {
+            Prompt::Command => {
+                if !self.snapshots().is_empty() {
+                    self.toggle_overlay(Overlay::Details);
+                }
+                Task::none()
+            }
+            Prompt::Comment(comment) => {
+                // Checked here too, so a bad comment can be fixed before the password prompt.
+                if let Err(error) = validate_comment(&comment) {
+                    self.status = Some(Status::Error(error.to_string()));
+                    self.prompt = Prompt::Comment(comment);
+                    return Task::none();
+                }
+                self.run(Operation::Create(comment))
+            }
+            Prompt::ConfirmDelete { name, typed } => {
+                if typed.trim().eq_ignore_ascii_case("y") {
+                    self.run(Operation::Delete(name))
+                } else {
+                    self.status = Some(Status::Info(fl!("delete-cancelled")));
+                    Task::none()
+                }
+            }
+        }
+    }
+
+    /// Runs `pkexec timeshift --create/--delete` on a blocking thread.
+    fn run(&mut self, operation: Operation) -> Task<cosmic::Action<Message>> {
+        if self.loading || self.running.is_some() {
+            return Task::none();
+        }
+        self.running = Some(operation.clone());
+        self.status = None;
+        self.spinner = 0;
+        let backend = Arc::clone(&self.backend);
+        cosmic::task::future(async move {
+            let task_operation = operation.clone();
+            let result = match tokio::task::spawn_blocking(move || match &task_operation {
+                Operation::Create(comment) => backend.create(comment),
+                Operation::Delete(name) => backend.delete(name),
+            })
+            .await
+            {
+                Ok(done) => done.map_err(CliError::from),
+                Err(join) => Err(CliError::Other(join.to_string())),
+            };
+            Message::Finished(operation, result)
+        })
+    }
+
+    /// Shows how it went and refreshes the list if Timeshift ran (not when pkexec refused, or
+    /// the input or device check stopped it first: nothing changed, and a refresh would be
+    /// another password prompt).
+    fn on_finished(
+        &mut self,
+        operation: &Operation,
+        result: Result<(), CliError>,
+    ) -> Task<cosmic::Action<Message>> {
+        self.running = None;
+        let ran = match &result {
+            Ok(()) => true,
+            Err(CliError::Failed { code, .. }) => !pkexec_refused(*code),
+            Err(CliError::NotInstalled | CliError::Other(_)) => false,
+        };
+        self.status = Some(match (operation, result) {
+            (Operation::Create(_), Ok(())) => Status::Info(fl!("created")),
+            (Operation::Delete(name), Ok(())) => Status::Info(fl!("deleted", name = name.clone())),
+            (Operation::Create(_), Err(error)) => {
+                Status::Error(fl!("create-failed", reason = error_summary(&error)))
+            }
+            (Operation::Delete(_), Err(error)) => {
+                Status::Error(fl!("delete-failed", reason = error_summary(&error)))
+            }
+        });
+        let mut tasks = Vec::new();
+        if ran {
+            tasks.push(self.start_list());
+        }
+        // The polkit dialog took keyboard focus; hand it back to the `>` line.
+        if self.popup.is_some() {
+            tasks.push(focus_input());
+        }
+        Task::batch(tasks)
+    }
+
+    /// Esc cancels a prompt, then closes the overlay, then the popup.
     fn escape(&mut self) -> Task<cosmic::Action<Message>> {
+        if self.prompt != Prompt::Command {
+            self.prompt = Prompt::Command;
+            self.status = None;
+            // Esc also unfocused the `>` line.
+            return focus_input();
+        }
         if self.overlay != Overlay::None {
             self.overlay = Overlay::None;
             // Esc also unfocused the `>` line.
             return focus_input();
         }
         match self.popup.take() {
-            Some(popup) => destroy_popup(popup),
+            Some(popup) => {
+                self.reset_popup_state();
+                destroy_popup(popup)
+            }
             None => Task::none(),
         }
     }
@@ -667,8 +879,17 @@ impl AppModel {
         } else {
             "[r]efresh"
         };
+        let idle = !self.loading && self.running.is_none();
         widget::row::with_children(vec![
-            hint(refresh, (!self.loading).then_some(Message::Refresh)),
+            hint(
+                "[c]reate",
+                self.can_create().then_some(Message::StartCreate),
+            ),
+            hint(
+                "[d]elete",
+                self.can_delete().then_some(Message::StartDelete),
+            ),
+            hint(refresh, idle.then_some(Message::Refresh)),
             hint("[?]help", Some(Message::ToggleHelp)),
             widget::space::horizontal().into(),
             hint("[esc]", Some(Message::Escape)),
@@ -706,15 +927,41 @@ impl AppModel {
             .into()
     }
 
-    /// The `>` input line: a focused, always-empty text input. While listing, its placeholder
-    /// reads `timeshift --list ⠹`.
-    fn prompt(&self) -> Element<'_, Message> {
-        let placeholder = if self.loading {
-            format!("timeshift --list {}", SPINNER[self.spinner])
-        } else {
-            String::new()
+    /// The result of the last create or delete, or why a comment was refused.
+    fn status_line(&self) -> Option<Element<'_, Message>> {
+        let line = match self.status.as_ref()? {
+            Status::Info(text) => monotext(text.as_str()).class(theme::Text::Custom(dim_text)),
+            Status::Error(text) => monotext(text.as_str()).class(theme::Text::Custom(error_text)),
         };
-        let input = widget::text_input::inline_input(placeholder, "")
+        Some(container(line).padding([0, 6]).into())
+    }
+
+    /// The `>` input line: a focused text input. As a command line it stays empty, and its
+    /// placeholder shows progress (`timeshift --list ⠹`, `creating snapshot… ⠹`). For a create
+    /// or delete it asks, after a label, for the comment or the `y`.
+    fn prompt(&self) -> Element<'_, Message> {
+        let spinner = SPINNER[self.spinner];
+        let (label, value, placeholder) = match (&self.running, &self.prompt) {
+            (Some(Operation::Create(_)), _) => (None, "", format!("{} {spinner}", fl!("creating"))),
+            (Some(Operation::Delete(name)), _) => (
+                None,
+                "",
+                format!("{} {spinner}", fl!("deleting", name = name.clone())),
+            ),
+            (None, Prompt::Comment(comment)) => {
+                (Some(fl!("prompt-comment")), comment.as_str(), String::new())
+            }
+            (None, Prompt::ConfirmDelete { name, typed }) => (
+                Some(fl!("prompt-delete", name = name.clone())),
+                typed.as_str(),
+                String::new(),
+            ),
+            (None, Prompt::Command) if self.loading => {
+                (None, "", format!("timeshift --list {spinner}"))
+            }
+            (None, Prompt::Command) => (None, "", String::new()),
+        };
+        let input = widget::text_input::inline_input(placeholder, value)
             .id(INPUT_ID.clone())
             .always_active()
             .font(cosmic::font::mono())
@@ -723,13 +970,13 @@ impl AppModel {
             .padding(0)
             .on_input(Message::Input)
             .on_submit(|_| Message::Submit);
-        widget::row::with_children(vec![
-            monotext(">").class(theme::Text::Accent).into(),
-            input.into(),
-        ])
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .into()
+        let mut children = vec![monotext(">").class(theme::Text::Accent).into()];
+        children.extend(label.map(|label| monotext(label).into()));
+        children.push(input.into());
+        widget::row::with_children(children)
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into()
     }
 }
 
@@ -748,22 +995,21 @@ fn lines<'a>(lines: impl IntoIterator<Item = String>) -> Element<'a, Message> {
         .into()
 }
 
-fn error_view(error: &ListError) -> Element<'_, Message> {
+fn error_view(error: &CliError) -> Element<'_, Message> {
     let mut out = Vec::new();
     match error {
-        ListError::NotInstalled => out.push(fl!("not-installed")),
-        ListError::Failed { code, stderr } => {
+        CliError::NotInstalled => out.push(fl!("not-installed")),
+        CliError::Failed { code, stderr } => {
             out.push(match code {
                 Some(code) => fl!("failed-code", code = code.to_string()),
                 None => fl!("failed-signal"),
             });
-            // pkexec: 126 = not authorised or dialog dismissed, 127 = couldn't authenticate.
-            if matches!(code, Some(126 | 127)) {
+            if pkexec_refused(*code) {
                 out.push(fl!("failed-auth"));
             }
             out.extend(stderr.iter().cloned());
         }
-        ListError::Other(message) => out.push(fl!("failed-other", message = message.clone())),
+        CliError::Other(message) => out.push(fl!("failed-other", message = message.clone())),
     }
     let mut column = vec![
         monotext(fl!("error-label"))
@@ -778,6 +1024,26 @@ fn error_view(error: &ListError) -> Element<'_, Message> {
         .spacing(2)
         .padding([4, 6])
         .into()
+}
+
+/// pkexec: 126 = not authorised or dialog dismissed, 127 = couldn't authenticate. Timeshift
+/// didn't run.
+fn pkexec_refused(code: Option<i32>) -> bool {
+    matches!(code, Some(126 | 127))
+}
+
+/// One line for the status line: why a create or delete failed.
+fn error_summary(error: &CliError) -> String {
+    match error {
+        CliError::NotInstalled => fl!("not-installed"),
+        CliError::Failed { code, .. } if pkexec_refused(*code) => fl!("failed-auth"),
+        CliError::Failed { code, stderr } => match (stderr.last(), code) {
+            (Some(line), _) => line.clone(),
+            (None, Some(code)) => fl!("failed-code", code = code.to_string()),
+            (None, None) => fl!("failed-signal"),
+        },
+        CliError::Other(message) => message.clone(),
+    }
 }
 
 fn details(snapshot: &Snapshot) -> Element<'_, Message> {
@@ -803,6 +1069,8 @@ fn help() -> Element<'static, Message> {
         ("↑ ↓  j k", fl!("help-move")),
         ("Home End", fl!("help-ends")),
         ("Enter", fl!("help-details")),
+        ("c", fl!("help-create")),
+        ("d", fl!("help-delete")),
         ("r", fl!("help-refresh")),
         ("?", fl!("help-help")),
         ("Esc", fl!("help-escape")),
@@ -898,6 +1166,8 @@ fn char_action(c: char) -> Option<KeyAction> {
         'k' => Some(KeyAction::Up),
         'j' => Some(KeyAction::Down),
         'r' => Some(KeyAction::Refresh),
+        'c' => Some(KeyAction::Create),
+        'd' => Some(KeyAction::Delete),
         '?' => Some(KeyAction::Help),
         _ => None,
     }
@@ -1039,6 +1309,8 @@ mod tests {
         assert_eq!(char_action('j'), Some(KeyAction::Down));
         assert_eq!(char_action('r'), Some(KeyAction::Refresh));
         assert_eq!(char_action('?'), Some(KeyAction::Help));
+        assert_eq!(char_action('c'), Some(KeyAction::Create));
+        assert_eq!(char_action('d'), Some(KeyAction::Delete));
         assert_eq!(char_action('x'), None);
         assert_eq!(char_action('J'), None);
     }
@@ -1092,8 +1364,11 @@ mod tests {
             menu: None,
             config: Config::default(),
             backend: Arc::new(TimeshiftCli::new(PkexecRunner)),
-            listing: Listing::Failed(ListError::NotInstalled),
+            listing: Listing::Failed(CliError::NotInstalled),
             loading: false,
+            running: None,
+            prompt: Prompt::Command,
+            status: None,
             spinner: 0,
             selected: 0,
             overlay: Overlay::None,
@@ -1171,6 +1446,211 @@ mod tests {
         send(&mut app, Message::PopupClosed(menu));
         assert!(app.menu.is_none());
         assert!(app.popup.is_none());
+    }
+
+    const DEVICE_LIST: &str = include_str!("../../apsis-core/tests/fixtures/list-rsync-device.txt");
+    const UNCONFIGURED_LIST: &str =
+        include_str!("../../apsis-core/tests/fixtures/list-unconfigured.txt");
+
+    /// The popup open on a listed fixture. Nothing here runs timeshift: `update`'s tasks are
+    /// dropped without being run.
+    fn listed(fixture: &str) -> AppModel {
+        let mut app = model();
+        app.on_listed(Ok(apsis_core::parse_list(fixture).unwrap()));
+        send(&mut app, Message::TogglePopup);
+        assert!(app.popup.is_some() && !app.loading);
+        app
+    }
+
+    fn typed(app: &mut AppModel, text: &str) {
+        send(app, Message::Input(text.to_owned()));
+    }
+
+    fn failed(code: i32) -> Result<(), CliError> {
+        Err(CliError::Failed {
+            code: Some(code),
+            stderr: vec!["E: boom".to_owned()],
+        })
+    }
+
+    #[test]
+    fn create_prompt_takes_text_not_commands() {
+        let mut app = listed(DEVICE_LIST);
+        typed(&mut app, "c");
+        assert_eq!(app.prompt, Prompt::Comment(String::new()));
+        typed(&mut app, "r and k");
+        assert_eq!(app.prompt, Prompt::Comment("r and k".to_owned()));
+        assert!(!app.loading);
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn comment_is_capped_while_typing() {
+        let mut app = listed(DEVICE_LIST);
+        typed(&mut app, "c");
+        typed(&mut app, &"é".repeat(MAX_COMMENT_CHARS + 5));
+        let Prompt::Comment(comment) = &app.prompt else {
+            panic!("{:?}", app.prompt)
+        };
+        assert_eq!(comment.chars().count(), MAX_COMMENT_CHARS);
+    }
+
+    #[test]
+    fn esc_cancels_the_prompt_and_keeps_the_popup() {
+        let mut app = listed(DEVICE_LIST);
+        let popup = app.popup.unwrap();
+        typed(&mut app, "c");
+        typed(&mut app, "half");
+        send(&mut app, Message::Key(popup, KeyAction::Escape));
+        assert_eq!(app.prompt, Prompt::Command);
+        assert_eq!(app.popup, Some(popup));
+        assert!(app.running.is_none());
+    }
+
+    #[test]
+    fn bad_comment_stays_in_the_prompt_without_running() {
+        let mut app = listed(DEVICE_LIST);
+        typed(&mut app, "c");
+        typed(&mut app, "--yes");
+        send(&mut app, Message::Submit);
+        assert_eq!(app.prompt, Prompt::Comment("--yes".to_owned()));
+        assert!(app.running.is_none());
+        assert!(matches!(app.status, Some(Status::Error(_))));
+    }
+
+    #[test]
+    fn enter_on_a_comment_starts_the_create() {
+        let mut app = listed(DEVICE_LIST);
+        typed(&mut app, "c");
+        typed(&mut app, "before update");
+        send(&mut app, Message::Submit);
+        assert_eq!(
+            app.running,
+            Some(Operation::Create("before update".to_owned()))
+        );
+        assert_eq!(app.prompt, Prompt::Command);
+    }
+
+    #[test]
+    fn delete_asks_for_y_about_the_selected_snapshot() {
+        let mut app = listed(DEVICE_LIST);
+        let popup = app.popup.unwrap();
+        send(&mut app, Message::Key(popup, KeyAction::Down));
+        let name = app.snapshots()[1].name.clone();
+
+        typed(&mut app, "d");
+        assert_eq!(
+            app.prompt,
+            Prompt::ConfirmDelete {
+                name: name.clone(),
+                typed: String::new()
+            }
+        );
+        typed(&mut app, "n");
+        send(&mut app, Message::Submit);
+        assert_eq!(app.prompt, Prompt::Command);
+        assert!(app.running.is_none());
+
+        for no in ["", "yes", "j"] {
+            typed(&mut app, "d");
+            typed(&mut app, no);
+            send(&mut app, Message::Submit);
+            assert!(app.running.is_none(), "{no:?}");
+        }
+
+        typed(&mut app, "d");
+        typed(&mut app, "Y");
+        send(&mut app, Message::Submit);
+        assert_eq!(app.running, Some(Operation::Delete(name)));
+    }
+
+    #[test]
+    fn create_and_delete_need_a_listed_device() {
+        for mut app in [listed(UNCONFIGURED_LIST), model()] {
+            send(&mut app, Message::StartCreate);
+            send(&mut app, Message::StartDelete);
+            assert_eq!(app.prompt, Prompt::Command);
+        }
+    }
+
+    #[test]
+    fn delete_needs_a_snapshot_but_create_does_not() {
+        let mut app = listed(DEVICE_LIST);
+        if let Listing::Loaded(list) = &mut app.listing {
+            list.snapshots.clear();
+        }
+        typed(&mut app, "d");
+        assert_eq!(app.prompt, Prompt::Command);
+        typed(&mut app, "c");
+        assert_eq!(app.prompt, Prompt::Comment(String::new()));
+    }
+
+    #[test]
+    fn only_esc_works_while_running() {
+        let mut app = listed(DEVICE_LIST);
+        let popup = app.popup.unwrap();
+        app.running = Some(Operation::Create(String::new()));
+        typed(&mut app, "rcdj");
+        send(&mut app, Message::Key(popup, KeyAction::Down));
+        send(&mut app, Message::Refresh);
+        send(&mut app, Message::MenuRefresh);
+        assert!(!app.loading);
+        assert_eq!(app.prompt, Prompt::Command);
+        assert_eq!(app.selected, 0);
+        send(&mut app, Message::Key(popup, KeyAction::Escape));
+        assert!(app.popup.is_none());
+        assert!(app.running.is_some(), "Esc doesn't cancel a root operation");
+    }
+
+    #[test]
+    fn finishing_refreshes_only_if_timeshift_ran() {
+        let create = Operation::Create(String::new());
+        for (result, refresh) in [
+            (Ok(()), true),
+            (failed(1), true),
+            (failed(126), false),
+            (failed(127), false),
+            (Err(CliError::NotInstalled), false),
+            (Err(CliError::Other("no snapshot device".to_owned())), false),
+        ] {
+            let mut app = listed(DEVICE_LIST);
+            app.running = Some(create.clone());
+            let ok = result.is_ok();
+            send(&mut app, Message::Finished(create.clone(), result));
+            assert!(app.running.is_none());
+            assert_eq!(app.loading, refresh);
+            assert_eq!(matches!(app.status, Some(Status::Info(_))), ok);
+        }
+    }
+
+    #[test]
+    fn failure_shows_the_last_stderr_line() {
+        let mut app = listed(DEVICE_LIST);
+        let delete = Operation::Delete("2026-09-19_09-29-57".to_owned());
+        send(&mut app, Message::Finished(delete, failed(1)));
+        let Some(Status::Error(text)) = &app.status else {
+            panic!("{:?}", app.status)
+        };
+        assert!(text.ends_with("E: boom"), "{text}");
+    }
+
+    #[test]
+    fn selection_stays_in_place_when_the_selected_snapshot_is_gone() {
+        let mut app = listed(DEVICE_LIST);
+        app.selected = 2;
+        let mut list = apsis_core::parse_list(DEVICE_LIST).unwrap();
+        let gone = app.snapshots()[2].name.clone();
+        list.snapshots.retain(|s| s.name != gone);
+        app.on_listed(Ok(list));
+        assert_eq!(app.selected, 2);
+    }
+
+    #[test]
+    fn closing_the_popup_drops_a_half_typed_prompt() {
+        let mut app = listed(DEVICE_LIST);
+        typed(&mut app, "c");
+        send(&mut app, Message::TogglePopup);
+        assert_eq!(app.prompt, Prompt::Command);
     }
 
     #[test]

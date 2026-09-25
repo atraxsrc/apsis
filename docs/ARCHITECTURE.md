@@ -38,7 +38,9 @@ Implementations:
 - `TimeshiftCli<R: Runner>` - builds argv (`Vec<OsString>`, `argv[0] = "timeshift"`) and runs it
   through the `Runner` trait so tests can inject canned output. Never passes user text through a
   shell; the comment is a single argv element. After each successful `list()` it remembers the
-  device (UUID, else path) and adds `--snapshot-device` to later calls. The applet uses
+  device (UUID, else path) and adds `--snapshot-device` to later calls. `create`/`delete` refuse to run
+  (`Error::NoSnapshotDevice`) until a list has shown a device, so they never fall back to
+  Timeshift's configured default. The applet uses
   `PkexecRunner` (`pkexec --disable-internal-agent /abs/path/timeshift ...`, see DECISIONS.md).
 - `HelperClient` (phase 4) - same trait over D-Bus.
 - `Native` (phase 5) - btrfs / rsync.

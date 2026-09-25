@@ -177,6 +177,37 @@ Append-only. Newest at the bottom. Format: date — decision — why.
     with `~/.gitconfig` unreadable, libgit2 treats the libcosmic git db as broken and cargo
     tries to re-create it in the read-only cargo home.
 
+- 2026-09-25 - Phase 3.5 (superfile-style layout) added to PLAN.md at the user's request, after
+  Phase 3. superfile is a visual reference only; no code from it.
+
+- 2026-09-25 - Phase 3 create and delete (written and unit-tested by Claude; never run by Claude).
+  - `apsis-core`: `create`/`delete` now refuse with `Error::NoSnapshotDevice` until a list has
+    shown a device, instead of leaving `--snapshot-device` out and acting on Timeshift's configured
+    default. Input checks still come first. The old test that created after an unconfigured list
+    now checks the next `--list` instead. `validate_comment` is public so the applet can refuse a
+    bad comment (e.g. a leading `-`) before any password prompt; `create` still checks it too.
+  - `c`: the `>` line becomes `> comment: _`. The input keeps what's typed (capped at
+    `MAX_COMMENT_CHARS` while typing), so `r`, `j` etc. are text there, not commands. Enter
+    validates, then runs; a refused comment stays in the prompt with the reason above it.
+  - `d`: `> delete <name>? [y/N] _` for the selected snapshot; the name is fixed when `d` is
+    pressed. Only `y`/`Y` then Enter deletes (the answer is capped at 3 characters, so `yes` is a
+    no); anything else shows `delete cancelled`.
+  - Both need a list that showed a snapshot device, no list running and no other operation
+    running; delete also needs a selected snapshot. The `[c]reate`/`[d]elete` hints are disabled
+    otherwise. Only one pkexec timeshift runs at a time: `r` and the menu's Refresh wait too.
+  - While running, the `>` line's placeholder shows `creating snapshot… ⠹` / `deleting <name>… ⠹`,
+    and only Esc works (it closes the popup; the root operation carries on). Closing the popup
+    drops a half-typed prompt but not a running operation or its result.
+  - Afterwards a result line above `>`: `snapshot created` / `deleted <name>` (dimmed), or
+    `create failed: <reason>` (error colour), where the reason is pkexec's "not authorised" for
+    126/127, else the last stderr line, else the exit code. It stays until the next create/delete.
+  - Refresh after: only when Timeshift actually ran (success, or a failure other than pkexec
+    126/127). Not after pkexec refused or a check stopped it, since nothing changed and a refresh
+    is another password prompt. So a create is two prompts (create, then list) until Phase 4.
+  - After a refresh the selection follows the snapshot by name; if it was deleted, it stays at the
+    same position rather than jumping to the top.
+  - Esc order is now: cancel the prompt, close details/help/about, close the popup.
+
 ## Open
 
 - ~~App ID~~ - resolved 2026-09-25, see above.
