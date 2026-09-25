@@ -1,0 +1,5 @@
+fallback_language = "en"
+
+[fluent]
+# Translations live at the workspace root.
+assets_dir = "../../i18n"

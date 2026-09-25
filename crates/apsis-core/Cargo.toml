@@ -1,0 +1,9 @@
+[package]
+name = "apsis-core"
+description = "Snapshot model and Timeshift backend for Apsis (no UI)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

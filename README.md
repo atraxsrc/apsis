@@ -22,4 +22,4 @@ sudo just install
 
 ## License
 
-TBD
+GPL-3.0-only

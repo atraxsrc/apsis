@@ -1,0 +1,22 @@
+[package]
+name = "apsis"
+description = "Timeshift-style system snapshots for the COSMIC™ desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "apsis"
+path = "src/main.rs"
+
+[build-dependencies]
+xdgen.workspace = true
+
+[dependencies]
+apsis-core.workspace = true
+i18n-embed.workspace = true
+i18n-embed-fl.workspace = true
+libcosmic.workspace = true
+rust-embed.workspace = true
+tokio.workspace = true
