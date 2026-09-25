@@ -35,7 +35,6 @@
       "Bash(wget *)",
       "Bash(nc *)",
       "Read(~/.ssh/**)",
-      "Read(~/.gitconfig)",
       "Read(~/.netrc)",
       "Read(~/.config/gh/**)",
       "Read(./.env)",
