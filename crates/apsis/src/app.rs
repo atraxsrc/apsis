@@ -44,6 +44,11 @@ const SYMBOLIC_ICON_SVG: &[u8] = include_bytes!(
 const HEADER_ICON_SIZE: u16 = 16;
 
 static LIST_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("snapshot-list"));
+/// The `>` input line. Keeping it focused gives the popup a focused widget for key input.
+static INPUT_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("prompt-input"));
+/// `APSIS_DEBUG_KEYS=1` logs key and popup focus events to stderr, to see where keys get lost.
+static DEBUG_KEYS: LazyLock<bool> =
+    LazyLock::new(|| std::env::var_os("APSIS_DEBUG_KEYS").is_some_and(|v| v == "1"));
 
 type Cli = TimeshiftCli<PkexecRunner>;
 
@@ -131,6 +136,10 @@ pub enum Message {
     Surface(cosmic::surface::Action<Message>),
     UpdateConfig(Config),
     Key(Id, KeyAction),
+    /// Text typed into the `>` line while it has focus.
+    Input(String),
+    /// Enter in the `>` line.
+    Submit,
     Refresh,
     Listed(Result<SnapshotList, ListError>),
     Tick,
@@ -258,9 +267,32 @@ impl cosmic::Application for AppModel {
                 }
             }
             Message::Key(id, action) if self.popup == Some(id) => return self.on_key(action),
-            Message::Key(..) => {}
+            Message::Key(id, action) => {
+                if *DEBUG_KEYS {
+                    eprintln!(
+                        "apsis: dropped {action:?} for window {id:?}, popup {:?}",
+                        self.popup
+                    );
+                }
+            }
+            Message::Input(text) => {
+                // The line stays empty in Phase 2: each typed character is a command key.
+                let tasks: Vec<_> = text
+                    .chars()
+                    .filter_map(char_action)
+                    .map(|action| self.on_key(action))
+                    .collect();
+                return Task::batch(tasks);
+            }
+            Message::Submit => return self.on_key(KeyAction::Details),
             Message::Refresh => return self.start_list(),
-            Message::Listed(result) => self.on_listed(result),
+            Message::Listed(result) => {
+                self.on_listed(result);
+                // The polkit dialog took keyboard focus; hand it back to the `>` line.
+                if self.popup.is_some() {
+                    return focus_input();
+                }
+            }
             Message::Tick => self.spinner = (self.spinner + 1) % SPINNER.len(),
             Message::Select(index) => {
                 self.selected = index;
@@ -302,7 +334,7 @@ impl AppModel {
             .max_width(POPUP_WIDTH)
             .min_height(1.0)
             .max_height(1080.0);
-        let open = get_popup(settings);
+        let open = Task::batch([get_popup(settings), focus_input()]);
         if matches!(self.listing, Listing::NotLoaded) {
             Task::batch([open, self.start_list()])
         } else {
@@ -394,7 +426,8 @@ impl AppModel {
     fn escape(&mut self) -> Task<cosmic::Action<Message>> {
         if self.overlay != Overlay::None {
             self.overlay = Overlay::None;
-            return Task::none();
+            // Esc also unfocused the `>` line.
+            return focus_input();
         }
         match self.popup.take() {
             Some(popup) => destroy_popup(popup),
@@ -547,18 +580,29 @@ impl AppModel {
         .into()
     }
 
-    /// `> _`, or `> timeshift --list ⠹` while listing.
+    /// The `>` input line: a focused, always-empty text input. While listing, its placeholder
+    /// reads `timeshift --list ⠹`.
     fn prompt(&self) -> Element<'_, Message> {
-        let text = if self.loading {
+        let placeholder = if self.loading {
             format!("timeshift --list {}", SPINNER[self.spinner])
         } else {
-            "_".to_owned()
+            String::new()
         };
+        let input = widget::text_input::inline_input(placeholder, "")
+            .id(INPUT_ID.clone())
+            .always_active()
+            .font(cosmic::font::mono())
+            .size(14.0)
+            .line_height(iced_text::LineHeight::Absolute(20.0.into()))
+            .padding(0)
+            .on_input(Message::Input)
+            .on_submit(|_| Message::Submit);
         widget::row::with_children(vec![
             monotext(">").class(theme::Text::Accent).into(),
-            monotext(text).into(),
+            input.into(),
         ])
         .spacing(8)
+        .align_y(Alignment::Center)
         .into()
     }
 }
@@ -672,8 +716,31 @@ fn symbolic_icon() -> icon::Handle {
     handle
 }
 
+/// Focuses the `>` line.
+fn focus_input() -> Task<cosmic::Action<Message>> {
+    widget::text_input::focus(INPUT_ID.clone())
+}
+
+/// Command keys that are typed as characters.
+fn char_action(c: char) -> Option<KeyAction> {
+    match c {
+        'k' => Some(KeyAction::Up),
+        'j' => Some(KeyAction::Down),
+        'r' => Some(KeyAction::Refresh),
+        '?' => Some(KeyAction::Help),
+        _ => None,
+    }
+}
+
 /// Maps key presses to [`KeyAction`]s. Ctrl/Alt/Super combinations are left alone.
-fn key_action(event: event::Event, _status: event::Status, window: Id) -> Option<Message> {
+///
+/// Characters and Enter only count when no widget took the key (`Ignored`): when the `>` line
+/// has focus it captures them and reports them through `on_input` / `on_submit` instead, so they
+/// aren't handled twice. Arrows, Home/End and Esc count either way.
+fn key_action(event: event::Event, status: event::Status, window: Id) -> Option<Message> {
+    if *DEBUG_KEYS {
+        log_focus_event(&event, window);
+    }
     let event::Event::Keyboard(keyboard::Event::KeyPressed {
         modified_key,
         modifiers,
@@ -682,21 +749,44 @@ fn key_action(event: event::Event, _status: event::Status, window: Id) -> Option
     else {
         return None;
     };
+    if *DEBUG_KEYS {
+        eprintln!("apsis: key {modified_key:?} {status:?} window {window:?}");
+    }
     if modifiers.control() || modifiers.alt() || modifiers.logo() {
         return None;
     }
+    let uncaptured = status == event::Status::Ignored;
     let action = match modified_key.as_ref() {
-        Key::Named(Named::ArrowUp) | Key::Character("k") => KeyAction::Up,
-        Key::Named(Named::ArrowDown) | Key::Character("j") => KeyAction::Down,
+        Key::Named(Named::ArrowUp) => KeyAction::Up,
+        Key::Named(Named::ArrowDown) => KeyAction::Down,
         Key::Named(Named::Home) => KeyAction::First,
         Key::Named(Named::End) => KeyAction::Last,
-        Key::Named(Named::Enter) => KeyAction::Details,
-        Key::Character("r") => KeyAction::Refresh,
-        Key::Character("?") => KeyAction::Help,
         Key::Named(Named::Escape) => KeyAction::Escape,
+        Key::Named(Named::Enter) if uncaptured => KeyAction::Details,
+        Key::Character(c) if uncaptured => {
+            let mut chars = c.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => char_action(c)?,
+                _ => return None,
+            }
+        }
         _ => return None,
     };
     Some(Message::Key(window, action))
+}
+
+/// Debug aid: popup keyboard focus changes, as the Wayland backend reports them.
+fn log_focus_event(event: &event::Event, window: Id) {
+    use cosmic::iced::event::PlatformSpecific;
+    use cosmic::iced::event::wayland::{Event as WaylandEvent, PopupEvent};
+    if let event::Event::PlatformSpecific(PlatformSpecific::Wayland(WaylandEvent::Popup(
+        popup_event @ (PopupEvent::Focused | PopupEvent::Unfocused),
+        _,
+        _,
+    ))) = event
+    {
+        eprintln!("apsis: popup {popup_event:?} window {window:?}");
+    }
 }
 
 /// Selected row: the accent colour, faded, as a background.
@@ -738,5 +828,93 @@ fn text_style(theme: &Theme, color: Color) -> iced_text::Style {
         color: Some(color),
         selected_fill: cosmic.accent.base.into(),
         selected_text_color: Some(cosmic.on_accent_color().into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cosmic::iced::keyboard::key::{NativeCode, Physical};
+    use cosmic::iced::keyboard::{Location, Modifiers};
+
+    fn press(key: Key, modifiers: Modifiers) -> event::Event {
+        event::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: Physical::Unidentified(NativeCode::Unidentified),
+            location: Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        })
+    }
+
+    fn action(key: Key, status: event::Status) -> Option<KeyAction> {
+        let window = Id::unique();
+        match key_action(press(key, Modifiers::empty()), status, window) {
+            Some(Message::Key(id, action)) if id == window => Some(action),
+            Some(other) => panic!("unexpected message {other:?}"),
+            None => None,
+        }
+    }
+
+    fn character(c: &str) -> Key {
+        Key::Character(c.into())
+    }
+
+    #[test]
+    fn command_characters_map_to_actions() {
+        assert_eq!(char_action('k'), Some(KeyAction::Up));
+        assert_eq!(char_action('j'), Some(KeyAction::Down));
+        assert_eq!(char_action('r'), Some(KeyAction::Refresh));
+        assert_eq!(char_action('?'), Some(KeyAction::Help));
+        assert_eq!(char_action('x'), None);
+        assert_eq!(char_action('J'), None);
+    }
+
+    #[test]
+    fn uncaptured_keys_are_handled_from_the_event_stream() {
+        let ignored = event::Status::Ignored;
+        assert_eq!(action(character("j"), ignored), Some(KeyAction::Down));
+        assert_eq!(action(character("?"), ignored), Some(KeyAction::Help));
+        assert_eq!(
+            action(Key::Named(Named::Enter), ignored),
+            Some(KeyAction::Details)
+        );
+        assert_eq!(action(character("x"), ignored), None);
+        assert_eq!(action(character("jj"), ignored), None);
+    }
+
+    #[test]
+    fn keys_the_input_line_captured_are_not_handled_twice() {
+        // The focused `>` line reports these through on_input / on_submit.
+        let captured = event::Status::Captured;
+        assert_eq!(action(character("j"), captured), None);
+        assert_eq!(action(character("r"), captured), None);
+        assert_eq!(action(Key::Named(Named::Enter), captured), None);
+    }
+
+    #[test]
+    fn navigation_keys_count_even_when_captured() {
+        for status in [event::Status::Ignored, event::Status::Captured] {
+            let table = [
+                (Named::ArrowUp, KeyAction::Up),
+                (Named::ArrowDown, KeyAction::Down),
+                (Named::Home, KeyAction::First),
+                (Named::End, KeyAction::Last),
+                (Named::Escape, KeyAction::Escape),
+            ];
+            for (named, want) in table {
+                assert_eq!(action(Key::Named(named), status), Some(want), "{named:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn modifier_combinations_are_left_alone() {
+        for modifiers in [Modifiers::CTRL, Modifiers::ALT, Modifiers::LOGO] {
+            let event = press(character("r"), modifiers);
+            assert!(key_action(event, event::Status::Ignored, Id::unique()).is_none());
+        }
     }
 }

@@ -123,6 +123,32 @@ Append-only. Newest at the bottom. Format: date — decision — why.
     the metainfo has no `<description>` (an error for appstream), no homepage `url`, and no
     `developer` element, and `COSMIC` isn't a registered category (`X-COSMIC` or a main category).
 
+- 2026-09-25 - Keyboard in the panel popup (user report: keys do nothing in the panel; mouse fine).
+  - The `>` line is now a real libcosmic `text_input` (`inline_input` style, monospace, always
+    empty) with an `Id`. It is `always_active()` (libcosmic re-focuses it on every layout) and also
+    gets an explicit `text_input::focus` when the popup opens, after each `pkexec` list returns
+    (the polkit dialog takes focus), and after Esc closes an overlay (Esc unfocuses the input).
+  - Routing: while the line has focus it captures printable keys and Enter, which arrive as
+    `on_input` (each character is a command: j/k/r/?) and `on_submit` (details). The event
+    subscription handles characters and Enter only when no widget captured them, so nothing runs
+    twice. Arrows, Home/End and Esc come from the event subscription either way (the input doesn't
+    report them). Unit tests cover the routing.
+  - What the source says (libcosmic 03d7dcb, its iced fork, cosmic-panel b5cc19e, read locally from
+    the cargo cache; cosmic-applets was not fetched, since only cargo may use the network): key
+    events go to whichever Wayland surface has keyboard focus, tagged with that surface's window
+    id, whether or not a widget has focus. `get_popup_settings` asks for a grab; cosmic-panel gives
+    an embedded applet's new popup keyboard focus when it's created and forwards the grab. So a
+    focused widget is probably not what decides it at the Wayland level, and the fix above may not
+    be enough on its own. Likely suspect: the polkit dialog, which opens right after the first
+    popup, takes keyboard focus away from the grabbed popup, and a client can't take focus back.
+    If keys still fail after the password prompt but work after reopening, the next step is to
+    re-create the popup (new grab) after the first list, or to list before opening it.
+  - `APSIS_DEBUG_KEYS=1` logs key events (with capture status and window id), popup
+    Focused/Unfocused events and dropped keys to stderr, to find where keys are lost.
+  - Result (user, installed in the panel): j, k, ? and Esc work, both after the password prompt
+    and on reopen. So the focused, always-active input fixed it, whatever the reading of the
+    source suggested; no popup re-creation needed.
+
 ## Open
 
 - ~~App ID~~ - resolved 2026-09-25, see above.
