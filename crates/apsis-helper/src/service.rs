@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! The D-Bus interface: `List`, `Create`, `Delete`, `ReadSettings`, `WriteSettings`, the
-//! native backend's `NativeList`, `NativeDryRun` and `NativeCreate`, and the `Finished`
-//! signal. Nothing else.
+//! native backend's `NativeList`, `NativeDryRun` and `NativeCreate`, file-level restore's
+//! `Browse` and `Restore`, and the `Finished` signal. Nothing else.
 //!
 //! Every call is logged with its result on stderr, which systemd puts in the journal
 //! (`journalctl -u apsis-helper`). Comments are cut to [`LOGGED_COMMENT_CHARS`].
@@ -10,19 +10,24 @@
 use std::sync::Arc;
 
 use apsis_core::helper::names::{
-    ACTION_CONFIGURE, ACTION_CREATE, ACTION_DELETE, ACTION_LIST, OBJECT_PATH, OP_CREATE, OP_DELETE,
+    ACTION_BROWSE, ACTION_CONFIGURE, ACTION_CREATE, ACTION_DELETE, ACTION_LIST, ACTION_RESTORE,
+    ACTION_RESTORE_ORIGINAL, OBJECT_PATH, OP_CREATE, OP_DELETE, OP_RESTORE,
 };
 use apsis_core::helper::{
-    WireList, WireSettings, WireSettingsInfo, encode_error, settings_from_wire, to_wire,
+    WireList, WireListing, WireSettings, WireSettingsInfo, encode_error, listing_to_wire,
+    settings_from_wire, to_wire,
 };
+use apsis_core::restore::{Destination, Request, SnapPath, check_paths};
 use apsis_core::{Backend, Error, SnapshotList, parse_snapshot_name, validate_comment};
+use zbus::fdo::DBusProxy;
 use zbus::message::Header;
-use zbus::names::UniqueName;
+use zbus::names::{BusName, UniqueName};
 use zbus::object_server::SignalEmitter;
 use zbus::{Connection, DBusError, interface};
 
 use crate::native::{self, Access};
 use crate::polkit;
+use crate::restore::{self, logged_path, logged_paths};
 use crate::runner::DirectRunner;
 use crate::settings::{self, Files};
 use crate::state::{Running, State};
@@ -67,7 +72,8 @@ impl From<Error> for HelperError {
             Error::InvalidComment(_)
             | Error::InvalidSnapshotName(_)
             | Error::NoSuchSnapshot(_)
-            | Error::InvalidSettings(_) => Self::InvalidInput(error.to_string()),
+            | Error::InvalidSettings(_)
+            | Error::InvalidInput(_) => Self::InvalidInput(error.to_string()),
             Error::SettingsChanged => Self::Changed(error.to_string()),
             Error::NotInstalled => Self::NotInstalled(error.to_string()),
             Error::DeviceNotFound { .. } => Self::DeviceNotFound(encode_error(&error)),
@@ -129,7 +135,7 @@ impl Helper {
             OP_CREATE,
             label,
             started,
-            move |running| running.create(&comment),
+            move |running| running.create(&comment).map(|()| String::new()),
         )
     }
 
@@ -160,7 +166,7 @@ impl Helper {
             OP_DELETE,
             label,
             started,
-            move |running| running.delete(&name),
+            move |running| running.delete(&name).map(|()| String::new()),
         )
     }
 
@@ -257,7 +263,7 @@ impl Helper {
                 refuse_if_timeshift_runs()?;
                 let (backend, _mounted) =
                     native::open(&DirectRunner, Access::ReadWrite, false, log_lines)?;
-                backend.create(&comment)
+                backend.create(&comment).map(|()| String::new())
             },
         )
     }
@@ -341,7 +347,122 @@ impl Helper {
         Ok(note)
     }
 
-    /// A create or delete ended. Sent only to the caller that started it.
+    /// One folder of snapshot `snapshot`, each entry compared with the running system (polkit:
+    /// `browse`, password cached: snapshots hold root-only files). The backup device is mounted
+    /// read-only for the call.
+    async fn browse(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+        snapshot: String,
+        path: String,
+    ) -> Result<WireListing, HelperError> {
+        let _call = self.state.call();
+        let caller = caller(&header)?;
+        let label = format!("browse {snapshot:?} {} for {caller}", logged_path(&path));
+        let result = async {
+            if parse_snapshot_name(&snapshot).is_none() {
+                return Err(Error::InvalidSnapshotName(snapshot.clone()));
+            }
+            SnapPath::parse(&path)?;
+            self.refuse_if_running()?;
+            authorize(connection, &caller, ACTION_BROWSE, true).await?;
+            let running = self.state.begin()?;
+            blocking(move || {
+                let _running = running;
+                restore::browse(&snapshot, &path)
+            })
+            .await
+        }
+        .await;
+        match &result {
+            Ok(listing) => log(&format!(
+                "{label}: ok, {} entries{}",
+                listing.entries.len(),
+                if listing.truncated { ", truncated" } else { "" }
+            )),
+            Err(error) => log(&format!("{label}: {}", describe_error(error))),
+        }
+        Ok(listing_to_wire(&result?))
+    }
+
+    /// Copies `paths` of snapshot `snapshot` back (`destination`: `folder` or `original`), or
+    /// with `dry_run` only works out what that would do. Returns once started;
+    /// `Finished("restore", ok, text)` follows, the text being the plan or the result.
+    ///
+    /// polkit: a dry run `browse`; folder mode `restore` (cached); original mode
+    /// `restore-original` (asked every time). Refused while another operation runs, and a real
+    /// restore while Timeshift runs.
+    async fn restore(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+        snapshot: String,
+        paths: Vec<String>,
+        destination: String,
+        dry_run: bool,
+    ) -> Result<(), HelperError> {
+        let _call = self.state.call();
+        let caller = caller(&header)?;
+        let label = format!(
+            "restore {destination:?}{} {snapshot:?} {} for {caller}",
+            if dry_run { " dry run" } else { "" },
+            logged_paths(&paths)
+        );
+        let started = async {
+            let destination = Destination::from_word(&destination).ok_or_else(|| {
+                Error::InvalidInput(format!("unknown destination {destination:?}"))
+            })?;
+            if parse_snapshot_name(&snapshot).is_none() {
+                return Err(Error::InvalidSnapshotName(snapshot.clone()));
+            }
+            check_paths(&paths)?;
+            let uid = unix_user(connection, &caller).await?;
+            let action = match (dry_run, destination) {
+                (true, _) => ACTION_BROWSE,
+                (false, Destination::Folder) => ACTION_RESTORE,
+                (false, Destination::Original) => ACTION_RESTORE_ORIGINAL,
+            };
+            self.refuse_if_running()?;
+            if !dry_run {
+                refuse_if_timeshift_runs()?;
+            }
+            authorize(connection, &caller, action, true).await?;
+            let running = self.state.begin()?;
+            let request = Request {
+                snapshot: snapshot.clone(),
+                paths: paths.clone(),
+                destination,
+                dry_run,
+            };
+            Ok((running, request, uid))
+        }
+        .await;
+        let (started, job) = match started {
+            Ok((running, request, uid)) => (Ok(running), Some((request, uid))),
+            Err(error) => (Err(error), None),
+        };
+        let summary_label = label.clone();
+        self.start(
+            connection,
+            caller,
+            OP_RESTORE,
+            label,
+            started,
+            move |_running| {
+                let (request, uid) = job.ok_or_else(|| Error::Helper("not started".to_owned()))?;
+                if !request.dry_run {
+                    // Checked again: the password dialog may have taken a while.
+                    refuse_if_timeshift_runs()?;
+                }
+                let plan = restore::run(&request, uid)?;
+                log(&format!("{summary_label}: uid {uid}: {}", plan.summary()));
+                Ok(plan.to_string())
+            },
+        )
+    }
+
+    /// An operation ended. Sent only to the caller that started it.
     #[zbus(signal)]
     async fn finished(
         emitter: &SignalEmitter<'_>,
@@ -362,7 +483,8 @@ impl Helper {
     }
 
     /// Logs whether the operation could start. If it did, runs `work` in the background
-    /// holding the lock, then logs how it went and tells `caller` with `Finished`.
+    /// holding the lock, then logs how it went and tells `caller` with `Finished`: the text
+    /// `work` returned, or the error.
     fn start(
         &self,
         connection: &Connection,
@@ -370,7 +492,7 @@ impl Helper {
         op: &'static str,
         label: String,
         started: apsis_core::Result<Running<DirectRunner>>,
-        work: impl FnOnce(&Running<DirectRunner>) -> apsis_core::Result<()> + Send + 'static,
+        work: impl FnOnce(&Running<DirectRunner>) -> apsis_core::Result<String> + Send + 'static,
     ) -> Result<(), HelperError> {
         let running = match started {
             Ok(running) => running,
@@ -388,14 +510,14 @@ impl Helper {
             // `running` drops when `work` returns, so the lock is free before `Finished`
             // arrives and the caller's refresh isn't refused as busy.
             let result = blocking(move || work(&running)).await;
-            let (ok, message) = match &result {
-                Ok(()) => {
+            let (ok, message) = match result {
+                Ok(text) => {
                     log(&format!("{label}: done"));
-                    (true, String::new())
+                    (true, text)
                 }
                 Err(error) => {
-                    log(&format!("{label}: {}", describe_error(error)));
-                    (false, encode_error(error))
+                    log(&format!("{label}: {}", describe_error(&error)));
+                    (false, encode_error(&error))
                 }
             };
             let sent = match SignalEmitter::new(&connection, OBJECT_PATH) {
@@ -462,6 +584,7 @@ fn describe_error(error: &Error) -> String {
         | Error::InvalidSnapshotName(_)
         | Error::InvalidSettings(_)
         | Error::InvalidConfig(_)
+        | Error::InvalidInput(_)
         | Error::SettingsChanged => format!("refused: {error}"),
         Error::Failed { code, output } => {
             let code = code.map_or_else(|| "none (signal)".to_owned(), |c| c.to_string());
@@ -488,6 +611,17 @@ fn caller(header: &Header<'_>) -> Result<UniqueName<'static>, HelperError> {
         .sender()
         .map(UniqueName::to_owned)
         .ok_or_else(|| HelperError::NotAuthorized("no sender on the call".to_owned()))
+}
+
+/// The caller's uid, as the bus knows it (`GetConnectionUnixUser`): folder mode restores into
+/// that user's home, as that user.
+async fn unix_user(connection: &Connection, caller: &UniqueName<'_>) -> apsis_core::Result<u32> {
+    let bus = DBusProxy::new(connection)
+        .await
+        .map_err(|e| Error::Helper(format!("bus: {e}")))?;
+    bus.get_connection_unix_user(BusName::Unique(caller.clone()))
+        .await
+        .map_err(|e| Error::Helper(format!("the caller's uid: {e}")))
 }
 
 /// polkit's answer for `caller` and `action`. No answer (polkit unreachable, an error) is a
@@ -524,9 +658,10 @@ mod tests {
     use apsis_core::helper::decode_error;
     use apsis_core::helper::names::{
         ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
-        ERROR_NOT_AUTHORIZED, ERROR_NOT_INSTALLED, INTERFACE, METHOD_CREATE, METHOD_DELETE,
-        METHOD_LIST, METHOD_NATIVE_CREATE, METHOD_NATIVE_DRY_RUN, METHOD_NATIVE_LIST,
-        METHOD_READ_SETTINGS, METHOD_WRITE_SETTINGS, SIGNAL_FINISHED,
+        ERROR_NOT_AUTHORIZED, ERROR_NOT_INSTALLED, INTERFACE, METHOD_BROWSE, METHOD_CREATE,
+        METHOD_DELETE, METHOD_LIST, METHOD_NATIVE_CREATE, METHOD_NATIVE_DRY_RUN,
+        METHOD_NATIVE_LIST, METHOD_READ_SETTINGS, METHOD_RESTORE, METHOD_WRITE_SETTINGS,
+        SIGNAL_FINISHED,
     };
     use zbus::object_server::Interface;
 
@@ -546,6 +681,8 @@ mod tests {
             METHOD_NATIVE_LIST,
             METHOD_NATIVE_DRY_RUN,
             METHOD_NATIVE_CREATE,
+            METHOD_BROWSE,
+            METHOD_RESTORE,
         ] {
             assert!(
                 xml.contains(&format!("<method name=\"{method}\">")),
@@ -556,14 +693,17 @@ mod tests {
             xml.contains(&format!("<signal name=\"{SIGNAL_FINISHED}\">")),
             "{xml}"
         );
-        // Nothing else: exactly eight methods and one signal.
-        assert_eq!(xml.matches("<method ").count(), 8, "{xml}");
+        // Nothing else: exactly ten methods and one signal.
+        assert_eq!(xml.matches("<method ").count(), 10, "{xml}");
         assert_eq!(xml.matches("<signal ").count(), 1, "{xml}");
         // List returns the list with its warnings.
         assert!(xml.contains("type=\"(sssa(sss)as)\""), "{xml}");
         // The settings types.
         assert!(xml.contains("type=\"(ssa(ssb)b)\""), "{xml}");
         assert!(xml.contains("type=\"(sbbabauas)\""), "{xml}");
+        // Browse's listing, and Restore's paths.
+        assert!(xml.contains("type=\"(a(sstxuuussstx)b)\""), "{xml}");
+        assert!(xml.contains("type=\"as\""), "{xml}");
     }
 
     #[test]
@@ -625,6 +765,7 @@ mod tests {
             Error::InvalidSnapshotName("x".to_owned()),
             Error::NoSuchSnapshot("2001-01-01_00-00-00".to_owned()),
             Error::InvalidSettings("keep 1 to 999".to_owned()),
+            Error::InvalidInput("/proc/x: never restored".to_owned()),
         ] {
             assert!(matches!(
                 HelperError::from(error),

@@ -644,6 +644,59 @@ Append-only. Newest at the bottom. Format: date — decision — why.
   - Left over (recorded in PLAN.md): native retention, idle I/O priority for the native rsync,
     Btrfs (Phase 5.1), and recognising Timeshift's `Ret=NNN` lines as diagnostics.
 
+- 2026-09-26 - **Phase 6a: file-level restore** (design in PLAN.md, approved with changes 1-12,
+  the `rustix` dependency and `r` reload / `R` restore). Written and tested by Claude on files
+  it created; nothing run as root, nothing restored on the real system. Full-system restore
+  (6b) not started.
+  - **User amendments** (2026-09-26): (A) folder mode adds `--no-devices --no-specials`, so
+    root never makes a device node or FIFO owned by the user; (B) the hand-over never follows
+    a symlink (rsync's `--chown` for the contents, one `fchown` on the top folder's descriptor),
+    every component of the destination is opened from `/` with `O_NOFOLLOW | O_DIRECTORY`,
+    `~/Apsis-restored` must be the caller's, and rsync writes through the held descriptor
+    (`/proc/self/fd/<n>/`, the descriptor inherited by rsync); (C) polkit split:
+    `restore` (folder) `auth_admin_keep`, new `restore-original` `auth_admin` (every time),
+    dry runs on `browse`.
+  - **How rsync writes through the descriptor.** `FD_CLOEXEC` is cleared on the pinned
+    folder's descriptor for the length of the rsync run only (`dest::Pinned::inherited`, a
+    guard that sets it back), so rsync has it at the same number, and rsync's destination is
+    `/proc/self/fd/<n>/`. In rsync's process (and the receiver it forks) that magic link is its
+    own copy of the descriptor: the folder the helper made, wherever it's been moved. The test
+    (`rsync_writes_through_the_held_folder_not_the_path`) renames `Apsis-restored/` away and
+    puts a symlink to a decoy in its place right before rsync starts; the files land in the
+    moved folder and the decoy stays empty. The helper runs one operation at a time, so no
+    other program is started while the descriptor is inheritable.
+  - **rsync checked by hand first** (3.2.7, in the scratchpad): a `--dry-run` into a missing
+    folder prints `created directory` but makes nothing; `--no-specials` skips a FIFO with
+    `skipping non-regular file` on stdout; `--chmod=ug-s` drops setuid; `--backup --suffix`
+    renames the replaced file; `--filter=-x <pattern>` drops matching xattrs (checked with
+    `user.*` names, since only root can set `security.*`).
+  - **Choices made while building:**
+    - The plan is read from `--out-format='APSIS %i %l %n%L'` (itemized changes plus the
+      size), not `--itemize-changes`, so the marker tells plan lines from rsync's other
+      messages. Items that are already the same aren't printed by rsync, so the plan doesn't
+      list them (the design's example had a `same ... (skipped)` line; dropped).
+    - Browse's D-Bus type is `(a(sstxuuussstx)b)`; the design had one `t` too many.
+    - D-Bus strings are UTF-8: a file name that isn't is listed with `�` and can only be
+      restored with its folder.
+    - `R` with nothing marked restores the selected entry.
+    - `?` does nothing in the browser (help would replace the browser's pane); the help view
+      from the list shows the browser's keys.
+    - Original mode's missing-parent message says to restore the folder above instead.
+    - New errors: `Error::InvalidInput` (refused before anything runs; over the bus as
+      `InvalidInput`, and in `Finished` with a `refused: ` prefix) and `Error::Restore` (rsync
+      failed). The client now maps every `InvalidInput` D-Bus error to `Error::InvalidInput`
+      (settings refusals used to come back as `InvalidSettings`; the text shown is the same).
+    - The helper's read-only mount now adds `noexec` for native list and dry run too.
+  - **Not testable without root** (the user's manual tests cover them): ownership of restored
+    files by another uid (tests run as the caller), `security.*` xattrs, device nodes (a FIFO
+    stands in), the polkit dialogs, the real `/run/apsis/backup` mount.
+  - **Sandbox note**: in this session cargo couldn't read `~/.gitconfig` (the sandbox denies
+    it), so libgit2 treated the libcosmic git cache as broken and tried to re-clone it into
+    the read-only `~/.cargo`. Claude ran cargo with `HOME` set to its scratchpad (and
+    `CARGO_HOME`/`RUSTUP_HOME` set to the real ones); nothing in the repo changed for it. The
+    `rustix` entry in `Cargo.lock` was added by hand for the same reason (1.1.5 was already
+    locked, through libcosmic).
+
 ## Open
 
 - ~~App ID~~ - resolved 2026-09-25, see above.

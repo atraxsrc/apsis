@@ -5,18 +5,22 @@ use zbus::fdo::DBusProxy;
 use zbus::names::BusName;
 use zbus::{Connection, Proxy};
 
+use std::future::Future;
+
 use super::names::{
     BUS_NAME, ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
-    ERROR_NOT_AUTHORIZED, ERROR_NOT_INSTALLED, INTERFACE, METHOD_CREATE, METHOD_DELETE,
-    METHOD_LIST, METHOD_NATIVE_CREATE, METHOD_NATIVE_DRY_RUN, METHOD_NATIVE_LIST,
-    METHOD_READ_SETTINGS, METHOD_WRITE_SETTINGS, OBJECT_PATH, OP_CREATE, OP_DELETE,
-    SIGNAL_FINISHED,
+    ERROR_NOT_AUTHORIZED, ERROR_NOT_INSTALLED, INTERFACE, METHOD_BROWSE, METHOD_CREATE,
+    METHOD_DELETE, METHOD_LIST, METHOD_NATIVE_CREATE, METHOD_NATIVE_DRY_RUN, METHOD_NATIVE_LIST,
+    METHOD_READ_SETTINGS, METHOD_RESTORE, METHOD_WRITE_SETTINGS, OBJECT_PATH, OP_CREATE, OP_DELETE,
+    OP_RESTORE, SIGNAL_FINISHED,
 };
 use super::{
-    WireList, WireSettingsInfo, decode_error, from_wire, info_from_wire, settings_to_wire,
+    WireList, WireListing, WireSettingsInfo, decode_error, from_wire, info_from_wire,
+    listing_from_wire, settings_to_wire,
 };
 use crate::error::{Error, Result};
 use crate::model::SnapshotList;
+use crate::restore::{Listing, Request};
 use crate::settings::{Settings, SettingsInfo};
 
 /// The applet's side of `apsis-helper`, on the system bus.
@@ -63,7 +67,7 @@ impl HelperClient {
     ///
     /// What the helper reported (see [`Error`]).
     pub async fn create(&self, comment: &str) -> Result<()> {
-        self.operate(METHOD_CREATE, OP_CREATE, comment).await
+        self.operate_on(METHOD_CREATE, OP_CREATE, comment).await
     }
 
     /// Deletes the snapshot `name` and waits until it's done.
@@ -72,7 +76,43 @@ impl HelperClient {
     ///
     /// What the helper reported (see [`Error`]).
     pub async fn delete(&self, name: &str) -> Result<()> {
-        self.operate(METHOD_DELETE, OP_DELETE, name).await
+        self.operate_on(METHOD_DELETE, OP_DELETE, name).await
+    }
+
+    /// One folder of snapshot `snapshot`, compared with the running system. Asks for the
+    /// password (cached a few minutes).
+    ///
+    /// # Errors
+    ///
+    /// What the helper reported (see [`Error`]), or a bad reply.
+    pub async fn browse(&self, snapshot: &str, path: &str) -> Result<Listing> {
+        let wire: WireListing = self
+            .proxy()
+            .await?
+            .call(METHOD_BROWSE, &(snapshot, path))
+            .await
+            .map_err(from_zbus)?;
+        listing_from_wire(wire)
+    }
+
+    /// Runs `request` (a dry run, or for real) and waits until it's done. Returns the plan's or
+    /// the result's text. Asks for the password: cached for dry runs and folder mode, every
+    /// time for original mode.
+    ///
+    /// # Errors
+    ///
+    /// What the helper reported (see [`Error`]).
+    pub async fn restore(&self, request: &Request) -> Result<String> {
+        let args = (
+            request.snapshot.clone(),
+            request.paths.clone(),
+            request.destination.word().to_owned(),
+            request.dry_run,
+        );
+        self.operate(OP_RESTORE, move |proxy| async move {
+            proxy.call::<_, _, ()>(METHOD_RESTORE, &args).await
+        })
+        .await
     }
 
     /// Lists snapshots with the native backend (reads the backup device directly). No password
@@ -111,7 +151,8 @@ impl HelperClient {
     ///
     /// What the helper reported (see [`Error`]).
     pub async fn native_create(&self, comment: &str) -> Result<()> {
-        self.operate(METHOD_NATIVE_CREATE, OP_CREATE, comment).await
+        self.operate_on(METHOD_NATIVE_CREATE, OP_CREATE, comment)
+            .await
     }
 
     /// Reads Timeshift's settings, the devices and the users. No password for the active
@@ -153,9 +194,23 @@ impl HelperClient {
             .map_err(from_zbus)
     }
 
-    /// Starts `method(argument)`, then waits for its `Finished`, or for the helper to leave the
-    /// bus without sending one.
-    async fn operate(&self, method: &str, op: &str, argument: &str) -> Result<()> {
+    /// [`HelperClient::operate`] for `method(argument)`, whose `Finished` carries no text.
+    async fn operate_on(&self, method: &str, op: &str, argument: &str) -> Result<()> {
+        let (method, argument) = (method.to_owned(), argument.to_owned());
+        self.operate(op, move |proxy| async move {
+            proxy.call::<_, _, ()>(method.as_str(), &(argument,)).await
+        })
+        .await
+        .map(drop)
+    }
+
+    /// Starts an operation with `start`, then waits for its `Finished` (returning its message),
+    /// or for the helper to leave the bus without sending one.
+    async fn operate<F, Fut>(&self, op: &str, start: F) -> Result<String>
+    where
+        F: FnOnce(Proxy<'static>) -> Fut,
+        Fut: Future<Output = zbus::Result<()>>,
+    {
         let proxy = self.proxy().await?;
         // Subscribe before starting, so a quick `Finished` isn't missed.
         let finished = proxy
@@ -174,10 +229,7 @@ impl HelperClient {
             .map_err(from_zbus)?
             .filter_map(|owner| async move { owner.is_none().then_some(()) });
         // The call returns once the helper has checked the input and polkit and started.
-        proxy
-            .call::<_, _, ()>(method, &(argument,))
-            .await
-            .map_err(from_zbus)?;
+        start(proxy.clone()).await.map_err(from_zbus)?;
         wait_for_finished(op, finished, gone).await
     }
 }
@@ -190,13 +242,13 @@ enum Event {
     Gone,
 }
 
-/// Waits for `Finished(op, ok, message)` for `op`. Fails if the helper leaves the bus (`gone`)
-/// or the signal stream ends first.
+/// Waits for `Finished(op, ok, message)` for `op`: its message. Fails if the helper leaves the
+/// bus (`gone`) or the signal stream ends first.
 async fn wait_for_finished(
     op: &str,
     finished: impl Stream<Item = Result<(String, bool, String)>>,
     gone: impl Stream<Item = ()>,
-) -> Result<()> {
+) -> Result<String> {
     // `select` only ends when both streams do, and `gone` never does: mark the end of
     // `finished` with `Closed` instead.
     let finished = finished
@@ -208,7 +260,7 @@ async fn wait_for_finished(
         match event {
             Event::Finished(Ok((finished_op, ok, message))) if finished_op == op => {
                 return if ok {
-                    Ok(())
+                    Ok(message)
                 } else {
                     Err(decode_error(&message))
                 };
@@ -239,8 +291,8 @@ fn from_zbus(error: zbus::Error) -> Error {
                 ERROR_BUSY => Error::Busy,
                 ERROR_NOT_INSTALLED => Error::NotInstalled,
                 ERROR_CHANGED => Error::SettingsChanged,
-                // Comments are checked before they're sent, so this is about settings.
-                ERROR_INVALID_INPUT => Error::InvalidSettings(message),
+                // Settings or a restore request: the message says why.
+                ERROR_INVALID_INPUT => Error::InvalidInput(message),
                 ERROR_FAILED | ERROR_DEVICE_NOT_FOUND => decode_error(&message),
                 _ if message.is_empty() => Error::Helper(name.to_string()),
                 _ => Error::Helper(message),
@@ -259,7 +311,7 @@ mod tests {
         Ok((op.to_owned(), ok, message.to_owned()))
     }
 
-    async fn wait(events: Vec<Result<(String, bool, String)>>, gone: Vec<()>) -> Result<()> {
+    async fn wait(events: Vec<Result<(String, bool, String)>>, gone: Vec<()>) -> Result<String> {
         // `pending` keeps the gone stream open, as a live owner-changed stream is.
         let gone = stream::iter(gone).chain(stream::pending());
         wait_for_finished(OP_CREATE, stream::iter(events), gone).await
@@ -269,6 +321,12 @@ mod tests {
     async fn finished_ok_ends_the_wait() {
         let result = wait(vec![finished(OP_CREATE, true, "")], vec![]).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn finished_carries_the_message() {
+        let result = wait(vec![finished(OP_CREATE, true, "the plan")], vec![]).await;
+        assert_eq!(result.unwrap(), "the plan");
     }
 
     #[tokio::test]

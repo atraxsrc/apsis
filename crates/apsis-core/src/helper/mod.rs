@@ -6,6 +6,7 @@
 //! - [`WireList`]: what `List` returns, and conversions to and from [`SnapshotList`].
 //! - [`WireSettingsInfo`] and [`WireSettings`]: what `ReadSettings` returns and `WriteSettings`
 //!   takes.
+//! - [`WireListing`]: what `Browse` returns.
 //! - [`encode_error`] / [`decode_error`]: how a Timeshift failure crosses the bus.
 //! - [`HelperClient`]: the applet's side.
 
@@ -16,6 +17,7 @@ pub use client::HelperClient;
 
 use crate::error::{Error, Result};
 use crate::model::{Mode, Snapshot, SnapshotList, Tag, parse_snapshot_name};
+use crate::restore::{Entry, Kind, Listing, Live};
 use crate::settings::{Config, Settings, SettingsInfo, User, parse_lsblk};
 
 /// One snapshot on the bus: `(name, tags, comment)`. Tags are Timeshift's letters (`OB`); an
@@ -159,6 +161,96 @@ pub fn settings_from_wire(wire: WireSettings) -> Result<Settings> {
     })
 }
 
+/// One browse entry on the bus: `(name, kind, size, mtime, mode, uid, gid, owner, link target,
+/// live, live size, live mtime)`. `kind` and `live` are [`Kind::word`] and [`Live::word`].
+pub type WireEntry = (
+    String,
+    String,
+    u64,
+    i64,
+    u32,
+    u32,
+    u32,
+    String,
+    String,
+    String,
+    u64,
+    i64,
+);
+
+/// What `Browse` returns, D-Bus type `(a(sstxuuussstx)b)`: the entries and `truncated`.
+pub type WireListing = (Vec<WireEntry>, bool);
+
+#[must_use]
+pub fn listing_to_wire(listing: &Listing) -> WireListing {
+    let entries = listing
+        .entries
+        .iter()
+        .map(|e| {
+            (
+                e.name.clone(),
+                e.kind.word().to_owned(),
+                e.size,
+                e.mtime,
+                e.mode,
+                e.uid,
+                e.gid,
+                e.owner.clone(),
+                e.target.clone(),
+                e.live.word().to_owned(),
+                e.live_size,
+                e.live_mtime,
+            )
+        })
+        .collect();
+    (entries, listing.truncated)
+}
+
+/// The [`Listing`] the helper sent.
+///
+/// # Errors
+///
+/// [`Error::Helper`] for an unknown kind or live state.
+pub fn listing_from_wire(wire: WireListing) -> Result<Listing> {
+    let (entries, truncated) = wire;
+    let entries = entries
+        .into_iter()
+        .map(|w| {
+            let (
+                name,
+                kind,
+                size,
+                mtime,
+                mode,
+                uid,
+                gid,
+                owner,
+                target,
+                live,
+                live_size,
+                live_mtime,
+            ) = w;
+            Ok(Entry {
+                kind: Kind::from_word(&kind)
+                    .ok_or_else(|| Error::Helper(format!("unknown entry kind {kind:?}")))?,
+                live: Live::from_word(&live)
+                    .ok_or_else(|| Error::Helper(format!("unknown live state {live:?}")))?,
+                name,
+                size,
+                mtime,
+                mode,
+                uid,
+                gid,
+                owner,
+                target,
+                live_size,
+                live_mtime,
+            })
+        })
+        .collect::<Result<_>>()?;
+    Ok(Listing { entries, truncated })
+}
+
 fn non_empty(text: String) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
@@ -167,6 +259,10 @@ fn non_empty(text: String) -> Option<String> {
 const FAILED_HEADER: &str = "timeshift exit status: ";
 /// An encoded [`Error::DeviceNotFound`]; the device follows.
 const DEVICE_NOT_FOUND_HEADER: &str = "timeshift device not found: ";
+/// An encoded [`Error::InvalidInput`]; the reason follows.
+const INVALID_INPUT_HEADER: &str = "refused: ";
+/// An encoded [`Error::Restore`]; the reason follows.
+const RESTORE_HEADER: &str = "restore failed: ";
 
 /// An error as one message for the bus (a D-Bus error's text, or `Finished`'s `message`).
 /// [`Error::Failed`] and [`Error::DeviceNotFound`] keep their details, so [`decode_error`] gives
@@ -179,6 +275,8 @@ pub fn encode_error(error: &Error) -> String {
             format!("{FAILED_HEADER}{status}\n{output}")
         }
         Error::DeviceNotFound { device } => format!("{DEVICE_NOT_FOUND_HEADER}{device}"),
+        Error::InvalidInput(reason) => format!("{INVALID_INPUT_HEADER}{reason}"),
+        Error::Restore(reason) => format!("{RESTORE_HEADER}{reason}"),
         other => other.to_string(),
     }
 }
@@ -191,6 +289,12 @@ pub fn decode_error(message: &str) -> Error {
         return Error::DeviceNotFound {
             device: device.to_owned(),
         };
+    }
+    if let Some(reason) = message.strip_prefix(INVALID_INPUT_HEADER) {
+        return Error::InvalidInput(reason.to_owned());
+    }
+    if let Some(reason) = message.strip_prefix(RESTORE_HEADER) {
+        return Error::Restore(reason.to_owned());
     }
     let failed = message.strip_prefix(FAILED_HEADER).and_then(|rest| {
         let (status, output) = rest.split_once('\n').unwrap_or((rest, ""));
@@ -306,6 +410,46 @@ mod tests {
             decode_error(&encode_error(&error)),
             Error::DeviceNotFound { device } if device == "/dev/sdX1"
         ));
+    }
+
+    #[test]
+    fn restore_errors_survive_the_bus() {
+        let refused = Error::InvalidInput("/proc/x: never".to_owned());
+        assert!(
+            matches!(decode_error(&encode_error(&refused)), Error::InvalidInput(m) if m == "/proc/x: never")
+        );
+        let failed = Error::Restore("rsync failed with exit code 11".to_owned());
+        assert!(
+            matches!(decode_error(&encode_error(&failed)), Error::Restore(m) if m.ends_with("11"))
+        );
+    }
+
+    #[test]
+    fn listings_survive_the_bus() {
+        let listing = Listing {
+            entries: vec![Entry {
+                name: "hosts".to_owned(),
+                kind: Kind::Link,
+                size: 9,
+                mtime: -5,
+                mode: 0o120_777,
+                uid: 0,
+                gid: 0,
+                owner: "root:root".to_owned(),
+                target: "/x".to_owned(),
+                live: Live::Changed,
+                live_size: 12,
+                live_mtime: 1_700_000_000,
+            }],
+            truncated: true,
+        };
+        assert_eq!(
+            listing_from_wire(listing_to_wire(&listing)).unwrap(),
+            listing
+        );
+        let mut bad = listing_to_wire(&listing);
+        bad.0[0].1 = "pipe".to_owned();
+        assert!(matches!(listing_from_wire(bad), Err(Error::Helper(_))));
     }
 
     #[test]

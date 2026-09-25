@@ -49,4 +49,36 @@
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
   </action>
+
+  <!-- File-level restore (Phase 6a). Snapshots hold root-only files, so browsing asks too. -->
+  <action id="io.github.atraxsrc.Apsis.browse">
+    <description>Browse the files in a system snapshot</description>
+    <message>Apsis needs your password to browse the files in a system snapshot</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="io.github.atraxsrc.Apsis.restore">
+    <description>Copy files from a system snapshot into your home folder</description>
+    <message>Apsis needs your password to copy files from a system snapshot into your home folder</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <!-- Asked every time: this replaces files on the running system. -->
+  <action id="io.github.atraxsrc.Apsis.restore-original">
+    <description>Put files from a system snapshot back in their original places</description>
+    <message>Apsis needs your password to put files from a system snapshot back in their original places</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
 </policyconfig>

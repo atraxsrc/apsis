@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 mod app;
+mod browser;
 mod config;
 mod fmt;
 mod i18n;

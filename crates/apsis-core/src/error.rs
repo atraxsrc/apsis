@@ -56,6 +56,13 @@ pub enum Error {
     /// taken, the repository is in a state it won't touch, ...).
     #[error("native backend: {0}")]
     Native(String),
+    /// A request that is refused before anything runs (a restore path, destination, or a
+    /// backup name in the way). The text says why.
+    #[error("{0}")]
+    InvalidInput(String),
+    /// A file-level restore ran and failed (rsync's exit code and last lines).
+    #[error("restore failed: {0}")]
+    Restore(String),
     #[error(transparent)]
     Io(#[from] io::Error),
 }

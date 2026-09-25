@@ -5,6 +5,9 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use apsis_core::helper::HelperClient;
+use apsis_core::restore::{
+    Destination, Entry, Kind, Listing as FolderListing, Live, Request, SnapPath,
+};
 use apsis_core::settings::{HomeState, Level, Settings, SettingsInfo};
 use apsis_core::{
     Backend, MAX_COMMENT_CHARS, PkexecRunner, Snapshot, SnapshotList, TimeshiftCli,
@@ -26,6 +29,7 @@ use cosmic::widget::text::{body, monotext};
 use cosmic::widget::{self, container, icon};
 use cosmic::{Theme, theme};
 
+use crate::browser::{self, Browser, Load};
 use crate::config::Config;
 use crate::fl;
 use crate::fmt;
@@ -72,6 +76,9 @@ const FILTER_CHARS: usize = 512;
 /// Longest comment shown in a popup row; the row also ellipsizes to the pane width, and the
 /// details pane shows all of it. A window can be wider, so there only the pane width cuts it.
 const ROW_COMMENT_CHARS: usize = 28;
+/// Longest breadcrumb in the browser's pane title: the popup's pane, and a window's.
+const BREADCRUMB_CHARS: usize = 40;
+const WINDOW_BREADCRUMB_CHARS: usize = 80;
 /// Longest answer kept at the `[y/N]` prompt; only `y` means yes.
 const CONFIRM_CHARS: usize = 3;
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -92,6 +99,7 @@ const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 
 static LIST_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("snapshot-list"));
 static SETTINGS_LIST_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("settings-list"));
+static BROWSE_LIST_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("browse-list"));
 /// The `>` input line. Keeping it focused gives the popup a focused widget for key input.
 static INPUT_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("prompt-input"));
 /// `APSIS_DEBUG_KEYS=1` logs key and popup focus events to stderr, to see where keys get lost.
@@ -165,6 +173,12 @@ pub struct AppModel {
     saving_settings: bool,
     /// The last native dry run's plan, shown by [`Overlay::DryRun`].
     dry_run_plan: Option<String>,
+    /// The snapshot browser, while it's open ([`Overlay::Browse`]).
+    browser: Option<Browser>,
+    /// A restore whose dry run was shown: Enter runs it for real.
+    pending_restore: Option<Request>,
+    /// The last restore's plan or result, shown by [`Overlay::RestorePlan`].
+    restore_text: Option<String>,
     /// Window mode: the window is on screen and its size limits are relaxed (see
     /// [`run_window`]).
     window_resizable: bool,
@@ -245,6 +259,11 @@ enum Prompt {
     Filter(String),
     /// Settings: `> keep daily: 5_`. Enter sets the count.
     Count { level: Level, typed: String },
+    /// Browser: `> restore 3 items to [f]older (~/Apsis-restored) or [o]riginal? _`. Enter
+    /// with nothing or `f` is folder mode, `o` original; anything else cancels.
+    RestoreWhere { count: usize, typed: String },
+    /// Original mode, after its plan: `> put 3 items back over the running system? [y/N] _`.
+    ConfirmRestore { count: usize, typed: String },
 }
 
 /// A create or delete, run as root.
@@ -255,6 +274,8 @@ pub enum Operation {
     Delete(String),
     /// Native backend with dry run on: what a create would do. Nothing is written.
     DryRun(String),
+    /// A file-level restore, or its dry run.
+    Restore(Request),
 }
 
 /// How the last create or delete went, shown in the activity pane.
@@ -316,6 +337,10 @@ enum Overlay {
     Settings,
     /// The last native dry run's plan, in the left pane.
     DryRun,
+    /// A snapshot's files, in the left pane; the selected entry's details on the right.
+    Browse,
+    /// A restore's plan (Enter runs it) or result, in the left pane.
+    RestorePlan,
 }
 
 /// Keys the popup reacts to (see UI.md).
@@ -344,6 +369,13 @@ pub enum KeyAction {
     Remove,
     /// Settings: `w` writes them to Timeshift.
     Write,
+    /// Browser: `h` or Backspace goes up a folder, `l` into one.
+    Back,
+    Into,
+    /// Browser: `R` restores the marked entries.
+    Restore,
+    /// Tab: the details pane of the selected snapshot.
+    FocusDetails,
 }
 
 /// Messages emitted by the application and its widgets.
@@ -383,7 +415,17 @@ pub enum Message {
     DryRunDone(Result<String, CliError>),
     Tick,
     Select(usize),
-    OpenDetails(usize),
+    /// Double-click on a snapshot: its files.
+    OpenBrowser(usize),
+    /// A browse finished: the snapshot and folder it was for.
+    Browsed(String, SnapPath, Result<FolderListing, CliError>),
+    /// A click on a browser row, and a double-click (into a folder, or marks a file).
+    BrowseSelect(usize),
+    BrowseActivate(usize),
+    /// A browser hint button.
+    BrowseKey(KeyAction),
+    /// A restore (or its dry run) finished: the plan's or result's text.
+    RestoreDone(Request, Result<String, CliError>),
     ToggleHelp,
     Escape,
     /// `[s]ettings` hint.
@@ -441,6 +483,9 @@ impl cosmic::Application for AppModel {
             settings: SettingsLoad::NotLoaded,
             saving_settings: false,
             dry_run_plan: None,
+            browser: None,
+            pending_restore: None,
+            restore_text: None,
             window_resizable: false,
             icon: symbolic_icon(),
         };
@@ -512,8 +557,9 @@ impl cosmic::Application for AppModel {
             subscriptions.push(event::listen_with(window_focused));
             subscriptions.push(time::every(WINDOW_SHOWN_FALLBACK).map(|_| Message::WindowShown));
         }
-        let settings_busy =
-            self.saving_settings || matches!(self.settings, SettingsLoad::Loading { .. });
+        let settings_busy = self.saving_settings
+            || matches!(self.settings, SettingsLoad::Loading { .. })
+            || self.browser.as_ref().is_some_and(Browser::is_loading);
         if self.popup.is_some() && (self.loading || self.running.is_some() || settings_busy) {
             subscriptions.push(time::every(Duration::from_millis(80)).map(|_| Message::Tick));
         }
@@ -596,6 +642,9 @@ impl cosmic::Application for AppModel {
                 Prompt::Count { typed, .. } => {
                     *typed = text.chars().filter(char::is_ascii_digit).take(3).collect();
                 }
+                Prompt::RestoreWhere { typed, .. } | Prompt::ConfirmRestore { typed, .. } => {
+                    *typed = text.chars().take(CONFIRM_CHARS).collect();
+                }
             },
             Message::Submit => return self.submit(),
             Message::InputUnfocused if self.popup.is_some() => return focus_input(),
@@ -617,10 +666,32 @@ impl cosmic::Application for AppModel {
                 self.selected = index;
                 self.overlay = Overlay::None;
             }
-            Message::OpenDetails(index) => {
+            Message::OpenBrowser(index) => {
                 self.selected = index;
-                self.overlay = Overlay::Details;
+                return self.open_browser();
             }
+            Message::Browsed(snapshot, path, result) => {
+                return self.on_browsed(&snapshot, &path, result);
+            }
+            Message::BrowseSelect(index) => {
+                if let Some(browser) = &mut self.browser {
+                    browser.select(index);
+                }
+            }
+            Message::BrowseActivate(index) => {
+                let Some(browser) = &mut self.browser else {
+                    return Task::none();
+                };
+                browser.select(index);
+                let is_dir = browser.current().is_some_and(|e| e.kind == Kind::Dir);
+                return self.on_key(if is_dir {
+                    KeyAction::Into
+                } else {
+                    KeyAction::Toggle
+                });
+            }
+            Message::BrowseKey(action) => return self.on_key(action),
+            Message::RestoreDone(request, result) => return self.on_restore_done(request, result),
             Message::ToggleHelp => self.toggle_overlay(Overlay::Help),
             Message::Escape => return self.escape(),
         }
@@ -746,11 +817,13 @@ impl AppModel {
         }
     }
 
-    /// The popup closed: drop overlays and any half-typed prompt. A running operation and its
-    /// status line stay.
+    /// The popup closed: drop overlays, the browser and any half-typed prompt. A running
+    /// operation and its status line stay.
     fn reset_popup_state(&mut self) {
         self.overlay = Overlay::None;
         self.prompt = Prompt::Command;
+        self.browser = None;
+        self.pending_restore = None;
     }
 
     /// Lists in the background, through `apsis-helper` or pkexec. Does nothing while a list,
@@ -816,8 +889,11 @@ impl AppModel {
                 _ => Task::none(),
             };
         }
-        if self.overlay == Overlay::Settings {
-            return self.settings_key(action);
+        match self.overlay {
+            Overlay::Settings => return self.settings_key(action),
+            Overlay::Browse => return self.browse_key(action),
+            Overlay::RestorePlan => return self.plan_key(action),
+            _ => {}
         }
         let count = self.snapshots().len();
         let target = match action {
@@ -825,7 +901,8 @@ impl AppModel {
             KeyAction::Down => Some(self.selected + 1).filter(|&i| i < count),
             KeyAction::First => (count > 0).then_some(0),
             KeyAction::Last => count.checked_sub(1),
-            KeyAction::Details => {
+            KeyAction::Details => return self.open_browser(),
+            KeyAction::FocusDetails => {
                 if count > 0 {
                     self.toggle_overlay(Overlay::Details);
                 }
@@ -867,7 +944,11 @@ impl AppModel {
             | KeyAction::Edit
             | KeyAction::Add
             | KeyAction::Remove
-            | KeyAction::Write => None,
+            | KeyAction::Write
+            // Browser keys.
+            | KeyAction::Back
+            | KeyAction::Into
+            | KeyAction::Restore => None,
         };
         let Some(index) = target else {
             return Task::none();
@@ -1063,6 +1144,12 @@ impl AppModel {
             Prompt::Command if self.overlay == Overlay::Settings => {
                 self.settings_key(KeyAction::Toggle)
             }
+            Prompt::Command if self.overlay == Overlay::Browse => {
+                self.browse_key(KeyAction::Details)
+            }
+            Prompt::Command if self.overlay == Overlay::RestorePlan => {
+                self.plan_key(KeyAction::Details)
+            }
             Prompt::Filter(pattern) => {
                 if let SettingsLoad::Ready(view) = &mut self.settings {
                     match view.add_filter(&pattern) {
@@ -1087,11 +1174,37 @@ impl AppModel {
                 }
                 Task::none()
             }
-            Prompt::Command => {
-                if !self.snapshots().is_empty() {
-                    self.toggle_overlay(Overlay::Details);
+            Prompt::Command => self.open_browser(),
+            Prompt::RestoreWhere { typed, .. } => {
+                let destination = match typed.trim().to_ascii_lowercase().as_str() {
+                    "" | "f" => Destination::Folder,
+                    "o" => Destination::Original,
+                    _ => {
+                        self.status = Some(Status::Info(fl!("restore-cancelled")));
+                        return Task::none();
+                    }
+                };
+                let Some(browser) = &self.browser else {
+                    return Task::none();
+                };
+                let request = Request {
+                    snapshot: browser.snapshot.clone(),
+                    paths: browser.targets(),
+                    destination,
+                    dry_run: true,
+                };
+                self.pending_restore = None;
+                self.run(Operation::Restore(request))
+            }
+            Prompt::ConfirmRestore { typed, .. } => {
+                if typed.trim().eq_ignore_ascii_case("y")
+                    && let Some(request) = self.pending_restore.take()
+                {
+                    self.run(Operation::Restore(request))
+                } else {
+                    self.status = Some(Status::Info(fl!("restore-cancelled")));
+                    Task::none()
                 }
-                Task::none()
             }
             Prompt::Comment(comment) => {
                 // Checked here too, so a bad comment can be fixed before the password prompt.
@@ -1128,6 +1241,12 @@ impl AppModel {
         if let Operation::DryRun(comment) = operation {
             return cosmic::task::future(async move {
                 Message::DryRunDone(native_dry_run(&comment).await)
+            });
+        }
+        if let Operation::Restore(request) = operation {
+            return cosmic::task::future(async move {
+                let result = restore(&request).await;
+                Message::RestoreDone(request, result)
             });
         }
         let pkexec = Arc::clone(&self.pkexec);
@@ -1169,8 +1288,9 @@ impl AppModel {
                 let reason = error_summary(&error, self.known_uuid.as_deref());
                 Status::Error(fl!("delete-failed", reason = reason))
             }
-            // Dry runs end in `on_dry_run`.
+            // Dry runs end in `on_dry_run`, restores in `on_restore_done`.
             (Operation::DryRun(_), _) => Status::Info(fl!("dry-run-done")),
+            (Operation::Restore(_), _) => Status::Info(fl!("restore-done")),
         });
         let mut tasks = Vec::new();
         if ran {
@@ -1204,6 +1324,193 @@ impl AppModel {
         Task::none()
     }
 
+    /// Enter on a snapshot: its files, from `/`, through the helper (password once, cached).
+    fn open_browser(&mut self) -> Task<cosmic::Action<Message>> {
+        if self.loading || self.running.is_some() || self.saving_settings {
+            return Task::none();
+        }
+        let Some(snapshot) = self.snapshots().get(self.selected) else {
+            return Task::none();
+        };
+        self.browser = Some(Browser::new(snapshot.name.clone()));
+        self.pending_restore = None;
+        self.overlay = Overlay::Browse;
+        self.status = None;
+        self.fetch_browse(SnapPath::root())
+    }
+
+    /// Reads folder `path` of the browser's snapshot in the background.
+    fn fetch_browse(&mut self, path: SnapPath) -> Task<cosmic::Action<Message>> {
+        let Some(browser) = &self.browser else {
+            return Task::none();
+        };
+        let snapshot = browser.snapshot.clone();
+        self.spinner = 0;
+        cosmic::task::future(async move {
+            let result = browse(&snapshot, &path.to_string()).await;
+            Message::Browsed(snapshot, path, result)
+        })
+    }
+
+    fn on_browsed(
+        &mut self,
+        snapshot: &str,
+        path: &SnapPath,
+        result: Result<FolderListing, CliError>,
+    ) -> Task<cosmic::Action<Message>> {
+        let result = result.map_err(|e| error_summary(&e, self.known_uuid.as_deref()));
+        if let Some(browser) = &mut self.browser
+            && browser.snapshot == snapshot
+        {
+            browser.loaded(path, result);
+        }
+        // The polkit dialog took keyboard focus; hand it back to the `>` line.
+        if self.popup.is_some() {
+            return focus_input();
+        }
+        Task::none()
+    }
+
+    /// Keys in the browser.
+    fn browse_key(&mut self, action: KeyAction) -> Task<cosmic::Action<Message>> {
+        if action == KeyAction::Escape {
+            return self.escape();
+        }
+        let Some(browser) = &mut self.browser else {
+            return Task::none();
+        };
+        let count = browser.entries().len();
+        match action {
+            KeyAction::Up | KeyAction::Down | KeyAction::First | KeyAction::Last => {
+                let Some(last) = count.checked_sub(1) else {
+                    return Task::none();
+                };
+                let index = match action {
+                    KeyAction::Up => browser.cursor.saturating_sub(1),
+                    KeyAction::Down => (browser.cursor + 1).min(last),
+                    KeyAction::First => 0,
+                    _ => last,
+                };
+                browser.select(index);
+                return scroll_to(&BROWSE_LIST_ID, index, count);
+            }
+            KeyAction::Details | KeyAction::Into => {
+                if let Some(path) = browser.enter() {
+                    return self.fetch_browse(path);
+                }
+            }
+            KeyAction::Back => {
+                if let Some(path) = browser.up() {
+                    return self.fetch_browse(path);
+                }
+            }
+            KeyAction::Refresh => {
+                let path = browser.reload();
+                return self.fetch_browse(path);
+            }
+            KeyAction::Toggle => browser.toggle_mark(),
+            KeyAction::Restore if !browser.is_loading() => {
+                let count = browser.targets().len();
+                if count > 0 {
+                    self.status = None;
+                    self.prompt = Prompt::RestoreWhere {
+                        count,
+                        typed: String::new(),
+                    };
+                    return focus_input();
+                }
+            }
+            // Snapshot and settings keys do nothing here.
+            _ => {}
+        }
+        Task::none()
+    }
+
+    /// Keys on a restore's plan: Enter runs it, Esc goes back to the browser.
+    fn plan_key(&mut self, action: KeyAction) -> Task<cosmic::Action<Message>> {
+        match action {
+            KeyAction::Escape => self.escape(),
+            KeyAction::Details => self.run_pending_restore(),
+            _ => Task::none(),
+        }
+    }
+
+    /// Enter on a plan: folder mode runs at once; original mode asks for `y` first.
+    fn run_pending_restore(&mut self) -> Task<cosmic::Action<Message>> {
+        let Some(request) = self.pending_restore.clone() else {
+            return Task::none();
+        };
+        match request.destination {
+            Destination::Folder => {
+                self.pending_restore = None;
+                self.run(Operation::Restore(request))
+            }
+            Destination::Original => {
+                self.status = None;
+                self.prompt = Prompt::ConfirmRestore {
+                    count: request.paths.len(),
+                    typed: String::new(),
+                };
+                focus_input()
+            }
+        }
+    }
+
+    /// A restore or its dry run ended. A dry run's plan goes in the left pane, ready to run; a
+    /// real run's result too, and the folder is read again (the running system changed).
+    fn on_restore_done(
+        &mut self,
+        request: Request,
+        result: Result<String, CliError>,
+    ) -> Task<cosmic::Action<Message>> {
+        self.running = None;
+        let mut tasks = Vec::new();
+        match (request.dry_run, result) {
+            (true, Ok(plan)) => {
+                self.pending_restore = Some(Request {
+                    dry_run: false,
+                    ..request
+                });
+                self.restore_text = Some(plan);
+                self.overlay = Overlay::RestorePlan;
+                self.status = Some(Status::Info(fl!("restore-plan-ready")));
+            }
+            (true, Err(error)) => {
+                let reason = error_summary(&error, self.known_uuid.as_deref());
+                self.status = Some(Status::Error(fl!(
+                    "restore-dry-run-failed",
+                    reason = reason
+                )));
+            }
+            (false, result) => {
+                match result {
+                    Ok(text) => {
+                        self.restore_text = Some(text);
+                        self.overlay = Overlay::RestorePlan;
+                        self.status = Some(Status::Info(fl!("restore-done")));
+                        if let Some(browser) = &mut self.browser {
+                            browser.marked.clear();
+                        }
+                    }
+                    Err(error) => {
+                        let reason = error_summary(&error, self.known_uuid.as_deref());
+                        self.status = Some(Status::Error(fl!("restore-failed", reason = reason)));
+                        self.overlay = Overlay::Browse;
+                    }
+                }
+                if let Some(browser) = &mut self.browser {
+                    let path = browser.reload();
+                    tasks.push(self.fetch_browse(path));
+                }
+            }
+        }
+        // The polkit dialog took keyboard focus; hand it back to the `>` line.
+        if self.popup.is_some() {
+            tasks.push(focus_input());
+        }
+        Task::batch(tasks)
+    }
+
     /// Saves Apsis's backend choice (changed in the settings view) to cosmic-config, and lists
     /// again when the backend itself changed.
     fn set_backend(&mut self, choice: BackendChoice) -> Task<cosmic::Action<Message>> {
@@ -1225,13 +1532,28 @@ impl AppModel {
         Task::none()
     }
 
-    /// Esc cancels a prompt, then closes the overlay, then the popup (or the window).
+    /// Esc cancels a prompt, then closes the overlay (a restore plan goes back to the
+    /// browser), then the popup (or the window).
     fn escape(&mut self) -> Task<cosmic::Action<Message>> {
         if self.prompt != Prompt::Command {
             self.prompt = Prompt::Command;
             self.status = None;
             // Esc also unfocused the `>` line.
             return focus_input();
+        }
+        match self.overlay {
+            Overlay::RestorePlan => {
+                self.overlay = Overlay::Browse;
+                self.pending_restore = None;
+                return focus_input();
+            }
+            Overlay::Browse => {
+                self.overlay = Overlay::None;
+                self.browser = None;
+                self.pending_restore = None;
+                return focus_input();
+            }
+            _ => {}
         }
         if self.overlay == Overlay::Settings
             && let SettingsLoad::Ready(view) = &mut self.settings
@@ -1358,6 +1680,9 @@ impl AppModel {
             Overlay::Help => fl!("pane-help"),
             Overlay::About => fl!("pane-about"),
             Overlay::DryRun => fl!("pane-dry-run"),
+            Overlay::Browse => self.browse_title(),
+            Overlay::RestorePlan if self.pending_restore.is_some() => fl!("pane-restore-plan"),
+            Overlay::RestorePlan => fl!("pane-restore-result"),
             Overlay::Settings => match &self.settings {
                 SettingsLoad::Ready(view) if view.dirty() => fl!("pane-settings-unsaved"),
                 _ => fl!("pane-settings"),
@@ -1370,7 +1695,14 @@ impl AppModel {
     /// [`MIN_ROWS`] and [`VISIBLE_ROWS`] (longer lists scroll), or enough for what's shown instead.
     fn pane_rows(&self) -> u16 {
         match (self.overlay, &self.listing) {
-            (Overlay::Help | Overlay::Settings | Overlay::DryRun, _)
+            (
+                Overlay::Help
+                | Overlay::Settings
+                | Overlay::DryRun
+                | Overlay::Browse
+                | Overlay::RestorePlan,
+                _,
+            )
             | (Overlay::None | Overlay::Details, Listing::Failed(_)) => VISIBLE_ROWS,
             (Overlay::About, _) => MIN_ROWS + 1,
             (_, Listing::Loaded(list)) => u16::try_from(list.snapshots.len())
@@ -1403,6 +1735,8 @@ impl AppModel {
             (Overlay::Help, _) => scroll(help()),
             (Overlay::About, _) => scroll(about()),
             (Overlay::DryRun, _) => scroll(dry_run_view(self.dry_run_plan.as_deref())),
+            (Overlay::Browse, _) => self.browse_body(),
+            (Overlay::RestorePlan, _) => scroll(dry_run_view(self.restore_text.as_deref())),
             (_, Listing::Loaded(list)) if list.snapshots.is_empty() => {
                 if list.device.is_none() {
                     lines([fl!("no-device"), fl!("no-device-hint")])
@@ -1425,6 +1759,12 @@ impl AppModel {
     fn details(&self) -> Element<'_, Message> {
         let content = match (self.overlay, self.snapshots().get(self.selected)) {
             (Overlay::Settings, _) => scroll(self.settings_details()),
+            (Overlay::Browse | Overlay::RestorePlan, _) => {
+                match self.browser.as_ref().and_then(|b| Some((b, b.current()?))) {
+                    Some((browser, entry)) => scroll(entry_details(browser, entry)),
+                    None => lines([]),
+                }
+            }
             (_, Some(snapshot)) => scroll(details(snapshot)),
             (_, None) => widget::column::with_children(vec![
                 monotext(fl!("details-none"))
@@ -1453,6 +1793,13 @@ impl AppModel {
             ),
             (Some(Operation::DryRun(_)), _) => {
                 (format!("{} {spinner}", fl!("dry-running")), Tone::Normal)
+            }
+            (Some(Operation::Restore(request)), _) if request.dry_run => (
+                format!("{} {spinner}", fl!("restore-dry-running")),
+                Tone::Normal,
+            ),
+            (Some(Operation::Restore(_)), _) => {
+                (format!("{} {spinner}", fl!("restoring")), Tone::Normal)
             }
             (None, _) if self.saving_settings => (
                 format!("{} {spinner}", fl!("settings-saving")),
@@ -1563,7 +1910,7 @@ impl AppModel {
         }
         widget::mouse_area(row)
             .on_press(Message::Select(index))
-            .on_double_click(Message::OpenDetails(index))
+            .on_double_click(Message::OpenBrowser(index))
             .interaction(mouse::Interaction::Pointer)
             .into()
     }
@@ -1571,8 +1918,10 @@ impl AppModel {
     /// The footer: `[c]reate  [d]elete  [r]efresh  [?]help            [esc]`. Each hint is a
     /// button.
     fn hints(&self) -> Element<'_, Message> {
-        if self.overlay == Overlay::Settings {
-            return self.settings_hints();
+        match self.overlay {
+            Overlay::Settings => return self.settings_hints(),
+            Overlay::Browse | Overlay::RestorePlan => return self.browse_hints(),
+            _ => {}
         }
         let refresh = if matches!(self.listing, Listing::Failed(_)) {
             "[r]etry"
@@ -1746,6 +2095,97 @@ impl AppModel {
             .into()
     }
 
+    /// The browser's pane title: `2026-09-25_03-00-01:/etc · 3 marked`.
+    fn browse_title(&self) -> String {
+        let Some(browser) = &self.browser else {
+            return fl!("pane-snapshots");
+        };
+        let max = match self.mode {
+            Mode::Applet => BREADCRUMB_CHARS,
+            Mode::Window => WINDOW_BREADCRUMB_CHARS,
+        };
+        let title = browser.breadcrumb(max);
+        if browser.marked.is_empty() {
+            return title;
+        }
+        let marked = fl!("browse-marked", count = browser.marked.len().to_string());
+        format!("{title} · {marked}")
+    }
+
+    /// The browser's left pane: the folder's entries, or why there are none.
+    fn browse_body(&self) -> Element<'_, Message> {
+        let Some(browser) = &self.browser else {
+            return lines([]);
+        };
+        match &browser.load {
+            Load::Loading => lines([fl!("browse-reading", path = browser.path.to_string())]),
+            Load::Failed(reason) => scroll(
+                widget::column::with_children(vec![
+                    monotext(fl!("browse-failed"))
+                        .class(theme::Text::Custom(error_text))
+                        .into(),
+                    monotext(reason.clone())
+                        .wrapping(Wrapping::WordOrGlyph)
+                        .into(),
+                ])
+                .spacing(2)
+                .padding([4, 6]),
+            ),
+            Load::Ready(listing) if listing.entries.is_empty() => lines([fl!("browse-empty")]),
+            Load::Ready(listing) => {
+                let mut rows: Vec<Element<'_, Message>> = listing
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| browse_row(browser, index, entry))
+                    .collect();
+                if listing.truncated {
+                    rows.push(
+                        monotext(fl!("browse-truncated"))
+                            .class(theme::Text::Custom(dim_text))
+                            .into(),
+                    );
+                }
+                widget::scrollable(widget::column::with_children(rows))
+                    .id(BROWSE_LIST_ID.clone())
+                    .padding(0.0)
+                    .direction(Direction::Vertical(thin_scrollbar()))
+                    .height(Length::Shrink)
+                    .into()
+            }
+        }
+    }
+
+    /// The footer in the browser: `[space]mark [R]estore [h]up [r]eload            [esc]`, or
+    /// on a plan `[enter]run            [esc]`.
+    fn browse_hints(&self) -> Element<'_, Message> {
+        let idle = self.running.is_none();
+        let key = |label, action, on: bool| {
+            hint(label, (on && idle).then_some(Message::BrowseKey(action)))
+        };
+        let mut hints = if self.overlay == Overlay::RestorePlan {
+            vec![key(
+                "[enter]run",
+                KeyAction::Details,
+                self.pending_restore.is_some(),
+            )]
+        } else {
+            let has_entry = self.browser.as_ref().is_some_and(|b| b.current().is_some());
+            vec![
+                key("[space]mark", KeyAction::Toggle, has_entry),
+                key("[R]estore", KeyAction::Restore, has_entry),
+                key("[h]up", KeyAction::Back, true),
+                key("[r]eload", KeyAction::Refresh, true),
+            ]
+        };
+        hints.push(widget::space::horizontal().into());
+        hints.push(hint("[esc]", Some(Message::Escape)));
+        widget::row::with_children(hints)
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into()
+    }
+
     /// The right-click menu: a standard COSMIC applet menu, not the terminal look.
     fn menu_view(&self) -> Element<'_, Message> {
         let content = widget::column::with_children(vec![
@@ -1807,6 +2247,16 @@ impl AppModel {
             }
             Prompt::Count { level, typed } => (
                 Some(fl!("prompt-count", level = level.name())),
+                typed.as_str(),
+                String::new(),
+            ),
+            Prompt::RestoreWhere { count, typed } => (
+                Some(fl!("prompt-restore-where", count = count.to_string())),
+                typed.as_str(),
+                String::new(),
+            ),
+            Prompt::ConfirmRestore { count, typed } => (
+                Some(fl!("prompt-restore-confirm", count = count.to_string())),
                 typed.as_str(),
                 String::new(),
             ),
@@ -2163,6 +2613,7 @@ async fn operate(pkexec: Arc<Cli>, operation: Operation, native: bool) -> Result
             Operation::Create(comment) => helper.create(comment).await,
             Operation::Delete(name) => helper.delete(name).await,
             Operation::DryRun(comment) => return native_dry_run(comment).await.map(drop),
+            Operation::Restore(request) => return restore(request).await.map(drop),
         };
         return done.map_err(CliError::from);
     }
@@ -2170,6 +2621,7 @@ async fn operate(pkexec: Arc<Cli>, operation: Operation, native: bool) -> Result
         Operation::Create(comment) => pkexec.create(comment),
         Operation::Delete(name) => pkexec.delete(name),
         Operation::DryRun(_) => Err(apsis_core::Error::Helper(fl!("native-need-helper"))),
+        Operation::Restore(_) => Err(apsis_core::Error::Helper(fl!("restore-need-helper"))),
     })
     .await
 }
@@ -2198,6 +2650,141 @@ fn dry_run_view(plan: Option<&str>) -> Element<'static, Message> {
         .spacing(2)
         .padding([4, 6])
         .into()
+}
+
+/// `▸ ~ * hosts                     1.2 KiB`: the running system's marker (`+` missing, `~`
+/// changed, `=` same), the mark, the name (`/` after folders, `-> target` for links), the size.
+/// Click selects, double-click goes into a folder or marks a file.
+fn browse_row<'a>(browser: &Browser, index: usize, entry: &'a Entry) -> Element<'a, Message> {
+    let selected = index == browser.cursor;
+    let marker = monotext(browser::live_marker(entry.live).to_string());
+    let marker = match entry.live {
+        Live::Missing => marker.class(theme::Text::Accent),
+        Live::Changed => marker.class(theme::Text::Custom(warning_text)),
+        Live::Same | Live::Present => marker.class(theme::Text::Custom(dim_text)),
+    };
+    let name = match entry.kind {
+        Kind::Dir => format!("{}/", entry.name),
+        Kind::Link => format!("{} -> {}", entry.name, entry.target),
+        Kind::File | Kind::Other => entry.name.clone(),
+    };
+    let size = if entry.kind == Kind::File {
+        fmt::size(entry.size)
+    } else {
+        String::new()
+    };
+    let line = widget::row::with_children(vec![
+        monotext(if selected { "▸" } else { " " })
+            .class(theme::Text::Accent)
+            .into(),
+        marker.into(),
+        monotext(if browser.is_marked(entry) { "*" } else { " " })
+            .class(theme::Text::Accent)
+            .into(),
+        monotext(name)
+            .width(Length::Fill)
+            .wrapping(Wrapping::None)
+            .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
+            .into(),
+        monotext(size).class(theme::Text::Custom(dim_text)).into(),
+    ])
+    .spacing(8);
+    let mut row = container(line)
+        .width(Length::Fill)
+        .height(Length::Fixed(ROW_HEIGHT))
+        .padding([2, 6]);
+    if selected {
+        row = row.class(theme::Container::custom(selected_row));
+    }
+    widget::mouse_area(row)
+        .on_press(Message::BrowseSelect(index))
+        .on_double_click(Message::BrowseActivate(index))
+        .interaction(mouse::Interaction::Pointer)
+        .into()
+}
+
+/// The browser's right pane: everything about the selected entry, and how the running system
+/// compares.
+fn entry_details(browser: &Browser, entry: &Entry) -> Element<'static, Message> {
+    let path = browser
+        .current_path()
+        .map_or_else(|| entry.name.clone(), |p| p.to_string());
+    let kind = match entry.kind {
+        Kind::File => fl!("entry-file"),
+        Kind::Dir => fl!("entry-folder"),
+        Kind::Link => fl!("entry-link"),
+        Kind::Other => fl!("entry-special"),
+    };
+    let mut fields = vec![
+        (fl!("details-path"), path),
+        (fl!("details-type"), kind),
+        (fl!("details-size"), fmt::size(entry.size)),
+        (fl!("details-modified"), local_time(entry.mtime)),
+        (
+            fl!("details-mode"),
+            browser::mode_string(entry.kind, entry.mode),
+        ),
+        (fl!("details-owner"), entry.owner.clone()),
+    ];
+    if entry.kind == Kind::Link {
+        fields.push((fl!("details-link"), entry.target.clone()));
+    }
+    fields.push((fl!("details-live"), live_text(entry)));
+    key_value_rows(fields, DETAILS_KEY_WIDTH)
+}
+
+/// How the running system compares, spelled out.
+fn live_text(entry: &Entry) -> String {
+    match entry.live {
+        Live::Missing => fl!("live-missing"),
+        Live::Same => fl!("live-same"),
+        Live::Present => fl!("live-present"),
+        Live::Changed if entry.kind == Kind::File && entry.live_size != 0 => fl!(
+            "live-changed-file",
+            size = fmt::size(entry.size),
+            live_size = fmt::size(entry.live_size),
+            time = local_time(entry.mtime),
+            live_time = local_time(entry.live_mtime)
+        ),
+        Live::Changed => fl!("live-changed"),
+    }
+}
+
+/// Unix seconds as local time, `2026-09-25 03:00:01`.
+fn local_time(seconds: i64) -> String {
+    jiff::Timestamp::from_second(seconds).map_or_else(
+        |_| seconds.to_string(),
+        |t| {
+            t.to_zoned(jiff::tz::TimeZone::system())
+                .strftime("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        },
+    )
+}
+
+/// `apsis-helper`, which browsing and restoring always need (they read root-only files).
+async fn restore_helper() -> Result<HelperClient, CliError> {
+    HelperClient::connect()
+        .await
+        .ok_or_else(|| CliError::Other(fl!("restore-need-helper")))
+}
+
+/// Folder `path` of `snapshot`, compared with the running system.
+async fn browse(snapshot: &str, path: &str) -> Result<FolderListing, CliError> {
+    restore_helper()
+        .await?
+        .browse(snapshot, path)
+        .await
+        .map_err(CliError::from)
+}
+
+/// Runs `request` (dry run or for real); the plan's or result's text.
+async fn restore(request: &Request) -> Result<String, CliError> {
+    restore_helper()
+        .await?
+        .restore(request)
+        .await
+        .map_err(CliError::from)
 }
 
 /// Timeshift's settings, the devices and the users, through `apsis-helper` (there's no pkexec
@@ -2307,7 +2894,8 @@ fn help() -> Element<'static, Message> {
     let keys = [
         ("↑ ↓  j k", fl!("help-move")),
         ("Home End", fl!("help-ends")),
-        ("Enter", fl!("help-details")),
+        ("Enter", fl!("help-browse")),
+        ("Tab", fl!("help-details")),
         ("c", fl!("help-create")),
         ("d", fl!("help-delete")),
         ("r", fl!("help-refresh")),
@@ -2320,6 +2908,12 @@ fn help() -> Element<'static, Message> {
         ("a x", fl!("help-settings-filters")),
         ("w", fl!("help-settings-write")),
         ("r", fl!("help-settings-reload")),
+        ("", String::new()),
+        ("Enter l", fl!("help-browse-into")),
+        ("⌫ h", fl!("help-browse-up")),
+        ("space", fl!("help-browse-mark")),
+        ("R", fl!("help-browse-restore")),
+        ("r", fl!("help-browse-reload")),
     ];
     key_value_rows(keys.map(|(k, v)| (k.to_owned(), v)), HELP_KEY_WIDTH)
 }
@@ -2433,6 +3027,9 @@ fn char_action(c: char) -> Option<KeyAction> {
         'a' => Some(KeyAction::Add),
         'x' => Some(KeyAction::Remove),
         'w' => Some(KeyAction::Write),
+        'h' => Some(KeyAction::Back),
+        'l' => Some(KeyAction::Into),
+        'R' => Some(KeyAction::Restore),
         _ => None,
     }
 }
@@ -2467,6 +3064,10 @@ fn key_action(event: event::Event, status: event::Status, window: Id) -> Option<
         Key::Named(Named::Home) => KeyAction::First,
         Key::Named(Named::End) => KeyAction::Last,
         Key::Named(Named::Escape) => KeyAction::Escape,
+        // The `>` line captures these even when it's empty; they only act as commands when no
+        // prompt is open (see `on_key`).
+        Key::Named(Named::Backspace) => KeyAction::Back,
+        Key::Named(Named::Tab) => KeyAction::FocusDetails,
         Key::Named(Named::Enter) if uncaptured => KeyAction::Details,
         Key::Character(c) if uncaptured => {
             let mut chars = c.chars();
@@ -2630,6 +3231,9 @@ mod tests {
         assert_eq!(char_action('a'), Some(KeyAction::Add));
         assert_eq!(char_action('x'), Some(KeyAction::Remove));
         assert_eq!(char_action('w'), Some(KeyAction::Write));
+        assert_eq!(char_action('h'), Some(KeyAction::Back));
+        assert_eq!(char_action('l'), Some(KeyAction::Into));
+        assert_eq!(char_action('R'), Some(KeyAction::Restore));
         assert_eq!(char_action('z'), None);
         assert_eq!(char_action('J'), None);
     }
@@ -2666,6 +3270,8 @@ mod tests {
                 (Named::Home, KeyAction::First),
                 (Named::End, KeyAction::Last),
                 (Named::Escape, KeyAction::Escape),
+                (Named::Backspace, KeyAction::Back),
+                (Named::Tab, KeyAction::FocusDetails),
             ];
             for (named, want) in table {
                 assert_eq!(action(Key::Named(named), status), Some(want), "{named:?}");
@@ -2697,6 +3303,9 @@ mod tests {
             settings: SettingsLoad::NotLoaded,
             saving_settings: false,
             dry_run_plan: None,
+            browser: None,
+            pending_restore: None,
+            restore_text: None,
             window_resizable: false,
             icon: symbolic_icon(),
         }
@@ -3166,22 +3775,241 @@ mod tests {
     }
 
     #[test]
-    fn enter_and_double_click_make_details_the_active_pane() {
+    fn tab_makes_details_the_active_pane() {
         let mut app = listed(DEVICE_LIST);
-        send(&mut app, Message::Submit);
+        let popup = app.popup.unwrap();
+        send(&mut app, Message::Key(popup, KeyAction::FocusDetails));
         assert_eq!(app.overlay, Overlay::Details);
-        send(&mut app, Message::Submit);
+        send(&mut app, Message::Key(popup, KeyAction::FocusDetails));
         assert_eq!(app.overlay, Overlay::None);
-
-        send(&mut app, Message::OpenDetails(1));
-        assert_eq!((app.overlay, app.selected), (Overlay::Details, 1));
+        send(&mut app, Message::Key(popup, KeyAction::FocusDetails));
         send(&mut app, Message::Select(2));
         assert_eq!((app.overlay, app.selected), (Overlay::None, 2));
-
-        send(&mut app, Message::OpenDetails(0));
+        send(&mut app, Message::Key(popup, KeyAction::FocusDetails));
         send(&mut app, Message::Escape);
         assert_eq!(app.overlay, Overlay::None);
         assert!(app.popup.is_some());
+    }
+
+    fn entry(name: &str, kind: Kind) -> Entry {
+        Entry {
+            name: name.to_owned(),
+            kind,
+            size: 3,
+            mtime: 1_700_000_000,
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            owner: "root:root".to_owned(),
+            target: String::new(),
+            live: Live::Changed,
+            live_size: 5,
+            live_mtime: 1_700_000_100,
+        }
+    }
+
+    fn folder(entries: &[(&str, Kind)]) -> Result<FolderListing, CliError> {
+        Ok(FolderListing {
+            entries: entries.iter().map(|(n, k)| entry(n, *k)).collect(),
+            truncated: false,
+        })
+    }
+
+    /// The browser open on the second snapshot's `/`, with `etc/` and `vmlinuz` in it.
+    fn browsing() -> AppModel {
+        let mut app = listed(DEVICE_LIST);
+        send(&mut app, Message::OpenBrowser(1));
+        assert_eq!(app.overlay, Overlay::Browse);
+        let snapshot = app.snapshots()[1].name.clone();
+        assert_eq!(app.browser.as_ref().unwrap().snapshot, snapshot);
+        assert!(app.browser.as_ref().unwrap().is_loading());
+        let root = folder(&[("vmlinuz", Kind::Link), ("etc", Kind::Dir)]);
+        send(&mut app, Message::Browsed(snapshot, SnapPath::root(), root));
+        app
+    }
+
+    fn browsed(app: &mut AppModel, path: &str, entries: &[(&str, Kind)]) {
+        let snapshot = app.browser.as_ref().unwrap().snapshot.clone();
+        let path = SnapPath::parse(path).unwrap();
+        send(app, Message::Browsed(snapshot, path, folder(entries)));
+    }
+
+    #[test]
+    fn enter_opens_the_browser_and_esc_closes_it() {
+        let mut app = listed(DEVICE_LIST);
+        send(&mut app, Message::Submit);
+        assert_eq!(app.overlay, Overlay::Browse);
+        assert_eq!(
+            app.browser.as_ref().unwrap().snapshot,
+            app.snapshots()[0].name
+        );
+        send(&mut app, Message::Escape);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(app.browser.is_none());
+        assert!(app.popup.is_some());
+        // Not while something runs.
+        app.running = Some(Operation::Create(String::new()));
+        send(&mut app, Message::OpenBrowser(0));
+        assert!(app.browser.is_none());
+    }
+
+    #[test]
+    fn browser_keys_move_enter_go_up_and_mark() {
+        let mut app = browsing();
+        let popup = app.popup.unwrap();
+        assert_eq!(app.browser.as_ref().unwrap().current().unwrap().name, "etc");
+        // Enter (the `>` line's submit) goes into the folder.
+        send(&mut app, Message::Submit);
+        assert_eq!(app.browser.as_ref().unwrap().path.to_string(), "/etc");
+        browsed(
+            &mut app,
+            "/etc",
+            &[("hosts", Kind::File), ("fstab", Kind::File)],
+        );
+        assert!(app.body_title().ends_with(":/etc"), "{}", app.body_title());
+        typed(&mut app, "j");
+        typed(&mut app, " ");
+        assert!(
+            app.body_title().ends_with("1 marked"),
+            "{}",
+            app.body_title()
+        );
+        // Backspace and h go up, selecting the folder we left.
+        send(&mut app, Message::Key(popup, KeyAction::Back));
+        browsed(
+            &mut app,
+            "/",
+            &[("etc", Kind::Dir), ("vmlinuz", Kind::Link)],
+        );
+        assert_eq!(app.browser.as_ref().unwrap().current().unwrap().name, "etc");
+        typed(&mut app, "l");
+        assert_eq!(app.browser.as_ref().unwrap().path.to_string(), "/etc");
+        typed(&mut app, "h");
+        assert!(app.browser.as_ref().unwrap().path.is_root());
+        // Snapshot keys do nothing in the browser.
+        typed(&mut app, "cd");
+        assert_eq!(app.prompt, Prompt::Command);
+        assert!(!app.loading);
+    }
+
+    #[test]
+    fn folder_restore_runs_after_its_dry_run() {
+        let mut app = browsing();
+        typed(&mut app, "R");
+        assert_eq!(
+            app.prompt,
+            Prompt::RestoreWhere {
+                count: 1,
+                typed: String::new()
+            }
+        );
+        send(&mut app, Message::Submit);
+        let Some(Operation::Restore(request)) = app.running.clone() else {
+            panic!("{:?}", app.running)
+        };
+        assert!(request.dry_run);
+        assert_eq!(request.destination, Destination::Folder);
+        assert_eq!(request.paths, ["/etc"]);
+        assert!(
+            app.activity_line()
+                .0
+                .starts_with(&fl!("restore-dry-running"))
+        );
+
+        send(
+            &mut app,
+            Message::RestoreDone(request.clone(), Ok("the plan".to_owned())),
+        );
+        assert_eq!(app.overlay, Overlay::RestorePlan);
+        assert_eq!(app.body_title(), fl!("pane-restore-plan"));
+        // Enter runs it for real.
+        send(&mut app, Message::Submit);
+        let Some(Operation::Restore(real)) = app.running.clone() else {
+            panic!("{:?}", app.running)
+        };
+        assert!(!real.dry_run);
+        assert_eq!(real.paths, request.paths);
+        send(
+            &mut app,
+            Message::RestoreDone(real, Ok("restored".to_owned())),
+        );
+        assert_eq!(app.body_title(), fl!("pane-restore-result"));
+        assert!(matches!(app.status, Some(Status::Info(_))));
+        // Esc goes back to the browser, which reads the folder again.
+        send(&mut app, Message::Escape);
+        assert_eq!(app.overlay, Overlay::Browse);
+        assert!(app.browser.as_ref().unwrap().is_loading());
+    }
+
+    #[test]
+    fn original_restore_asks_for_y_after_its_plan() {
+        let mut app = browsing();
+        typed(&mut app, "R");
+        typed(&mut app, "o");
+        send(&mut app, Message::Submit);
+        let Some(Operation::Restore(request)) = app.running.clone() else {
+            panic!("{:?}", app.running)
+        };
+        assert_eq!(request.destination, Destination::Original);
+        send(
+            &mut app,
+            Message::RestoreDone(request, Ok("plan".to_owned())),
+        );
+        send(&mut app, Message::Submit);
+        assert!(app.running.is_none(), "not without y");
+        assert!(matches!(
+            app.prompt,
+            Prompt::ConfirmRestore { count: 1, .. }
+        ));
+        for no in ["", "n", "yes"] {
+            typed(&mut app, no);
+            send(&mut app, Message::Submit);
+            assert!(app.running.is_none(), "{no:?}");
+            send(&mut app, Message::Submit);
+        }
+        typed(&mut app, "y");
+        send(&mut app, Message::Submit);
+        assert!(
+            matches!(&app.running, Some(Operation::Restore(r)) if !r.dry_run && r.destination == Destination::Original)
+        );
+    }
+
+    #[test]
+    fn a_failed_dry_run_or_odd_answer_changes_nothing() {
+        let mut app = browsing();
+        typed(&mut app, "R");
+        typed(&mut app, "x");
+        send(&mut app, Message::Submit);
+        assert!(app.running.is_none());
+        assert_eq!(app.overlay, Overlay::Browse);
+
+        typed(&mut app, "R");
+        send(&mut app, Message::Submit);
+        let Some(Operation::Restore(request)) = app.running.clone() else {
+            panic!()
+        };
+        let refused = apsis_core::Error::InvalidInput("/etc/x is a symlink".to_owned());
+        send(&mut app, Message::RestoreDone(request, Err(refused.into())));
+        assert_eq!(app.overlay, Overlay::Browse);
+        assert!(app.pending_restore.is_none());
+        assert!(
+            status_error(&app).contains("symlink"),
+            "{}",
+            status_error(&app)
+        );
+    }
+
+    #[test]
+    fn entry_details_spell_out_the_difference() {
+        let changed = entry("hosts", Kind::File);
+        assert!(
+            live_text(&changed).contains("size 3B here, 5B now"),
+            "{}",
+            live_text(&changed)
+        );
+        let mut missing = entry("x", Kind::File);
+        missing.live = Live::Missing;
+        assert_eq!(live_text(&missing), fl!("live-missing"));
     }
 
     #[test]

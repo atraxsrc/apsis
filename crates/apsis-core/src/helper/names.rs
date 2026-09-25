@@ -33,12 +33,20 @@ pub const METHOD_NATIVE_DRY_RUN: &str = "NativeDryRun";
 /// `NativeCreate(s comment)`: a native rsync snapshot. Returns once started;
 /// [`SIGNAL_FINISHED`] with [`OP_CREATE`] follows.
 pub const METHOD_NATIVE_CREATE: &str = "NativeCreate";
+/// `Browse(s snapshot, s path) -> (a(sstxuuussstx)b)`: one folder of a snapshot, each entry
+/// compared with the running system. See [`super::WireListing`].
+pub const METHOD_BROWSE: &str = "Browse";
+/// `Restore(s snapshot, as paths, s destination, b dry_run)`: returns once started;
+/// [`SIGNAL_FINISHED`] with [`OP_RESTORE`] follows, its message the plan or the result.
+pub const METHOD_RESTORE: &str = "Restore";
 /// `Finished(s op, b ok, s message)`, sent only to the caller that started the operation.
 pub const SIGNAL_FINISHED: &str = "Finished";
 /// `op` in [`SIGNAL_FINISHED`] after [`METHOD_CREATE`].
 pub const OP_CREATE: &str = "create";
 /// `op` in [`SIGNAL_FINISHED`] after [`METHOD_DELETE`].
 pub const OP_DELETE: &str = "delete";
+/// `op` in [`SIGNAL_FINISHED`] after [`METHOD_RESTORE`].
+pub const OP_RESTORE: &str = "restore";
 
 /// Prefix of the helper's D-Bus error names.
 pub const ERROR_PREFIX: &str = "io.github.atraxsrc.Apsis.Helper1.Error";
@@ -46,7 +54,7 @@ pub const ERROR_PREFIX: &str = "io.github.atraxsrc.Apsis.Helper1.Error";
 pub const ERROR_NOT_AUTHORIZED: &str = "io.github.atraxsrc.Apsis.Helper1.Error.NotAuthorized";
 /// Another list, create or delete is running.
 pub const ERROR_BUSY: &str = "io.github.atraxsrc.Apsis.Helper1.Error.Busy";
-/// A comment or snapshot name the helper refuses.
+/// A comment, snapshot name, setting or restore request the helper refuses.
 pub const ERROR_INVALID_INPUT: &str = "io.github.atraxsrc.Apsis.Helper1.Error.InvalidInput";
 /// `timeshift` isn't installed.
 pub const ERROR_NOT_INSTALLED: &str = "io.github.atraxsrc.Apsis.Helper1.Error.NotInstalled";
@@ -67,6 +75,14 @@ pub const ACTION_DELETE: &str = "io.github.atraxsrc.Apsis.delete";
 /// polkit action for [`METHOD_WRITE_SETTINGS`]: `auth_admin_keep`. ([`METHOD_READ_SETTINGS`]
 /// uses [`ACTION_LIST`].)
 pub const ACTION_CONFIGURE: &str = "io.github.atraxsrc.Apsis.configure";
+
+/// polkit action for [`METHOD_BROWSE`] and restore dry runs: `auth_admin_keep` (snapshots
+/// hold root-only files).
+pub const ACTION_BROWSE: &str = "io.github.atraxsrc.Apsis.browse";
+/// polkit action for a real [`METHOD_RESTORE`] in folder mode: `auth_admin_keep`.
+pub const ACTION_RESTORE: &str = "io.github.atraxsrc.Apsis.restore";
+/// polkit action for a real [`METHOD_RESTORE`] in original mode: `auth_admin`, asked every time.
+pub const ACTION_RESTORE_ORIGINAL: &str = "io.github.atraxsrc.Apsis.restore-original";
 
 /// The systemd unit D-Bus activation starts.
 pub const SYSTEMD_UNIT: &str = "apsis-helper.service";
@@ -102,6 +118,9 @@ mod tests {
             ACTION_CREATE,
             ACTION_DELETE,
             ACTION_CONFIGURE,
+            ACTION_BROWSE,
+            ACTION_RESTORE,
+            ACTION_RESTORE_ORIGINAL,
         ] {
             assert!(name.starts_with(app_id), "{name}");
         }

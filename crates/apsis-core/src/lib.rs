@@ -11,6 +11,7 @@ mod model;
 pub mod native;
 mod parse;
 mod pkexec;
+pub mod restore;
 pub mod settings;
 mod timeshift;
 

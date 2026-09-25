@@ -55,9 +55,31 @@ pub fn config(
     dry_run: bool,
 ) -> Result<(NativeConfig, Device)> {
     let settings = Config::parse(timeshift_json)?.settings();
+    let device = backup_device(timeshift_json, lsblk_json)?;
+    let config = NativeConfig {
+        repo: PathBuf::from(MOUNT_POINT),
+        device: Some(device.path()),
+        device_uuid: Some(device.uuid.clone()),
+        source: PathBuf::from("/"),
+        sys_uuid: root_uuid.trim().to_owned(),
+        sys_distro: distro,
+        exclude: exclude::for_backup(&settings.exclude, fstab, users),
+        dry_run,
+    };
+    Ok((config, device))
+}
+
+/// The backup device Timeshift's settings name, as lsblk shows it: connected, rsync mode, and
+/// one Apsis mounts itself (unencrypted, a Linux filesystem).
+///
+/// # Errors
+///
+/// btrfs mode, no backup device, the device not connected, encrypted or not a Linux filesystem.
+pub fn backup_device(timeshift_json: &str, lsblk_json: &str) -> Result<Device> {
+    let settings = Config::parse(timeshift_json)?.settings();
     if settings.btrfs_mode {
         return Err(Error::Native(
-            "Timeshift is in btrfs mode; the native backend is rsync only for now".to_owned(),
+            "Timeshift is in btrfs mode; Apsis reads rsync snapshots only for now".to_owned(),
         ));
     }
     let uuid = settings.backup_device_uuid;
@@ -73,8 +95,8 @@ pub fn config(
         })?;
     if !device.selectable() {
         return Err(Error::Native(format!(
-            "the backup device ({}, {}) is encrypted or not a Linux filesystem; the native \
-             backend doesn't unlock or mount those, Timeshift does",
+            "the backup device ({}, {}) is encrypted or not a Linux filesystem; Apsis doesn't \
+             unlock or mount those, Timeshift does",
             device.path(),
             if device.fstype.is_empty() {
                 "no filesystem"
@@ -83,30 +105,20 @@ pub fn config(
             }
         )));
     }
-    let config = NativeConfig {
-        repo: PathBuf::from(MOUNT_POINT),
-        device: Some(device.path()),
-        device_uuid: Some(uuid),
-        source: PathBuf::from("/"),
-        sys_uuid: root_uuid.trim().to_owned(),
-        sys_distro: distro,
-        exclude: exclude::for_backup(&settings.exclude, fstab, users),
-        dry_run,
-    };
-    Ok((config, device))
+    Ok(device)
 }
 
-/// `mount -o <ro|rw>,nosuid,nodev /dev/disk/by-uuid/<uuid> <MOUNT_POINT>`. Timeshift mounts
+/// `mount -o <ro,noexec|rw>,nosuid,nodev /dev/disk/by-uuid/<uuid> <MOUNT_POINT>`. Timeshift mounts
 /// by UUID too (`Device.mount`, `Device.vala:1571-1666`), with no options.
 pub fn mount_argv(uuid: &str, access: Access) -> Vec<String> {
-    let mode = match access {
-        Access::ReadOnly => "ro",
-        Access::ReadWrite => "rw",
+    let options = match access {
+        Access::ReadOnly => "ro,nosuid,nodev,noexec",
+        Access::ReadWrite => "rw,nosuid,nodev",
     };
     vec![
         "mount".to_owned(),
         "-o".to_owned(),
-        format!("{mode},nosuid,nodev"),
+        options.to_owned(),
         format!("/dev/disk/by-uuid/{uuid}"),
         MOUNT_POINT.to_owned(),
     ]
@@ -146,7 +158,13 @@ pub fn open<R: Runner + Clone>(
     let passwd = fs::read_to_string("/etc/passwd").unwrap_or_default();
     let users = exclude::home_users(&passwd, Path::new("/"));
     let (config, device) = config(&text, &devices, &root_uuid, distro, &fstab, &users, dry_run)?;
+    let mounted = mount(runner, &device, access)?;
+    let backend = NativeRsync::new(config, QuietRunner::new(SAFE_PATH)).with_log(log);
+    Ok((backend, mounted))
+}
 
+/// Mounts `device` at [`MOUNT_POINT`] until the guard drops.
+fn mount<R: Runner + Clone>(runner: &R, device: &Device, access: Access) -> Result<Mounted<R>> {
     fs::create_dir_all(MOUNT_POINT)?;
     // Timeshift unmounts whatever is at its mount point first; one left by a crashed helper
     // would be ours. Not mounted is fine.
@@ -154,11 +172,21 @@ pub fn open<R: Runner + Clone>(
     let argv = mount_argv(&device.uuid, access);
     let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
     run(runner, &argv)?;
-    let mounted = Mounted {
+    Ok(Mounted {
         runner: runner.clone(),
-    };
-    let backend = NativeRsync::new(config, QuietRunner::new(SAFE_PATH)).with_log(log);
-    Ok((backend, mounted))
+    })
+}
+
+/// The backup device from Timeshift's settings, mounted read-only (and `noexec`) at
+/// [`MOUNT_POINT`] while the guard lives: for browsing and restoring.
+///
+/// # Errors
+///
+/// See [`backup_device`]; also a failed `lsblk` or `mount`.
+pub fn mount_backup<R: Runner + Clone>(runner: &R) -> Result<Mounted<R>> {
+    let text = Files::system().read()?;
+    let device = backup_device(&text, &lsblk(runner)?)?;
+    mount(runner, &device, Access::ReadOnly)
 }
 
 /// Timeshift's lock file (`AppLock.create("timeshift", ...)`, `AppLock.vala:33-37`,
@@ -266,7 +294,7 @@ mod tests {
             [
                 "mount",
                 "-o",
-                "ro,nosuid,nodev",
+                "ro,nosuid,nodev,noexec",
                 "/dev/disk/by-uuid/abcd",
                 MOUNT_POINT
             ]

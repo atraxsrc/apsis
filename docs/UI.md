@@ -31,8 +31,8 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
   the list: at least 5 rows, at most 8, then it scrolls (help and errors use 8, About 6). The
   details pane has the same height; longer content scrolls.
 - Each pane is opaque, filled with the theme's background colour.
-- Enter or a double-click makes the details pane active; Enter again, Esc or a click on a row
-  goes back to the list.
+- Tab makes the details pane active; Tab again, Esc or a click on a row goes back to the list.
+  (Enter and a double-click open the snapshot browser since Phase 6a.)
 - Activity pane: the running create/delete with a spinner (accent border while it runs), else the
   last result, else `idle` (dimmed). A failure shows Timeshift's last lines. Below that, any
   warnings from the last list (`list: E: Failed to remove directory`) in the theme's warning colour.
@@ -58,7 +58,8 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
 | c | create → input line becomes `> comment: _`, Enter runs, Esc cancels |
 | d | delete selected → `> delete 2026-09-18_12-41-00? [y/N] _`; Enter with `y` deletes, anything else cancels |
 | r | refresh list |
-| Enter | make the details pane active, or go back to the list |
+| Enter | browse the selected snapshot's files (Phase 6a) |
+| Tab | make the details pane active, or go back to the list |
 | s | settings view (see below) |
 | ? | help overlay |
 | Esc | cancel input, then go back from details/help/about/settings, then close the popup |
@@ -74,6 +75,51 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
 | error | `error:` + Timeshift's last lines (its `E:`/`W:` lines and stderr), `[r]etry` |
 | disk missing | `backup disk not connected (UUID 1a2b…): plug it in and press r` (list error, or the create/delete result) |
 | not installed | `timeshift not found — install it or wait for the native backend` |
+
+## Snapshot browser (Phase 6a)
+
+Enter or a double-click on a snapshot opens its files in the left pane. Needs `apsis-helper`
+(`browsing and restoring need apsis-helper (sudo just install)`); the first folder asks for the
+password (polkit `browse`, cached a few minutes).
+
+```
+ ╭─ 2026-09-25_03-00-01:/etc · 2 marked ─────────╮ ╭─ details ────────────────────╮
+ │   = * fstab                          1.2KiB   │ │ path      /etc/hosts         │
+ │ ▸ ~   hosts                            98B    │ │ type      file               │
+ │   +   NetworkManager/                         │ │ size      98B                │
+ │   =   vi -> ../usr/bin/vim.basic              │ │ modified  2026-09-20 10:02:11│
+ │                                               │ │ mode      -rw-r--r--         │
+ │                                               │ │ owner     root:root          │
+ │                                               │ │ live      differs: size ...  │
+ ╰───────────────────────────────────────────────╯ ╰──────────────────────────────╯
+ [space]mark  [R]estore  [h]up  [r]eload                                      [esc]
+```
+
+- Title: the breadcrumb `snapshot:/path` (cut from the left with `…`), then `· N marked`.
+- Rows: the running system's marker (`+` missing, accent; `~` changed, warning colour; `=`
+  same, or a folder that exists, dimmed), `*` if marked, the name (`/` after folders,
+  `-> target` for symlinks), the size of files. Folders first, then by name.
+- Keys: j/k/↑/↓/Home/End move; Enter or `l` into a folder; Backspace or `h` up (selecting the
+  folder you came from); space marks or unmarks and moves down (marks are kept across
+  folders); `r` reads the folder again; `R` restores; Esc back to the snapshot list. Click
+  selects, double-click goes into a folder or marks a file.
+- Details: path, type, size, modified, mode (`ls -l` style), owner, link target, and `live`:
+  not on the running system / same size and time / folder exists (contents not compared) /
+  differs (with both sizes and times for a file).
+- `R` restores the marked entries, or the selected one if none are marked:
+  1. `> restore 3 item(s) to [f]older (~/Apsis-restored) or [o]riginal? _`; Enter with nothing
+     or `f` is folder mode, `o` original, anything else cancels.
+  2. The dry run (activity `restore dry run… ⠹`), then its plan in the left pane (title
+     `restore plan`): every item to create, copy, link, replace (with its backup name) or
+     change attributes of, the totals, warnings for `/etc` and `/usr`, and each rsync argv.
+  3. Enter runs it. Original mode first asks `> put 3 item(s) back over the running system?
+     [y/N] _` (only `y` runs it), and polkit asks for the password every time.
+  4. Activity `restoring… ⠹`, then the result in the left pane (title `restore result`); the
+     folder is read again. Esc goes back to the browser at any step.
+- Folder mode copies into `~/Apsis-restored/<snapshot>/<original path>` (a new
+  `<snapshot>-2/` and so on for each later restore), owned by you, without setuid bits,
+  file capabilities, device nodes or FIFOs. Original mode keeps each file it replaces as
+  `<name>.apsis-before-<snapshot>` next to it.
 
 ## Panel button
 

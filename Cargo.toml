@@ -14,6 +14,8 @@ futures-util = "0.3"
 i18n-embed-fl = "0.10"
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 rust-embed = "8.11"
+# File-level restore: openat/mkdirat with O_NOFOLLOW, fchown/fchmod through a held folder.
+rustix = { version = "1", features = ["fs", "process"] }
 # Timeshift's config: `preserve_order` keeps its fields in the order they were read.
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
