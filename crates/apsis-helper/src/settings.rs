@@ -110,7 +110,7 @@ fn write_atomically(path: &Path, text: &str, mode: u32) -> io::Result<()> {
 }
 
 /// lsblk's JSON ([`LSBLK_ARGS`]).
-fn lsblk(runner: &impl Runner) -> Result<String> {
+pub fn lsblk(runner: &impl Runner) -> Result<String> {
     let argv: Vec<_> = LSBLK_ARGS.iter().map(Into::into).collect();
     let output = runner.run(&argv)?;
     if !output.success {

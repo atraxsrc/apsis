@@ -47,6 +47,34 @@ impl Tag {
         }
     }
 
+    /// The word Timeshift stores in a snapshot's `info.json` (`"tags" : "ondemand daily"`).
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::OnDemand => "ondemand",
+            Self::Boot => "boot",
+            Self::Hourly => "hourly",
+            Self::Daily => "daily",
+            Self::Weekly => "weekly",
+            Self::Monthly => "monthly",
+        }
+    }
+
+    /// Maps one word of `info.json`'s `tags` to a tag.
+    #[must_use]
+    pub fn from_word(word: &str) -> Option<Self> {
+        [
+            Self::OnDemand,
+            Self::Boot,
+            Self::Hourly,
+            Self::Daily,
+            Self::Weekly,
+            Self::Monthly,
+        ]
+        .into_iter()
+        .find(|tag| tag.word() == word)
+    }
+
     /// Lower-case English name, as in Timeshift's `--help`.
     #[must_use]
     pub fn name(self) -> &'static str {

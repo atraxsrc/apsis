@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The settings view's model: Timeshift's settings as read, the edited copy, and which row is
-//! selected. Drawing it is in `app.rs`.
+//! The settings view's model: Timeshift's settings as read, the edited copy, Apsis's own
+//! backend choice, and which row is selected. Drawing it is in `app.rs`.
 
 use apsis_core::settings::{
     self, Device, HomeState, Level, MAX_COUNT, MIN_COUNT, Settings, SettingsInfo, User,
@@ -24,6 +24,10 @@ pub enum Row {
     Filter(usize),
     /// `+ add filter`: opens the prompt.
     AddFilter,
+    /// Apsis's own: Timeshift or the native rsync backend. Saved at once, not by `w`.
+    Backend,
+    /// Apsis's own, with the native backend: a create only shows what it would do.
+    DryRun,
 }
 
 impl Row {
@@ -35,6 +39,7 @@ impl Row {
             Self::Schedule(_) => Section::Schedule,
             Self::Home(_) => Section::Home,
             Self::Filter(_) | Self::AddFilter => Section::Filters,
+            Self::Backend | Self::DryRun => Section::Apsis,
         }
     }
 }
@@ -46,6 +51,17 @@ pub enum Section {
     Schedule,
     Home,
     Filters,
+    Apsis,
+}
+
+/// Apsis's own backend setting, as the settings view shows and changes it. The app saves it
+/// to cosmic-config whenever it changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendChoice {
+    /// The native rsync backend instead of `timeshift`.
+    pub native: bool,
+    /// With the native backend: a create only shows what it would do.
+    pub dry_run: bool,
 }
 
 /// The settings as read, and as edited.
@@ -53,6 +69,8 @@ pub enum Section {
 pub struct SettingsView {
     pub info: SettingsInfo,
     pub edited: Settings,
+    /// Apsis's own setting. Not part of [`SettingsView::dirty`]: it's saved as it changes.
+    pub backend: BackendChoice,
     /// Index into [`SettingsView::rows`].
     pub cursor: usize,
     /// Esc was pressed once with unsaved changes; the next Esc discards them.
@@ -60,11 +78,12 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
-    pub fn new(info: SettingsInfo) -> Self {
+    pub fn new(info: SettingsInfo, backend: BackendChoice) -> Self {
         let edited = info.config.settings();
         Self {
             info,
             edited,
+            backend,
             cursor: 0,
             discard_armed: false,
         }
@@ -80,7 +99,8 @@ impl SettingsView {
     }
 
     /// Every row, top to bottom. `@home` only in btrfs mode, home folders only in rsync mode
-    /// (as in Timeshift's Users tab).
+    /// (as in Timeshift's Users tab). Apsis's own rows last; dry run only with the native
+    /// backend.
     pub fn rows(&self) -> Vec<Row> {
         let mut rows = vec![Row::Device, Row::Mode];
         if self.edited.btrfs_mode {
@@ -92,6 +112,10 @@ impl SettingsView {
         }
         rows.extend((0..self.edited.exclude.len()).map(Row::Filter));
         rows.push(Row::AddFilter);
+        rows.push(Row::Backend);
+        if self.backend.native {
+            rows.push(Row::DryRun);
+        }
         rows
     }
 
@@ -193,6 +217,14 @@ impl SettingsView {
             }
             Row::Filter(_) => Err("x removes a filter, a adds one".to_owned()),
             Row::AddFilter => Ok(()),
+            Row::Backend => {
+                self.backend.native = !self.backend.native;
+                Ok(())
+            }
+            Row::DryRun => {
+                self.backend.dry_run = !self.backend.dry_run;
+                Ok(())
+            }
         }
     }
 
@@ -293,14 +325,23 @@ mod tests {
         }
     }
 
+    /// The defaults: Timeshift's backend, dry run on.
+    const DEFAULT_BACKEND: BackendChoice = BackendChoice {
+        native: false,
+        dry_run: true,
+    };
+
     fn view() -> SettingsView {
-        SettingsView::new(SettingsInfo {
-            text: CONFIG.to_owned(),
-            config: Config::parse(CONFIG).unwrap(),
-            devices: parse_lsblk(LSBLK).unwrap(),
-            users: vec![user("root", "/root"), user("user1", "/home/user1")],
-            timeshift_gui_open: false,
-        })
+        SettingsView::new(
+            SettingsInfo {
+                text: CONFIG.to_owned(),
+                config: Config::parse(CONFIG).unwrap(),
+                devices: parse_lsblk(LSBLK).unwrap(),
+                users: vec![user("root", "/root"), user("user1", "/home/user1")],
+                timeshift_gui_open: false,
+            },
+            DEFAULT_BACKEND,
+        )
     }
 
     fn select(view: &mut SettingsView, row: Row) {
@@ -318,7 +359,7 @@ mod tests {
             rows.iter().filter(|r| matches!(r, Row::Filter(_))).count(),
             4
         );
-        assert_eq!(rows.last(), Some(&Row::AddFilter));
+        assert_eq!(rows[rows.len() - 2..], [Row::AddFilter, Row::Backend]);
 
         select(&mut view, Row::Mode);
         view.change().unwrap();
@@ -412,6 +453,28 @@ mod tests {
         select(&mut view, Row::Filter(0));
         view.remove_filter().unwrap();
         assert_eq!(view.current(), Row::AddFilter);
+    }
+
+    #[test]
+    fn backend_rows_are_apsis_own_and_not_unsaved_timeshift_changes() {
+        let mut view = view();
+        assert!(!view.rows().contains(&Row::DryRun));
+        select(&mut view, Row::Backend);
+        view.change().unwrap();
+        assert_eq!(
+            view.backend,
+            BackendChoice {
+                native: true,
+                dry_run: true
+            }
+        );
+        // Dry run shows up once the native backend is on.
+        assert_eq!(view.rows().last(), Some(&Row::DryRun));
+        select(&mut view, Row::DryRun);
+        view.change().unwrap();
+        assert!(!view.backend.dry_run);
+        // Timeshift's file isn't touched by these.
+        assert!(!view.dirty());
     }
 
     #[test]

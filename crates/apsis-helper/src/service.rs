@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The D-Bus interface: `List`, `Create`, `Delete`, `ReadSettings`, `WriteSettings` and the
-//! `Finished` signal. Nothing else.
+//! The D-Bus interface: `List`, `Create`, `Delete`, `ReadSettings`, `WriteSettings`, the
+//! native backend's `NativeList`, `NativeDryRun` and `NativeCreate`, and the `Finished`
+//! signal. Nothing else.
 //!
 //! Every call is logged with its result on stderr, which systemd puts in the journal
 //! (`journalctl -u apsis-helper`). Comments are cut to [`LOGGED_COMMENT_CHARS`].
@@ -14,12 +15,13 @@ use apsis_core::helper::names::{
 use apsis_core::helper::{
     WireList, WireSettings, WireSettingsInfo, encode_error, settings_from_wire, to_wire,
 };
-use apsis_core::{Error, SnapshotList, parse_snapshot_name, validate_comment};
+use apsis_core::{Backend, Error, SnapshotList, parse_snapshot_name, validate_comment};
 use zbus::message::Header;
 use zbus::names::UniqueName;
 use zbus::object_server::SignalEmitter;
 use zbus::{Connection, DBusError, interface};
 
+use crate::native::{self, Access};
 use crate::polkit;
 use crate::runner::DirectRunner;
 use crate::settings::{self, Files};
@@ -159,6 +161,104 @@ impl Helper {
             label,
             started,
             move |running| running.delete(&name),
+        )
+    }
+
+    /// Lists snapshots with the native backend: reads each snapshot's `info.json` from the
+    /// backup device, mounted read-only (polkit: `list`, no password for the active session).
+    async fn native_list(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+    ) -> Result<WireList, HelperError> {
+        let _call = self.state.call();
+        let caller = caller(&header)?;
+        let label = format!("native list for {caller}");
+        let result = async {
+            authorize(connection, &caller, ACTION_LIST, false).await?;
+            let running = self.state.begin()?;
+            blocking(move || {
+                let _running = running;
+                let (backend, _mounted) =
+                    native::open(&DirectRunner, Access::ReadOnly, false, log_lines)?;
+                backend.list()
+            })
+            .await
+        }
+        .await;
+        match &result {
+            Ok(list) => log(&format!("{label}: {}", describe_list(list))),
+            Err(error) => log(&format!("{label}: {}", describe_error(error))),
+        }
+        Ok(to_wire(&result?))
+    }
+
+    /// What a native create would do, as text, also logged (polkit: `list`: the backup device
+    /// is mounted read-only and nothing is written).
+    async fn native_dry_run(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+        comment: String,
+    ) -> Result<String, HelperError> {
+        let _call = self.state.call();
+        let caller = caller(&header)?;
+        let label = format!("native dry run {} for {caller}", logged_comment(&comment));
+        let result = async {
+            validate_comment(&comment)?;
+            authorize(connection, &caller, ACTION_LIST, false).await?;
+            let running = self.state.begin()?;
+            blocking(move || {
+                let _running = running;
+                let (backend, _mounted) =
+                    native::open(&DirectRunner, Access::ReadOnly, true, log_lines)?;
+                Ok(backend.plan(&comment)?.to_string())
+            })
+            .await
+        }
+        .await;
+        match &result {
+            Ok(plan) => {
+                log(&format!("{label}: ok"));
+                log_lines(plan);
+            }
+            Err(error) => log(&format!("{label}: {}", describe_error(error))),
+        }
+        Ok(result?)
+    }
+
+    /// Starts a native rsync snapshot (polkit: `create`) and returns; `Finished("create", ..)`
+    /// follows. Refused while Timeshift runs.
+    async fn native_create(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+        comment: String,
+    ) -> Result<(), HelperError> {
+        let _call = self.state.call();
+        let caller = caller(&header)?;
+        let label = format!("native create {} for {caller}", logged_comment(&comment));
+        let started = async {
+            validate_comment(&comment)?;
+            self.refuse_if_running()?;
+            refuse_if_timeshift_runs()?;
+            authorize(connection, &caller, ACTION_CREATE, true).await?;
+            self.state.begin()
+        }
+        .await;
+        self.start(
+            connection,
+            caller,
+            OP_CREATE,
+            label,
+            started,
+            move |_running| {
+                // Checked again: the password dialog may have taken a while.
+                refuse_if_timeshift_runs()?;
+                let (backend, _mounted) =
+                    native::open(&DirectRunner, Access::ReadWrite, false, log_lines)?;
+                backend.create(&comment)
+            },
         )
     }
 
@@ -327,6 +427,22 @@ fn log(line: &str) {
     eprintln!("apsis-helper: {line}");
 }
 
+/// [`log`] for text that may have several lines (a dry run's plan): one journal line each.
+fn log_lines(text: &str) {
+    text.lines().for_each(log);
+}
+
+/// [`Error::Busy`] while a Timeshift holds its lock (see [`native::timeshift_running`]).
+fn refuse_if_timeshift_runs() -> apsis_core::Result<()> {
+    match native::timeshift_running() {
+        Some(pid) => {
+            log(&format!("timeshift is running (PID {pid})"));
+            Err(Error::Busy)
+        }
+        None => Ok(()),
+    }
+}
+
 /// `ok, 5 snapshots` (plus the warnings, if Timeshift had any).
 fn describe_list(list: &SnapshotList) -> String {
     let mut text = format!("ok, {} snapshots", list.snapshots.len());
@@ -409,7 +525,8 @@ mod tests {
     use apsis_core::helper::names::{
         ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
         ERROR_NOT_AUTHORIZED, ERROR_NOT_INSTALLED, INTERFACE, METHOD_CREATE, METHOD_DELETE,
-        METHOD_LIST, METHOD_READ_SETTINGS, METHOD_WRITE_SETTINGS, SIGNAL_FINISHED,
+        METHOD_LIST, METHOD_NATIVE_CREATE, METHOD_NATIVE_DRY_RUN, METHOD_NATIVE_LIST,
+        METHOD_READ_SETTINGS, METHOD_WRITE_SETTINGS, SIGNAL_FINISHED,
     };
     use zbus::object_server::Interface;
 
@@ -426,6 +543,9 @@ mod tests {
             METHOD_DELETE,
             METHOD_READ_SETTINGS,
             METHOD_WRITE_SETTINGS,
+            METHOD_NATIVE_LIST,
+            METHOD_NATIVE_DRY_RUN,
+            METHOD_NATIVE_CREATE,
         ] {
             assert!(
                 xml.contains(&format!("<method name=\"{method}\">")),
@@ -436,8 +556,8 @@ mod tests {
             xml.contains(&format!("<signal name=\"{SIGNAL_FINISHED}\">")),
             "{xml}"
         );
-        // Nothing else: exactly five methods and one signal.
-        assert_eq!(xml.matches("<method ").count(), 5, "{xml}");
+        // Nothing else: exactly eight methods and one signal.
+        assert_eq!(xml.matches("<method ").count(), 8, "{xml}");
         assert_eq!(xml.matches("<signal ").count(), 1, "{xml}");
         // List returns the list with its warnings.
         assert!(xml.contains("type=\"(sssa(sss)as)\""), "{xml}");

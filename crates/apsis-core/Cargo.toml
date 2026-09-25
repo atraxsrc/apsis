@@ -8,7 +8,8 @@ repository.workspace = true
 
 [dependencies]
 futures-util.workspace = true
-jiff.workspace = true
+# Local time for a native snapshot's name (`native`), as Timeshift names them.
+jiff = { workspace = true, features = ["tz-system", "tzdb-zoneinfo"] }
 serde_json.workspace = true
 thiserror.workspace = true
 zbus.workspace = true

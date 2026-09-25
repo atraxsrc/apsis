@@ -447,6 +447,192 @@ Append-only. Newest at the bottom. Format: date — decision — why.
     becomes resizable. If focus and the timer both came before the map, it would tile as any
     window does; not seen, and not testable in unit tests.
 
+- 2026-09-25 - Phase 5 v1: native rsync backend (`apsis-core::native`, helper
+  `NativeList`/`NativeDryRun`/`NativeCreate`). Written and tested by Claude on files it
+  created. Never run as root by Claude. Nothing written to the real
+  `/etc/timeshift/timeshift.json` or to real snapshots. btrfs is Phase 5.1, scheduling 5.2.
+  - **Source.** Everything below is from linuxmint/timeshift **e7e54ab (tag 26.09.0)**, the
+    shallow clone in `.scratch/timeshift`. **The user runs v24.01.1**, and the clone has no
+    history, so differences between the two versions **could not be checked**. The references
+    are `file:line` in that clone.
+  - **User decisions** (2026-09-25): the user mounts the ext4 test image and Claude runs the
+    tests (loop devices need root); the helper runs the native backend, with dry run on by
+    default; `app-version` in a native snapshot is `apsis <version>`, not Timeshift's version
+    (Timeshift only stores the field, `Snapshot.vala:226`).
+  - **Layout copied from Timeshift:**
+    - Folders: `<mount>/timeshift/snapshots/<name>/` (`SnapshotRepo.vala:159-174`), where `<name>`
+      is the local start time, `%Y-%m-%d_%H-%M-%S` (`Main.vala:1588-1591`). The copy of `/`
+      is in `localhost/` (`:1593-1594`). `snapshots/` is created if missing (`:1133-1137`).
+    - `info.json` (`Snapshot.vala:396-436` writes it, then `set_tags` rewrites it through
+      `update_control_file`, `:341-393`, `Main.vala:1711-1718`, `:1835-1867`). It has nine
+      string members, in this order: `created` (Unix seconds, UTC), `sys-uuid`, `sys-distro`,
+      `app-version`, `file_count`, `tags`, `comments`, `live` (`"false"`), `type` (`"rsync"`).
+      json-glib pretty print, indent 2. On-demand: `tags` is `"ondemand"` (`initial_tags` is
+      `""` for on-demand, `Main.vala:1697`, then `set_tags` adds `ondemand` because no
+      `--tags` was given). An empty comment is `""`.
+    - The format is Apsis's existing json-glib writer (`settings::write_object`): `"key" :
+      value`, 2 spaces, no final newline. That writer reproduces the user's real
+      `timeshift.json` byte for byte (Phase 4.5), and json-glib writes both files the same
+      way.
+    - Reading (`Snapshot.read_control_file`, `:190-290`): every member via
+      `get_string_member`, missing ones default (`created` 0, `type` `rsync`). `tags` is split
+      on single spaces (`taglist`, `:147-154`). A snapshot is valid only with a parseable
+      `info.json` and an `exclude.list` (`:205-213`, `:285-288`, `:293-320`). `.sync` is
+      skipped (`SnapshotRepo.vala:314`). Sorted by `created` (`:335-339`).
+    - `sys-distro`: `LinuxDistro.full_name()`, `ID RELEASE (CODENAME)` from `lsb-release`, else
+      `os-release` (`LinuxDistro.vala:45-149`). `sys-uuid`: the UUID of the filesystem mounted
+      at `/` (`Main.vala:3738-3760`).
+    - `--link-dest`: `<newest valid snapshot with the same sys-uuid>/localhost/`
+      (`get_latest_snapshot("", sys_uuid)`, `SnapshotRepo.vala:376-406`, `Main.vala:1632-1640`).
+    - rsync, as argv (Timeshift writes a bash script, `RsyncTask.vala:184-260`, with the
+      options from `Main.vala:1656-1673`): `rsync -aii --recursive --verbose --delete --force
+      --stats --sparse --delete-excluded [--link-dest=<prev>/localhost/]
+      --log-file=<snap>/rsync-log --exclude-from=<snap>/exclude.list --delete-excluded /
+      <snap>/localhost/`. `--delete-excluded` appears twice, as in Timeshift. `LC_ALL=C.UTF-8`
+      (`RsyncTask.vala:186`).
+    - Success check: a `total size is N  speedup is X` line with N > 0 (`RsyncTask.vala:154-155`,
+      `:511-513`; `Main.vala:1691-1695`). `file_count` is the number of `\n` in `rsync-log`
+      (`Main.vala:1711`, `TeeJee.FileSystem.vala:91-113`). rsync's `--log-file` also gets the
+      stats lines (checked with rsync 3.2.7), so Apsis reads the total from `rsync-log` and
+      discards stdout.
+    - `exclude.list` (`create_exclude_list_for_backup`, `Main.vala:809-917`; written by
+      `save_exclude_list_for_backup`, `:996-1014`, one pattern plus `\n` per line, blank
+      patterns skipped). The order: the user filters from `timeshift.json` (minus defaults and
+      home entries, `:3516-3529`), the defaults (`:660-685`, `:721-731`), `<mount>/*` for each
+      non-standard `/etc/fstab` mount point (`:687-718`, `FsTabEntry.vala:59-121`), the fixed
+      extras (`:735-754`), `<home>/**` for ecryptfs homes and private folders (`:840-867`,
+      `SystemUser.vala:74-198`), then `/root/**`, `/home/*/**` (`:760-761`), then `/timeshift/*`
+      if it's missing. Duplicates are skipped at each step except the ecryptfs one, as in
+      Timeshift.
+    - Tag folders (`create_symlinks`, `SnapshotRepo.vala:903-944`): the six
+      `snapshots-{boot,hourly,daily,weekly,monthly,ondemand}/` are deleted and re-created, and
+      each valid snapshot gets `snapshots-<tag>/<name> -> ../snapshots/<name>` per tag.
+    - Timeshift's lock: `/var/run/lock/timeshift/lock`, `<pid>;<mode>`, and it counts as held
+      only if `/proc/<pid>/exe`'s name contains `timeshift` (`AppLock.vala:33-60`,
+      `TeeJee.Process.vala:290-301`).
+  - **Deliberate differences:**
+    - **Staging folder.** Timeshift builds a snapshot in `snapshots/<name>/` and relies on its
+      lock. A scheduled Timeshift run removes every snapshot folder without `info.json` or
+      `exclude.list` as incomplete (`SnapshotRepo.vala:801-811`). Timeshift's lock treats any
+      process not called `timeshift` as stale, so Apsis can't hold it. So a native create
+      builds in `timeshift/apsis-staging/<name>/`, which Timeshift never reads, and renames the
+      finished folder into `snapshots/`. The final layout is the same. A failed create removes
+      its staging folder; a crash leaves one, which the native list reports as a warning.
+    - **rsync exit code.** Timeshift ignores it and only checks the total size. Apsis also
+      accepts only 0, 23 (some files unreadable) and 24 (files vanished). Anything else (e.g. 11
+      for a full disk) fails, even when a total size was printed.
+    - **Retention and `.sync-restore`.** Not done natively in v1. Timeshift applies retention
+      on its next run. `.sync-restore` (link against the restored snapshot after a restore,
+      `Main.vala:1600-1630`) is ignored: native always links against the newest snapshot. That
+      only affects how much gets hard-linked, never correctness.
+    - **I/O priority.** For command-line runs Timeshift starts rsync at idle I/O priority
+      (`AsyncTask.vala:138-141`, `Main.vala:1673`). Apsis doesn't (no `ionice` in the argv).
+    - **Mount.** The helper mounts the device itself at `/run/apsis/backup` by UUID, with
+      `nosuid,nodev`, read-only for list and dry run. Timeshift uses
+      `/run/timeshift/<pid>/backup` with no options (`Device.vala:1571-1640`). Encrypted
+      (LUKS) backup devices are refused: Timeshift unlocks them; the native backend doesn't.
+    - **Symlinks.** The native backend refuses to write if `timeshift/`, `snapshots/` or
+      `apsis-staging/` on the backup device is a symlink.
+  - **Guesses, flagged (not checkable from the source alone):**
+    - **24.01.1 vs 26.09.0**: see Source above. Also, the fixture snapshot tree
+      (`tests/fixtures/native-repo/`) was **written by hand from the 26.09.0 source**, not taken
+      from a real Timeshift snapshot. Its `app-version` is `24.01.1` and it has a second tag
+      (`ondemand daily`) to exercise parsing. A real `info.json` + `exclude.list` from the user's
+      machine (redacted) should replace or back it up.
+    - **Non-ASCII in `comments`**: Apsis writes it as raw UTF-8 with only `"`, `\` and control
+      characters escaped (serde_json's rules, the same the settings writer uses). That json-glib
+      does exactly the same is assumed, not verified against a real file with non-ASCII
+      comments. Control characters can't occur (Apsis refuses them in comments).
+    - **The ecryptfs exclude order with several users**: Timeshift iterates a hash map (order
+      undefined); Apsis uses `/etc/passwd` order. It only shows with two or more ecryptfs
+      homes or private folders.
+    - **Timeshift's second per-user step** (`Main.vala:869-899`): it changes the settings list,
+      not the list being built, so it only affects a list built twice in one run. Apsis builds
+      the first-call list (reasoning in `native/exclude.rs`). It's the same whenever every user
+      has a home filter in the settings.
+    - **`sys-uuid` via findmnt**: Timeshift takes the device lsblk shows mounted at `/`,
+      skipping loop devices. Apsis asks `findmnt` for the UUID of `/`. They should agree
+      (same filesystem UUID), but it's not verified on LVM/LUKS roots.
+  - **Mistake caught while checking citations**: at first Claude read Timeshift's
+    `parse_line_passwd` as always returning `null` (so no users, so no per-user excludes). The
+    excerpt it was reading skipped lines 126-139; the `return null` is in the `else` branch
+    for malformed lines. The ecryptfs step is ported.
+  - **Settings storage**: Apsis's cosmic-config (`native_backend`, default false;
+    `native_dry_run`, default true), per user, saved as soon as it changes in the settings
+    view. Timeshift's file is never used for it (no invented fields).
+  - **Applet**: native list and create need the helper (no pkexec path). Delete always goes
+    through Timeshift. A dry run's plan is shown in the left pane and logged to the journal.
+  - **Tests** (`crates/apsis-core/tests/native.rs`, real rsync): each scenario runs in
+    `target/tmp/native/`, and again on the ext4 image when `APSIS_EXT4_MNT` is set (the test
+    checks, through `findmnt`, that it is ext4 on `/dev/loop*`). `just ext4-image` builds the
+    128 MB image without root (`mkfs.ext4 -E root_owner`); the user mounts it; `just
+    test-ext4` runs them.
+  - Sandbox note: when the shell's working directory was inside `crates/`, the tool harness
+    created empty `.claude/.cc-writes` folders there, which broke the `crates/*` workspace glob.
+    They were removed with `rmdir` (empty only).
+  - 2026-09-26: `just test-ext4` passes (11/11) on the loop-mounted image, mounted by the user.
+    The first run failed in the test's own guard: inside Claude's sandbox `findmnt` lists the
+    mount twice (same `/dev/loop0`, two mount IDs, the sandbox re-binding the repo). The guard
+    now accepts several lines as long as every one is ext4 on `/dev/loop*`.
+
+- 2026-09-26 - Phase 5: native backend re-checked against **Timeshift 24.01.1**, the version the
+  user runs (tag `24.01.1` checked out in `.scratch/timeshift`, diffed against `26.09.0`).
+  Apsis now follows 24.01.1, and every native `file:line` citation points at 24.01.1 (the
+  Phase 5 entry above keeps its 26.09.0 numbers as history). `settings.rs` (Phase 4.5) still
+  cites e7e54ab; its code paths weren't part of this check.
+  - **Same in 24.01.1** (checked line by line): `info.json` members, order and format
+    (`Snapshot.vala:394-434`, `:339-386`); the rsync argv, including the doubled
+    `--delete-excluded` and `LC_ALL=C.UTF-8` (`RsyncTask.vala:175-255`, `Main.vala:1538-1559`);
+    `--link-dest` = newest valid snapshot with the same `sys-uuid`, plus `/localhost/`
+    (`Main.vala:1510-1520`, `SnapshotRepo.vala:372-402`); the total-size success check
+    (`Main.vala:1577-1581`); `file_count` (`wc -l`, `TeeJee.FileSystem.vala:91-97`, the same
+    count of `\n`); tag folders (`SnapshotRepo.vala:929-991`, made with `ln` instead of GIO,
+    same links); mount by UUID with no options; the folder layout; `sys_root`
+    (`Main.vala:3523-3545`); filters loaded from `timeshift.json` (`Main.vala:3345-3360`);
+    `SystemUser.vala` and `FsTabEntry.vala` are identical.
+  - **Different, and changed in Apsis:**
+    - **exclude.list order.** 24.01.1 (`Main.vala:702-807`): defaults, fstab mounts + fixed
+      extras, ecryptfs entries, **then the user's filters**, then `/root/**`, `/home/*/**`,
+      `/timeshift/*`. 26.09.0 puts the user's filters first. rsync takes the first matching
+      rule, so this changes what's backed up: in 24.01.1 a `+ /home/x/**` include can't win
+      over the default `/home/*/.cache` exclude.
+    - **The per-user step** (`Main.vala:751-781`) runs *before* the user's filters are copied
+      in 24.01.1, so it counts from the first list: each non-system user (root included)
+      whose home has neither `+ <home>/**` nor `+ <home>/.**` gets `<home>/**` appended to
+      the user filters (`/home/.ecryptfs/<name>/***` for an ecryptfs home). The old note
+      that this step "only shows in a second list" was about 26.09.0 and no longer applies.
+    - **sys-distro without lsb-release** (`LinuxDistro.vala:60-153`): 24.01.1 uses
+      lsb-release whenever it exists (even empty) and only reads `DISTRIB_*` keys there; its
+      os-release fallback reads `ID` and `VERSION_ID` with the quotes kept and no codename
+      (Fedora: `fedora "42"`). On Pop!_OS both give `Pop 24.04 (noble)`.
+  - **Different, kept as is:**
+    - **Lock.** 24.01.1 treats the lock as held while *any* process has that PID (`ps --pid`,
+      `AppLock.vala:39-50`, `TeeJee.Process.vala:294-313`); 26.09.0 only when that process is
+      a Timeshift. Apsis keeps the stricter "is a Timeshift" test, since the point is not to
+      run alongside Timeshift, and a stale lock whose PID was reused shouldn't block it.
+      Note: 24.01.1 would honour a lock written by Apsis, 26.09.0 wouldn't, so the staging
+      folder stays.
+    - **ionice.** 24.01.1 has the `ionice` line commented out (`RsyncTask.vala:179-181`), so
+      neither runs rsync at idle I/O priority. The "I/O priority" difference in the Phase 5
+      entry only applies to 26.09.0.
+    - **`rsync-log-changes`.** Both versions write `<snapshot>/rsync-log-changes` (a digest of
+      created/deleted lines). Apsis doesn't; Timeshift's log viewer builds it from `rsync-log`
+      the first time it's opened (`RsyncTask.vala:257-280`, `MainWindow.vala:707`).
+    - 26.09.0-only features (post-backup hooks, snapshot pause) don't exist in 24.01.1.
+  - **Real fixtures.** The user supplied `info.json` and `exclude.list` from a snapshot made by
+    Timeshift 24.01.1 (redacted by the user: UUIDs zeroed, homes renamed to `/home/userN`).
+    They replace the hand-made pair in `tests/fixtures/native-repo/` byte for byte; the
+    snapshot's folder name, `localhost/` and `rsync-log` are still hand-made (the tests link
+    against them), and `snapshots-daily/` went with the old second tag. New tests: Apsis's
+    writer reproduces the real `info.json` exactly, and the exclude builder reproduces the
+    real `exclude.list` exactly, from settings read back from that list (user filters `+
+    /root/**`, `+ /home/user1/**`, `/var/lib/libvirt/**`, `+ /home/user2/**`; `/recovery` in
+    fstab). The two `+ /home/userN/**` lines must have been two homes before redaction: the
+    builder drops exact duplicates. Checking against the user's actual `exclude` array in
+    `/etc/timeshift/timeshift.json` would confirm the inferred settings.
+  - With the old 26.09.0 order, the builder would **not** have produced the real list: the
+    four user filters would have come first.
+
 ## Open
 
 - ~~App ID~~ - resolved 2026-09-25, see above.
@@ -461,6 +647,11 @@ Append-only. Newest at the bottom. Format: date — decision — why.
 - Phase 2: check whether Timeshift prints the `--list` table on stdout or stderr, and what exit codes
   it uses on failure (Apsis treats any non-zero exit as failure). Apsis parses stdout only; if the
   popup says "unrecognised `timeshift --list` output", the table is probably on stderr.
+- Phase 5: ~~a real `info.json` and `exclude.list` from one of the user's Timeshift 24.01.1
+  snapshots (redacted) as a fixture, to check the hand-made one~~ - done 2026-09-26, see above.
+  And `timeshift --list` on a
+  device with a native snapshot, to confirm Timeshift lists it (the tests only mirror
+  Timeshift's reader).
 - Phase 2: confirm on a real panel that the popup gets keyboard focus (keys were only reasoned
   about, not run, by Claude). ~~Check that `document-open-recent-symbolic` exists~~ - replaced by
   the Apsis symbolic icon, 2026-09-25.

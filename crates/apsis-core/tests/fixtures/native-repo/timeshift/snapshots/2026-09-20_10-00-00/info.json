@@ -1,0 +1,11 @@
+{
+  "created" : "1790116435",
+  "sys-uuid" : "00000000-0000-0000-0000-000000000000",
+  "sys-distro" : "Pop 24.04 (noble)",
+  "app-version" : "24.01.1",
+  "file_count" : "1218050",
+  "tags" : "ondemand",
+  "comments" : "",
+  "live" : "false",
+  "type" : "rsync"
+}

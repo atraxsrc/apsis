@@ -24,6 +24,15 @@ pub const METHOD_READ_SETTINGS: &str = "ReadSettings";
 /// the file still reads `expected`, then lets Timeshift sync its schedule. `note` is empty, or
 /// says what went wrong after the write. See [`super::WireSettings`].
 pub const METHOD_WRITE_SETTINGS: &str = "WriteSettings";
+/// `NativeList() -> (sssa(sss)as)`: like [`METHOD_LIST`], read by the native backend from the
+/// backup device (mounted read-only) instead of `timeshift --list`.
+pub const METHOD_NATIVE_LIST: &str = "NativeList";
+/// `NativeDryRun(s comment) -> s plan`: what a native create would do, as text. Mounts the
+/// backup device read-only and writes nothing.
+pub const METHOD_NATIVE_DRY_RUN: &str = "NativeDryRun";
+/// `NativeCreate(s comment)`: a native rsync snapshot. Returns once started;
+/// [`SIGNAL_FINISHED`] with [`OP_CREATE`] follows.
+pub const METHOD_NATIVE_CREATE: &str = "NativeCreate";
 /// `Finished(s op, b ok, s message)`, sent only to the caller that started the operation.
 pub const SIGNAL_FINISHED: &str = "Finished";
 /// `op` in [`SIGNAL_FINISHED`] after [`METHOD_CREATE`].
@@ -48,9 +57,10 @@ pub const ERROR_DEVICE_NOT_FOUND: &str = "io.github.atraxsrc.Apsis.Helper1.Error
 /// `WriteSettings`: the settings file changed since the caller read it.
 pub const ERROR_CHANGED: &str = "io.github.atraxsrc.Apsis.Helper1.Error.Changed";
 
-/// polkit action for [`METHOD_LIST`]: allowed for the active local session, no password.
+/// polkit action for [`METHOD_LIST`], [`METHOD_NATIVE_LIST`] and [`METHOD_NATIVE_DRY_RUN`]:
+/// allowed for the active local session, no password.
 pub const ACTION_LIST: &str = "io.github.atraxsrc.Apsis.list";
-/// polkit action for [`METHOD_CREATE`]: `auth_admin_keep`.
+/// polkit action for [`METHOD_CREATE`] and [`METHOD_NATIVE_CREATE`]: `auth_admin_keep`.
 pub const ACTION_CREATE: &str = "io.github.atraxsrc.Apsis.create";
 /// polkit action for [`METHOD_DELETE`]: `auth_admin_keep`.
 pub const ACTION_DELETE: &str = "io.github.atraxsrc.Apsis.delete";

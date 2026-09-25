@@ -66,6 +66,21 @@ check *args:
 # Runs a clippy check with JSON message format
 check-json: (check '--message-format=json')
 
+# Native backend (Phase 5): a 128 MB ext4 image for its tests, made without root. The user
+# mounts it (the one step needing root), then `just test-ext4` runs the tests on it.
+ext4-dir := cargo-target-dir / 'native-ext4'
+
+# Builds the ext4 test image and prints the mount command
+ext4-image:
+    mkdir -p {{ext4-dir}}/mnt
+    truncate -s 128M {{ext4-dir}}/ext4.img
+    /usr/sbin/mkfs.ext4 -F -q -L apsis-test -E root_owner=$(id -u):$(id -g) {{ext4-dir}}/ext4.img
+    @echo "now: sudo mount -o loop,nosuid,nodev {{ext4-dir}}/ext4.img {{ext4-dir}}/mnt"
+
+# Runs the native backend's tests on the mounted ext4 image too
+test-ext4:
+    APSIS_EXT4_MNT="$(realpath {{ext4-dir}}/mnt)" cargo test -p apsis-core --test native
+
 # Run the application for testing purposes
 run *args:
     env RUST_BACKTRACE=full cargo run --release -p {{name}} {{args}}

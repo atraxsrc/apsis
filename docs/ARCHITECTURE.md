@@ -4,7 +4,7 @@
 
 | crate | kind | depends on | job |
 |---|---|---|---|
-| `apsis-core` | lib | no UI crates | Snapshot model, `Backend` trait, Timeshift CLI backend, output parser |
+| `apsis-core` | lib | no UI crates | Snapshot model, `Backend` trait, Timeshift CLI backend, output parser, native rsync backend |
 | `apsis` | bin (applet) | libcosmic, apsis-core | Panel button + terminal-style popup |
 | `apsis-helper` | bin (phase 4) | zbus, apsis-core | Root D-Bus service guarded by polkit |
 
@@ -45,7 +45,22 @@ Implementations:
 - `helper::HelperClient` (phase 4) - the applet's client for `apsis-helper` over the system bus.
   It is async (zbus on the applet's tokio) rather than a `Backend`: create/delete wait for a
   signal, which doesn't fit a blocking trait. Same results and errors as the CLI backend.
-- `Native` (phase 5) - btrfs / rsync.
+- `native::NativeRsync<R: Runner>` (phase 5, rsync only; btrfs is 5.1) - Timeshift's rsync
+  snapshots without `timeshift`, in Timeshift's exact layout (see DECISIONS.md, Phase 5), so
+  either tool reads, uses and deletes the other's. `NativeConfig` says where: `repo` (the backup
+  device's mount), `source` (`/` for real), `sys_uuid`, `sys_distro`, the `exclude` list
+  (`native::exclude::for_backup`, Timeshift's algorithm) and `dry_run`.
+  - `list`: reads `timeshift/snapshots/*/info.json`; folders Timeshift would count as incomplete
+    are warnings.
+  - `create`: `plan` works out the name (local time), the `--link-dest` snapshot (newest valid
+    one with this `sys-uuid`), `exclude.list`, the rsync argv and `info.json`. With `dry_run`
+    the plan is only logged. Otherwise it's built in `timeshift/apsis-staging/<name>/` (rsync
+    through `QuietRunner`: fixed `PATH`, stdout discarded, stderr tail kept), checked like
+    Timeshift checks it (a total size in `rsync-log`), renamed into `snapshots/`, and the
+    `snapshots-<tag>/` links rebuilt. A failure removes the staging folder.
+  - `delete`: removes the folder and rebuilds the links. The applet doesn't use it (it deletes
+    through Timeshift); it's there for the trait and the tests.
+  - Refuses to write through a symlinked `timeshift/`, `snapshots/` or staging folder.
 
 The applet calls the backend on a background task (libcosmic `Task`) and never blocks the UI thread.
 
@@ -77,6 +92,9 @@ constants in `apsis_core::helper::names`; the helper's tests check its interface
 | `Delete(s name)` | polkit `delete`, interactive; returns once started |
 | `ReadSettings() -> (ssa(ssb)b)` | `(timeshift.json text, lsblk JSON, [(user, home, encrypted)], timeshift-gtk open)`; polkit `list`, not interactive |
 | `WriteSettings(s expected, (sbbabauas) settings) -> s` | polkit `configure`, interactive; writes `/etc/timeshift/timeshift.json`, returns once done (see below) |
+| `NativeList() -> (sssa(sss)as)` | native backend list, same shape as `List`; polkit `list`, not interactive |
+| `NativeDryRun(s comment) -> s` | the native create's plan as text, also logged; nothing written; polkit `list`, not interactive |
+| `NativeCreate(s comment)` | native rsync snapshot; polkit `create`, interactive; returns once started, `Finished("create", ..)` follows |
 | `Finished(s op, b ok, s message)` | signal, sent only to the caller that started the create/delete |
 | errors | `...Helper1.Error.{NotAuthorized,Busy,InvalidInput,NotInstalled,DeviceNotFound,Failed,Changed}` |
 
@@ -104,6 +122,26 @@ call is the password dialog, and zbus sets no call timeout by default. The apple
 The helper exits after 60 s with no call open and nothing running. It never exits while
 Timeshift runs or a call (including one waiting for the password dialog) is open, and it waits
 until each `Finished` is sent. The next call starts it again.
+
+### Native backend (phase 5)
+
+`NativeList`, `NativeDryRun` and `NativeCreate` build the backend from the system
+(`apsis-helper/src/native.rs`), holding the single-operation lock:
+
+1. Timeshift's settings file (read only): the backup device UUID and the user filters. btrfs
+   mode is refused (rsync only for now), as is a device that isn't connected, is encrypted, or
+   isn't a Linux filesystem (Timeshift unlocks LUKS; the native backend doesn't).
+2. `lsblk` for the device, `findmnt --noheadings --output UUID --mountpoint /` for `sys-uuid`,
+   `/etc/lsb-release` or `/etc/os-release` for `sys-distro`, `/etc/fstab` and `/etc/passwd`
+   (with ecryptfs folders) for the exclude list.
+3. Whatever is mounted at `/run/apsis/backup` is unmounted, then `mount -o
+   ro|rw,nosuid,nodev /dev/disk/by-uuid/<uuid> /run/apsis/backup`: read-only for list and dry
+   run, read-write for create. Unmounted when the call ends.
+4. `NativeCreate` is refused (`Busy`) while a Timeshift holds its lock
+   (`/var/run/lock/timeshift/lock` with a live `timeshift` PID), checked before the password
+   dialog and again after it.
+
+Native create runs rsync as root over the whole of `/` with Timeshift's filters, like Timeshift.
 
 ### Settings (phase 4.5)
 

@@ -4,11 +4,14 @@
 //!
 //! A system D-Bus service, started as root by D-Bus activation (through
 //! `apsis-helper.service`) when the applet calls it, and gone again after a minute idle. It
-//! offers exactly `List`, `Create(comment)`, `Delete(name)`, `ReadSettings` and
-//! `WriteSettings`; each checks its own polkit action for the caller, checks its input again,
-//! and runs `timeshift` (or `lsblk`) with a fixed argv, no shell. `WriteSettings` edits
-//! `/etc/timeshift/timeshift.json`, nothing else. See `docs/ARCHITECTURE.md`.
+//! offers exactly `List`, `Create(comment)`, `Delete(name)`, `ReadSettings`,
+//! `WriteSettings`, and the native backend's `NativeList`, `NativeDryRun(comment)` and
+//! `NativeCreate(comment)`; each checks its own polkit action for the caller, checks its input
+//! again, and runs `timeshift` (or `lsblk`, `findmnt`, `mount`, `rsync`) with a fixed argv, no
+//! shell. `WriteSettings` edits `/etc/timeshift/timeshift.json`, nothing else. See
+//! `docs/ARCHITECTURE.md`.
 
+mod native;
 mod polkit;
 mod runner;
 mod service;

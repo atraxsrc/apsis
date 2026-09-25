@@ -52,6 +52,10 @@ pub enum Error {
     /// Timeshift's settings file changed since it was read (Timeshift itself saved it).
     #[error("timeshift.json changed since it was read; reload the settings")]
     SettingsChanged,
+    /// The native backend couldn't do what was asked (rsync failed, the snapshot folder is
+    /// taken, the repository is in a state it won't touch, ...).
+    #[error("native backend: {0}")]
+    Native(String),
     #[error(transparent)]
     Io(#[from] io::Error),
 }

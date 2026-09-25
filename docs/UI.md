@@ -127,6 +127,30 @@ the selected row. Needs `apsis-helper`: it reads and writes `/etc/timeshift/time
   when it closes.
 - Keys that act on snapshots (`c`, `d`) do nothing here.
 
+## Native backend (Phase 5)
+
+The settings view ends with Apsis's own section, `apsis`. It's saved to Apsis's cosmic-config
+as soon as it changes (not by `w`, which only writes Timeshift's file):
+
+```
+ │   apsis     backend: timeshift                │
+```
+
+- `backend`: space switches between `timeshift` (default) and `native rsync`, then lists again.
+  With native on, a `dry run` row follows: `[x] dry run` (on by default). The header summary
+  reads `native · rsync · 3 snapshots`.
+- Native lists read the backup disk directly (no `timeshift`), through `apsis-helper`, with no
+  password. Snapshots Timeshift counts as incomplete, and a native create's leftovers, show as
+  list warnings in the activity pane.
+- `[c]` with dry run on: the activity pane shows `native dry run… ⠹`, then the plan appears in
+  the left pane (title `dry run`): the snapshot name, the folders, the whole `exclude.list`, the
+  `--link-dest` snapshot, the rsync argv, `info.json`, the rename and the tag links. Nothing is
+  written. Esc goes back to the list. The same plan is in `journalctl -u apsis-helper`.
+- `[c]` with dry run off: a real native create (password once, cached, like Timeshift's). The
+  activity pane shows `creating snapshot… ⠹` as usual.
+- `[d]` still deletes through Timeshift, which removes native snapshots like its own.
+- Without `apsis-helper`: `the native backend needs apsis-helper (sudo just install)`.
+
 ## Window mode
 
 `apsis --window` shows the popup's UI (header, panes, activity, `>` line, footer) in a normal

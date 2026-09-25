@@ -29,7 +29,7 @@ use cosmic::{Theme, theme};
 use crate::config::Config;
 use crate::fl;
 use crate::fmt;
-use crate::settings_view::{Row, Section, SettingsView};
+use crate::settings_view::{BackendChoice, Row, Section, SettingsView};
 
 /// Popup width in logical pixels (UI.md: ~720, room for the list and details side by side).
 const POPUP_WIDTH: f32 = 720.0;
@@ -163,6 +163,8 @@ pub struct AppModel {
     settings: SettingsLoad,
     /// A settings write is running in the helper.
     saving_settings: bool,
+    /// The last native dry run's plan, shown by [`Overlay::DryRun`].
+    dry_run_plan: Option<String>,
     /// Window mode: the window is on screen and its size limits are relaxed (see
     /// [`run_window`]).
     window_resizable: bool,
@@ -251,6 +253,8 @@ pub enum Operation {
     /// With the comment as typed; the backend trims it.
     Create(String),
     Delete(String),
+    /// Native backend with dry run on: what a create would do. Nothing is written.
+    DryRun(String),
 }
 
 /// How the last create or delete went, shown in the activity pane.
@@ -310,6 +314,8 @@ enum Overlay {
     Help,
     About,
     Settings,
+    /// The last native dry run's plan, in the left pane.
+    DryRun,
 }
 
 /// Keys the popup reacts to (see UI.md).
@@ -373,6 +379,8 @@ pub enum Message {
     Listed(Result<SnapshotList, CliError>),
     /// A create or delete finished.
     Finished(Operation, Result<(), CliError>),
+    /// A native dry run finished: the plan's text.
+    DryRunDone(Result<String, CliError>),
     Tick,
     Select(usize),
     OpenDetails(usize),
@@ -432,6 +440,7 @@ impl cosmic::Application for AppModel {
             overlay: Overlay::None,
             settings: SettingsLoad::NotLoaded,
             saving_settings: false,
+            dry_run_plan: None,
             window_resizable: false,
             icon: symbolic_icon(),
         };
@@ -511,6 +520,7 @@ impl cosmic::Application for AppModel {
         Subscription::batch(subscriptions)
     }
 
+    #[allow(clippy::too_many_lines, reason = "one arm per message")]
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
         match message {
             Message::UpdateConfig(config) => self.config = config,
@@ -594,6 +604,7 @@ impl cosmic::Application for AppModel {
             Message::StartCreate => return self.on_key(KeyAction::Create),
             Message::StartDelete => return self.on_key(KeyAction::Delete),
             Message::Finished(operation, result) => return self.on_finished(&operation, result),
+            Message::DryRunDone(result) => return self.on_dry_run(result),
             Message::Listed(result) => {
                 self.on_listed(result);
                 // The polkit dialog took keyboard focus; hand it back to the `>` line.
@@ -751,7 +762,8 @@ impl AppModel {
         self.loading = true;
         self.spinner = 0;
         let pkexec = Arc::clone(&self.pkexec);
-        cosmic::task::future(async move { Message::Listed(list_snapshots(pkexec).await) })
+        let native = self.config.native_backend;
+        cosmic::task::future(async move { Message::Listed(list_snapshots(pkexec, native).await) })
     }
 
     fn on_listed(&mut self, result: Result<SnapshotList, CliError>) {
@@ -921,7 +933,11 @@ impl AppModel {
             // Snapshot keys do nothing here.
             _ => Ok(()),
         };
+        let backend = view.backend;
         self.status = result.err().map(Status::Error);
+        if backend != self.config.backend() {
+            return self.set_backend(backend);
+        }
         Task::none()
     }
 
@@ -975,7 +991,7 @@ impl AppModel {
         };
         self.settings = match result {
             Ok(info) => {
-                let mut view = SettingsView::new(info);
+                let mut view = SettingsView::new(info, self.config.backend());
                 view.select(cursor);
                 SettingsLoad::Ready(Box::new(view))
             }
@@ -1084,7 +1100,11 @@ impl AppModel {
                     self.prompt = Prompt::Comment(comment);
                     return Task::none();
                 }
-                self.run(Operation::Create(comment))
+                if self.config.native_backend && self.config.native_dry_run {
+                    self.run(Operation::DryRun(comment))
+                } else {
+                    self.run(Operation::Create(comment))
+                }
             }
             Prompt::ConfirmDelete { name, typed } => {
                 if typed.trim().eq_ignore_ascii_case("y") {
@@ -1105,9 +1125,15 @@ impl AppModel {
         self.running = Some(operation.clone());
         self.status = None;
         self.spinner = 0;
+        if let Operation::DryRun(comment) = operation {
+            return cosmic::task::future(async move {
+                Message::DryRunDone(native_dry_run(&comment).await)
+            });
+        }
         let pkexec = Arc::clone(&self.pkexec);
+        let native = self.config.native_backend;
         cosmic::task::future(async move {
-            let result = operate(pkexec, operation.clone()).await;
+            let result = operate(pkexec, operation.clone(), native).await;
             Message::Finished(operation, result)
         })
     }
@@ -1143,6 +1169,8 @@ impl AppModel {
                 let reason = error_summary(&error, self.known_uuid.as_deref());
                 Status::Error(fl!("delete-failed", reason = reason))
             }
+            // Dry runs end in `on_dry_run`.
+            (Operation::DryRun(_), _) => Status::Info(fl!("dry-run-done")),
         });
         let mut tasks = Vec::new();
         if ran {
@@ -1153,6 +1181,48 @@ impl AppModel {
             tasks.push(focus_input());
         }
         Task::batch(tasks)
+    }
+
+    /// A native dry run ended: its plan goes in the left pane. Nothing was written, so there's
+    /// nothing to refresh.
+    fn on_dry_run(&mut self, result: Result<String, CliError>) -> Task<cosmic::Action<Message>> {
+        self.running = None;
+        match result {
+            Ok(plan) => {
+                self.dry_run_plan = Some(plan);
+                self.overlay = Overlay::DryRun;
+                self.status = Some(Status::Info(fl!("dry-run-done")));
+            }
+            Err(error) => {
+                let reason = error_summary(&error, self.known_uuid.as_deref());
+                self.status = Some(Status::Error(fl!("dry-run-failed", reason = reason)));
+            }
+        }
+        if self.popup.is_some() {
+            return focus_input();
+        }
+        Task::none()
+    }
+
+    /// Saves Apsis's backend choice (changed in the settings view) to cosmic-config, and lists
+    /// again when the backend itself changed.
+    fn set_backend(&mut self, choice: BackendChoice) -> Task<cosmic::Action<Message>> {
+        let switched = choice.native != self.config.native_backend;
+        let saved =
+            cosmic_config::Config::new(<Self as cosmic::Application>::APP_ID, Config::VERSION)
+                .and_then(|context| {
+                    self.config.set_native_backend(&context, choice.native)?;
+                    self.config.set_native_dry_run(&context, choice.dry_run)
+                });
+        self.status = Some(match saved {
+            Ok(_) => Status::Info(backend_name(choice)),
+            Err(error) => Status::Error(fl!("backend-save-failed", reason = error.to_string())),
+        });
+        if switched {
+            self.dry_run_plan = None;
+            return self.start_list();
+        }
+        Task::none()
     }
 
     /// Esc cancels a prompt, then closes the overlay, then the popup (or the window).
@@ -1258,6 +1328,10 @@ impl AppModel {
     /// ` ~/apsis $ ls --snapshots                 rsync · 3 snapshots`
     fn header(&self) -> Element<'_, Message> {
         let summary = match &self.listing {
+            Listing::Loaded(list) if self.config.native_backend => fl!(
+                "summary-native",
+                summary = fmt::summary(list.mode, list.snapshots.len())
+            ),
             Listing::Loaded(list) => fmt::summary(list.mode, list.snapshots.len()),
             Listing::NotLoaded | Listing::Failed(_) => String::new(),
         };
@@ -1283,6 +1357,7 @@ impl AppModel {
         match self.overlay {
             Overlay::Help => fl!("pane-help"),
             Overlay::About => fl!("pane-about"),
+            Overlay::DryRun => fl!("pane-dry-run"),
             Overlay::Settings => match &self.settings {
                 SettingsLoad::Ready(view) if view.dirty() => fl!("pane-settings-unsaved"),
                 _ => fl!("pane-settings"),
@@ -1295,7 +1370,7 @@ impl AppModel {
     /// [`MIN_ROWS`] and [`VISIBLE_ROWS`] (longer lists scroll), or enough for what's shown instead.
     fn pane_rows(&self) -> u16 {
         match (self.overlay, &self.listing) {
-            (Overlay::Help | Overlay::Settings, _)
+            (Overlay::Help | Overlay::Settings | Overlay::DryRun, _)
             | (Overlay::None | Overlay::Details, Listing::Failed(_)) => VISIBLE_ROWS,
             (Overlay::About, _) => MIN_ROWS + 1,
             (_, Listing::Loaded(list)) => u16::try_from(list.snapshots.len())
@@ -1327,6 +1402,7 @@ impl AppModel {
             (Overlay::Settings, _) => self.settings_body(),
             (Overlay::Help, _) => scroll(help()),
             (Overlay::About, _) => scroll(about()),
+            (Overlay::DryRun, _) => scroll(dry_run_view(self.dry_run_plan.as_deref())),
             (_, Listing::Loaded(list)) if list.snapshots.is_empty() => {
                 if list.device.is_none() {
                     lines([fl!("no-device"), fl!("no-device-hint")])
@@ -1375,6 +1451,9 @@ impl AppModel {
                 format!("{} {spinner}", fl!("deleting", name = name.clone())),
                 Tone::Normal,
             ),
+            (Some(Operation::DryRun(_)), _) => {
+                (format!("{} {spinner}", fl!("dry-running")), Tone::Normal)
+            }
             (None, _) if self.saving_settings => (
                 format!("{} {spinner}", fl!("settings-saving")),
                 Tone::Normal,
@@ -1645,6 +1724,8 @@ impl AppModel {
                 fl!("settings-filter-note")
             }
             Row::AddFilter => fl!("settings-add-note"),
+            Row::Backend => fl!("settings-backend-note"),
+            Row::DryRun => fl!("settings-dry-run-note"),
         };
         let mut rows: Vec<Element<'_, Message>> = pairs
             .into_iter()
@@ -1769,8 +1850,45 @@ fn settings_row<'a>(
     } else {
         String::new()
     };
+    let (text, dim) = settings_row_text(view, row);
+    let text = monotext(text)
+        .width(Length::Fill)
+        .wrapping(Wrapping::None)
+        .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)));
+    let text = if dim {
+        text.class(theme::Text::Custom(dim_text))
+    } else {
+        text
+    };
+    let line = widget::row::with_children(vec![
+        monotext(if selected { "▸" } else { " " })
+            .class(theme::Text::Accent)
+            .into(),
+        monotext(section)
+            .width(Length::Fixed(SETTINGS_KEY_WIDTH))
+            .class(theme::Text::Custom(dim_text))
+            .into(),
+        text.into(),
+    ])
+    .spacing(8);
+    let mut line = container(line)
+        .width(Length::Fill)
+        .height(Length::Fixed(ROW_HEIGHT))
+        .padding([2, 6]);
+    if selected {
+        line = line.class(theme::Container::custom(selected_row));
+    }
+    widget::mouse_area(line)
+        .on_press(Message::SettingsSelect(index))
+        .on_double_click(Message::SettingsActivate(index))
+        .interaction(mouse::Interaction::Pointer)
+        .into()
+}
+
+/// A settings row's text, and whether it's dimmed (off, or nothing set).
+fn settings_row_text(view: &SettingsView, row: Row) -> (String, bool) {
     let check = |on: bool| if on { "[x]" } else { "[ ]" };
-    let (text, dim) = match row {
+    match row {
         Row::Device => match view.device() {
             Some(device) => {
                 let mut parts = vec![
@@ -1827,39 +1945,17 @@ fn settings_row<'a>(
         }
         Row::Filter(index) => (view.edited.exclude[index].clone(), false),
         Row::AddFilter => (fl!("settings-add-filter"), true),
-    };
-    let text = monotext(text)
-        .width(Length::Fill)
-        .wrapping(Wrapping::None)
-        .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)));
-    let text = if dim {
-        text.class(theme::Text::Custom(dim_text))
-    } else {
-        text
-    };
-    let line = widget::row::with_children(vec![
-        monotext(if selected { "▸" } else { " " })
-            .class(theme::Text::Accent)
-            .into(),
-        monotext(section)
-            .width(Length::Fixed(SETTINGS_KEY_WIDTH))
-            .class(theme::Text::Custom(dim_text))
-            .into(),
-        text.into(),
-    ])
-    .spacing(8);
-    let mut line = container(line)
-        .width(Length::Fill)
-        .height(Length::Fixed(ROW_HEIGHT))
-        .padding([2, 6]);
-    if selected {
-        line = line.class(theme::Container::custom(selected_row));
+        Row::Backend if view.backend.native => (fl!("settings-backend-native"), false),
+        Row::Backend => (fl!("settings-backend-timeshift"), false),
+        Row::DryRun => (
+            format!(
+                "{} {}",
+                check(view.backend.dry_run),
+                fl!("settings-dry-run")
+            ),
+            false,
+        ),
     }
-    widget::mouse_area(line)
-        .on_press(Message::SettingsSelect(index))
-        .on_double_click(Message::SettingsActivate(index))
-        .interaction(mouse::Interaction::Pointer)
-        .into()
 }
 
 fn section_name(section: Section) -> String {
@@ -1869,6 +1965,7 @@ fn section_name(section: Section) -> String {
         Section::Schedule => fl!("settings-schedule"),
         Section::Home => fl!("settings-home"),
         Section::Filters => fl!("settings-filters"),
+        Section::Apsis => fl!("settings-apsis"),
     }
 }
 
@@ -2014,12 +2111,35 @@ fn error_view<'a>(error: &'a CliError, known_uuid: Option<&str>) -> Element<'a, 
 }
 
 /// Lists through `apsis-helper` when it's installed (no password for the active session),
-/// else through pkexec (a password prompt each time).
-async fn list_snapshots(pkexec: Arc<Cli>) -> Result<SnapshotList, CliError> {
+/// else through pkexec (a password prompt each time). The native backend needs the helper.
+async fn list_snapshots(pkexec: Arc<Cli>, native: bool) -> Result<SnapshotList, CliError> {
+    if native {
+        return native_helper()
+            .await?
+            .native_list()
+            .await
+            .map_err(CliError::from);
+    }
     if let Some(helper) = HelperClient::connect().await {
         return helper.list().await.map_err(CliError::from);
     }
     blocking(move || pkexec.list()).await
+}
+
+/// `apsis-helper`, which the native backend always runs in (it needs root).
+async fn native_helper() -> Result<HelperClient, CliError> {
+    HelperClient::connect()
+        .await
+        .ok_or_else(|| CliError::Other(fl!("native-need-helper")))
+}
+
+/// The native backend's plan for a create with `comment`; nothing is written.
+async fn native_dry_run(comment: &str) -> Result<String, CliError> {
+    native_helper()
+        .await?
+        .native_dry_run(comment)
+        .await
+        .map_err(CliError::from)
 }
 
 /// Creates or deletes through `apsis-helper` when it's installed, else through pkexec. With
@@ -2027,19 +2147,57 @@ async fn list_snapshots(pkexec: Arc<Cli>) -> Result<SnapshotList, CliError> {
 ///
 /// A helper that's installed but fails is reported, not replaced by pkexec, so a broken
 /// install gets noticed.
-async fn operate(pkexec: Arc<Cli>, operation: Operation) -> Result<(), CliError> {
+///
+/// With the native backend, a create is the helper's native create. A delete always goes to
+/// Timeshift, which removes native snapshots like its own.
+async fn operate(pkexec: Arc<Cli>, operation: Operation, native: bool) -> Result<(), CliError> {
+    if native && let Operation::Create(comment) = &operation {
+        return native_helper()
+            .await?
+            .native_create(comment)
+            .await
+            .map_err(CliError::from);
+    }
     if let Some(helper) = HelperClient::connect().await {
         let done = match &operation {
             Operation::Create(comment) => helper.create(comment).await,
             Operation::Delete(name) => helper.delete(name).await,
+            Operation::DryRun(comment) => return native_dry_run(comment).await.map(drop),
         };
         return done.map_err(CliError::from);
     }
     blocking(move || match &operation {
         Operation::Create(comment) => pkexec.create(comment),
         Operation::Delete(name) => pkexec.delete(name),
+        Operation::DryRun(_) => Err(apsis_core::Error::Helper(fl!("native-need-helper"))),
     })
     .await
+}
+
+/// `backend: native rsync, dry run` and the like, for the activity pane.
+fn backend_name(choice: BackendChoice) -> String {
+    match (choice.native, choice.dry_run) {
+        (false, _) => fl!("backend-now-timeshift"),
+        (true, true) => fl!("backend-now-native-dry-run"),
+        (true, false) => fl!("backend-now-native"),
+    }
+}
+
+/// The left pane after a native dry run: the plan, line by line.
+fn dry_run_view(plan: Option<&str>) -> Element<'static, Message> {
+    let lines: Vec<Element<'static, Message>> = plan
+        .unwrap_or_default()
+        .lines()
+        .map(|line| {
+            monotext(line.to_owned())
+                .wrapping(Wrapping::WordOrGlyph)
+                .into()
+        })
+        .collect();
+    widget::column::with_children(lines)
+        .spacing(2)
+        .padding([4, 6])
+        .into()
 }
 
 /// Timeshift's settings, the devices and the users, through `apsis-helper` (there's no pkexec
@@ -2538,6 +2696,7 @@ mod tests {
             overlay: Overlay::None,
             settings: SettingsLoad::NotLoaded,
             saving_settings: false,
+            dry_run_plan: None,
             window_resizable: false,
             icon: symbolic_icon(),
         }

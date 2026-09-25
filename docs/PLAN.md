@@ -96,8 +96,28 @@ Edit Timeshift's own config from Apsis, so `timeshift-launcher` and Apsis stay i
 
 ## Phase 5 — Native backend (optional, after Timeshift path is solid)
 
+v1, rsync only (split from the original Phase 5 at the user's request):
+
+- rsync + hardlinks (`--link-dest`) for ext4 (Pop!_OS default), in `apsis-core::native`, behind
+  the same `Backend` trait as `TimeshiftCli`. Timeshift's on-disk layout exactly (folders,
+  `info.json`, `exclude.list`, `rsync-log`, tag links), read from Timeshift's source, so either
+  tool reads, uses and deletes the other's snapshots.
+- list (reads `info.json`, no `timeshift`), create (rsync `--link-dest` against the newest
+  snapshot of this system, then `info.json`), delete (the folder; only for the tests, the
+  applet still deletes through Timeshift).
+- Opt-in: a per-user Apsis setting in the settings view, off by default. Dry run (on by
+  default) shows the rsync argv and `info.json` and writes nothing.
+- Runs in `apsis-helper` (root): `NativeList`, `NativeDryRun`, `NativeCreate`.
+- Tests on a loop-mounted ext4 image under `target/` (mounted by the user), not the real disk.
+- **Done when:** the tests pass on the ext4 image, the user has reviewed a dry run on their
+  machine, and a native snapshot shows up in `timeshift --list`.
+
+## Phase 5.1 - Native btrfs
+
 - btrfs: read-only subvolume snapshots of `@` / `@home` directly.
-- rsync + hardlinks (`--link-dest`) for ext4 (Pop!_OS default).
+
+## Phase 5.2 - Native schedule
+
 - Scheduling via systemd timers; retention counts per tag.
 
 ## Phase 6 — Restore

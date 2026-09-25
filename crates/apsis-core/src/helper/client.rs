@@ -8,7 +8,8 @@ use zbus::{Connection, Proxy};
 use super::names::{
     BUS_NAME, ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
     ERROR_NOT_AUTHORIZED, ERROR_NOT_INSTALLED, INTERFACE, METHOD_CREATE, METHOD_DELETE,
-    METHOD_LIST, METHOD_READ_SETTINGS, METHOD_WRITE_SETTINGS, OBJECT_PATH, OP_CREATE, OP_DELETE,
+    METHOD_LIST, METHOD_NATIVE_CREATE, METHOD_NATIVE_DRY_RUN, METHOD_NATIVE_LIST,
+    METHOD_READ_SETTINGS, METHOD_WRITE_SETTINGS, OBJECT_PATH, OP_CREATE, OP_DELETE,
     SIGNAL_FINISHED,
 };
 use super::{
@@ -72,6 +73,45 @@ impl HelperClient {
     /// What the helper reported (see [`Error`]).
     pub async fn delete(&self, name: &str) -> Result<()> {
         self.operate(METHOD_DELETE, OP_DELETE, name).await
+    }
+
+    /// Lists snapshots with the native backend (reads the backup device directly). No password
+    /// for the active session.
+    ///
+    /// # Errors
+    ///
+    /// What the helper reported (see [`Error`]), or a bad reply.
+    pub async fn native_list(&self) -> Result<SnapshotList> {
+        let wire: WireList = self
+            .proxy()
+            .await?
+            .call(METHOD_NATIVE_LIST, &())
+            .await
+            .map_err(from_zbus)?;
+        from_wire(wire)
+    }
+
+    /// What a native create with `comment` would do, as text. Nothing is written. No password
+    /// for the active session.
+    ///
+    /// # Errors
+    ///
+    /// What the helper reported (see [`Error`]).
+    pub async fn native_dry_run(&self, comment: &str) -> Result<String> {
+        self.proxy()
+            .await?
+            .call(METHOD_NATIVE_DRY_RUN, &(comment,))
+            .await
+            .map_err(from_zbus)
+    }
+
+    /// Creates a native rsync snapshot and waits until it's done (this can take minutes).
+    ///
+    /// # Errors
+    ///
+    /// What the helper reported (see [`Error`]).
+    pub async fn native_create(&self, comment: &str) -> Result<()> {
+        self.operate(METHOD_NATIVE_CREATE, OP_CREATE, comment).await
     }
 
     /// Reads Timeshift's settings, the devices and the users. No password for the active

@@ -295,7 +295,7 @@ fn indent(out: &mut String, depth: usize) {
 }
 
 /// json-glib's pretty printing: `{}` / `[]` when empty, else one member per line.
-fn write_object(out: &mut String, fields: &Map<String, Value>, depth: usize) {
+pub(crate) fn write_object(out: &mut String, fields: &Map<String, Value>, depth: usize) {
     out.push('{');
     if !fields.is_empty() {
         for (i, (key, value)) in fields.iter().enumerate() {

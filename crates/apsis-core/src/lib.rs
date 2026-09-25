@@ -8,6 +8,7 @@ mod backend;
 mod error;
 pub mod helper;
 mod model;
+pub mod native;
 mod parse;
 mod pkexec;
 pub mod settings;
