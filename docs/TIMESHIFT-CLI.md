@@ -98,9 +98,56 @@ Parsing rules:
   spaces and colons. Rows and the header carry trailing padding.
 - Rows may list several tags (e.g. `BD`); not yet seen in real output, so treat it defensively.
 - GLib `** (process:N): CRITICAL **` lines can appear anywhere; ignore them.
+- Timeshift's own `E: ...` / `W: ...` lines can appear anywhere, including after the table. They
+  are collected as warnings and shown in the activity pane; they don't fail the list (see
+  "Errors and warnings" below). A line inside the table that isn't a snapshot row is a warning
+  too (`line N: not a snapshot row: ...`).
+- A list fails only when Timeshift exits non-zero, or the output has neither a table nor
+  `No snapshots found`.
 - `No snapshots found` means an empty list.
 - `--scripted` does not change the `--list` format: the user diffed `--list` against
   `--list --scripted` and only the mount PID in `/run/timeshift/<pid>/backup` differed.
+
+## Errors and warnings
+
+Found 2026-09-25 when the user's USB backup disk dropped off after a create (Timeshift v24.01.1).
+
+- **Timeshift prints `E:` / `W:` lines on stdout**, not stderr. A failed run can have an empty
+  stderr, so before this Apsis showed only `timeshift exited with code 1`. Apsis now takes the
+  `E:`/`W:` lines from stdout plus stderr's lines, keeps the last 5 (`MAX_OUTPUT_LINES`), and
+  shows those. If there are none, it shows stdout's last lines.
+- **Disk missing** (`sudo timeshift --list` by the user; the disk had dropped off):
+
+  ```
+  E: Device not found: '/dev/sdX1'
+  E: Failed to remove directory
+  Ret=256
+  ```
+
+  Exit code non-zero (Apsis saw 1). Apsis turns `E: Device not found: '<device>'` into
+  `Error::DeviceNotFound` and shows `backup disk not connected (UUID 1a2b…): plug it in and press
+  r`, naming the disk by the UUID from the last good list, since the `/dev` name can differ after
+  a reconnect. Fixture `list-device-not-found.txt` is rebuilt from those three quoted lines (their
+  order and stream weren't captured separately). Apsis also recognises the message if Timeshift
+  exits 0 with it and no table.
+- **Stale mount** (after the disk was plugged back in): the list is complete and exits 0, but ends
+  with an extra line after the table. It's probably the old `/run/timeshift/<pid>/backup` mount
+  that couldn't be removed:
+
+  ```
+  ...
+  4    >  2026-09-25_11-28-53  O     apsis test: comment with spaces
+
+  E: Failed to remove directory
+  ```
+
+  Before this, the parser failed on it (`line 17: unexpected snapshot row`). Now it's a warning.
+  Fixture: `list-rsync-stale-mount.txt` (the redacted device fixture plus that line).
+- `Ret=256` appears to be Timeshift's internal status (256 = exit status 1 in `wait()` terms). Apsis
+  ignores it.
+- `--snapshot-device`: Apsis passes the UUID whenever a list has shown one, and keeps it when a
+  later list fails. The `/dev/sdX1` in the message above came from Timeshift's own configuration
+  (the user ran it without `--snapshot-device`).
 
 ## Other notes
 

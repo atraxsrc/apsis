@@ -1,0 +1,13 @@
+# apsis-helper as a D-Bus activated service. Nothing enables it: the bus starts it on demand
+# and it exits after a minute idle. Installed by `just install` to /usr/lib/systemd/system/.
+#
+# No sandboxing options: Timeshift mounts devices and reads and writes the whole filesystem
+# (rsync of /, btrfs subvolumes), which hardening would break.
+[Unit]
+Description=Apsis snapshot helper (runs Timeshift for the Apsis applet)
+Documentation=https://github.com/atraxsrc/apsis
+
+[Service]
+Type=dbus
+BusName=io.github.atraxsrc.Apsis.Helper
+ExecStart=@libexecdir@/apsis-helper

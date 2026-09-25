@@ -13,11 +13,15 @@ use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io;
 
-use apsis_core::{Backend, Error, MAX_COMMENT_CHARS, RunOutput, Runner, TimeshiftCli};
+use apsis_core::{
+    Backend, Error, MAX_COMMENT_CHARS, MAX_OUTPUT_LINES, RunOutput, Runner, TimeshiftCli,
+};
 
 const DEVICE: &str = include_str!("fixtures/list-rsync-device.txt");
 const UNCONFIGURED: &str = include_str!("fixtures/list-unconfigured.txt");
 const UUID: &str = "00000000-0000-0000-0000-000000000000";
+const STALE_MOUNT: &str = include_str!("fixtures/list-rsync-stale-mount.txt");
+const DEVICE_NOT_FOUND: &str = include_str!("fixtures/list-device-not-found.txt");
 
 #[derive(Default)]
 struct FakeRunner {
@@ -291,7 +295,7 @@ fn failed_list_reports_exit_code_and_stderr() {
     let runner = FakeRunner::replying([failed()]);
     let result = TimeshiftCli::new(&runner).list();
     assert!(
-        matches!(&result, Err(Error::Failed { code: Some(1), stderr }) if stderr == "E: boom\n"),
+        matches!(&result, Err(Error::Failed { code: Some(1), output }) if output == "E: boom"),
         "{result:?}"
     );
 }
@@ -413,4 +417,104 @@ fn validate_comment_is_what_create_checks() {
     assert_eq!(apsis_core::validate_comment("  hi  ").unwrap(), "hi");
     assert!(apsis_core::validate_comment("-x").is_err());
     assert!(apsis_core::validate_comment("a\nb").is_err());
+}
+
+/// A failed run as Timeshift does it: `E:` lines on stdout, often nothing on stderr.
+fn failed_with(code: i32, stdout: &str, stderr: &str) -> io::Result<RunOutput> {
+    Ok(RunOutput {
+        success: false,
+        code: Some(code),
+        stdout: stdout.to_owned(),
+        stderr: stderr.to_owned(),
+    })
+}
+
+#[test]
+fn unplugged_disk_is_device_not_found() {
+    let runner = FakeRunner::replying([failed_with(1, DEVICE_NOT_FOUND, "")]);
+    let result = TimeshiftCli::new(&runner).list();
+    assert!(
+        matches!(&result, Err(Error::DeviceNotFound { device }) if device == "/dev/sdX1"),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn unplugged_disk_is_recognised_even_with_exit_code_zero() {
+    let runner = FakeRunner::replying([ok(DEVICE_NOT_FOUND)]);
+    let result = TimeshiftCli::new(&runner).list();
+    assert!(
+        matches!(result, Err(Error::DeviceNotFound { .. })),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn failure_output_comes_from_stdout_errors_too() {
+    // Before: only stderr was kept, which was empty, so all the user saw was the exit code.
+    let stdout = "Mounted '/dev/sdX1' at '/run/timeshift/1/backup'\nE: first\nRet=256\nW: second\n";
+    let runner = FakeRunner::replying([failed_with(1, stdout, "E: on stderr\n")]);
+    let result = TimeshiftCli::new(&runner).list();
+    assert!(
+        matches!(&result, Err(Error::Failed { code: Some(1), output })
+            if output == "E: first\nW: second\nE: on stderr"),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn failure_output_keeps_the_last_lines() {
+    let stdout: String = (1..=9).map(|i| format!("E: line {i}\n")).collect();
+    let runner = FakeRunner::replying([failed_with(1, &stdout, "")]);
+    let Err(Error::Failed { output, .. }) = TimeshiftCli::new(&runner).list() else {
+        panic!("expected Failed")
+    };
+    let lines: Vec<&str> = output.lines().collect();
+    assert_eq!(lines.len(), MAX_OUTPUT_LINES);
+    assert_eq!(lines.last(), Some(&"E: line 9"));
+}
+
+#[test]
+fn failure_without_error_lines_shows_stdout() {
+    let runner = FakeRunner::replying([failed_with(2, "something else\n", "")]);
+    let result = TimeshiftCli::new(&runner).list();
+    assert!(
+        matches!(&result, Err(Error::Failed { output, .. }) if output == "something else"),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn stale_mount_warning_keeps_the_list_and_the_uuid() {
+    let runner = FakeRunner::replying([ok(STALE_MOUNT), ok("")]);
+    let cli = TimeshiftCli::new(&runner);
+    let list = cli.list().unwrap();
+    assert_eq!(list.warnings, ["E: Failed to remove directory"]);
+    assert_eq!(cli.snapshot_device().as_deref(), Some(UUID));
+    cli.create("").unwrap();
+    let create = &runner.calls()[1];
+    assert!(create.iter().any(|a| a == UUID));
+    assert!(
+        !create
+            .iter()
+            .any(|a| a.to_string_lossy().starts_with("/dev/"))
+    );
+}
+
+#[test]
+fn unplugged_disk_keeps_the_uuid_for_the_next_try() {
+    let runner =
+        FakeRunner::replying([ok(DEVICE), failed_with(1, DEVICE_NOT_FOUND, ""), ok(DEVICE)]);
+    let cli = TimeshiftCli::new(&runner);
+    cli.list().unwrap();
+    assert!(cli.list().is_err());
+    cli.list().unwrap();
+    let third = argv(&[
+        "timeshift",
+        "--list",
+        "--scripted",
+        "--snapshot-device",
+        UUID,
+    ]);
+    assert_eq!(runner.calls()[2], third);
 }

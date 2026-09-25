@@ -75,6 +75,12 @@ pub fn summary(mode: Option<Mode>, count: usize) -> String {
     }
 }
 
+/// `1a2b…`: enough of a filesystem UUID to recognise the disk.
+#[must_use]
+pub fn short_uuid(uuid: &str) -> String {
+    truncate(uuid, 5)
+}
+
 /// The last `n` non-blank lines of `text`, trimmed on the right.
 #[must_use]
 pub fn tail(text: &str, n: usize) -> Vec<String> {
@@ -132,6 +138,12 @@ mod tests {
         assert_eq!(summary(Some(Mode::Rsync), 3), "rsync · 3 snapshots");
         assert_eq!(summary(Some(Mode::Btrfs), 1), "btrfs · 1 snapshot");
         assert_eq!(summary(None, 0), "0 snapshots");
+    }
+
+    #[test]
+    fn short_uuid_keeps_four_characters() {
+        assert_eq!(short_uuid("1a2b1234-0000-0000-0000-000000000000"), "1a2b…");
+        assert_eq!(short_uuid("1a2b"), "1a2b");
     }
 
     #[test]

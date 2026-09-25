@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  polkit actions checked by apsis-helper. Installed by `just install` to
+  /usr/share/polkit-1/actions/. The messages are what the password dialog shows.
+-->
+<policyconfig>
+  <vendor>Apsis</vendor>
+  <vendor_url>https://github.com/atraxsrc/apsis</vendor_url>
+  <icon_name>io.github.atraxsrc.Apsis</icon_name>
+
+  <action id="io.github.atraxsrc.Apsis.list">
+    <description>List system snapshots</description>
+    <message>Apsis needs permission to list system snapshots</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="io.github.atraxsrc.Apsis.create">
+    <description>Create a system snapshot</description>
+    <message>Apsis needs your password to create a system snapshot</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="io.github.atraxsrc.Apsis.delete">
+    <description>Delete a system snapshot</description>
+    <message>Apsis needs your password to delete a system snapshot</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

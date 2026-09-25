@@ -4,6 +4,7 @@ use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use apsis_core::helper::HelperClient;
 use apsis_core::{
     Backend, MAX_COMMENT_CHARS, PkexecRunner, Snapshot, SnapshotList, TimeshiftCli,
     validate_comment,
@@ -51,8 +52,6 @@ const HELP_KEY_WIDTH: f32 = 80.0;
 /// Longest comment shown in a row; the row also ellipsizes to the pane width, and the details
 /// pane shows all of it.
 const ROW_COMMENT_CHARS: usize = 28;
-/// Lines of stderr shown in the error state.
-const STDERR_LINES: usize = 6;
 /// Longest answer kept at the `[y/N]` prompt; only `y` means yes.
 const CONFIRM_CHARS: usize = 3;
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -90,11 +89,14 @@ pub struct AppModel {
     menu: Option<Id>,
     /// Configuration data that persists between application runs.
     config: Config,
-    /// Shared with the background task that runs `pkexec timeshift --list`.
-    backend: Arc<Cli>,
+    /// The fallback when `apsis-helper` isn't installed: `pkexec timeshift ...`, shared with
+    /// the background tasks.
+    pkexec: Arc<Cli>,
     listing: Listing,
     /// A list is running in the background.
     loading: bool,
+    /// UUID of the backup disk from the last good list, to name it when it goes missing.
+    known_uuid: Option<String>,
     /// A create or delete is running in the background (as root, via pkexec).
     running: Option<Operation>,
     /// What the `>` line is asking for.
@@ -126,9 +128,18 @@ enum Listing {
 #[derive(Debug, Clone)]
 pub enum CliError {
     NotInstalled,
+    /// polkit refused `apsis-helper`, or the password dialog was dismissed. Timeshift didn't
+    /// run. (pkexec reports the same as exit code 126 or 127, see [`pkexec_refused`].)
+    NotAuthorized,
+    /// Timeshift failed: its exit code and the last lines it printed about it.
     Failed {
         code: Option<i32>,
-        stderr: Vec<String>,
+        output: Vec<String>,
+    },
+    /// The backup disk isn't there (unplugged, or dropped off the USB bus). `device` is what
+    /// Timeshift named.
+    DeviceNotFound {
+        device: String,
     },
     Other(String),
 }
@@ -137,10 +148,12 @@ impl From<apsis_core::Error> for CliError {
     fn from(error: apsis_core::Error) -> Self {
         match error {
             apsis_core::Error::NotInstalled => Self::NotInstalled,
-            apsis_core::Error::Failed { code, stderr } => Self::Failed {
+            apsis_core::Error::NotAuthorized => Self::NotAuthorized,
+            apsis_core::Error::Failed { code, output } => Self::Failed {
                 code,
-                stderr: fmt::tail(&stderr, STDERR_LINES),
+                output: fmt::tail(&output, apsis_core::MAX_OUTPUT_LINES),
             },
+            apsis_core::Error::DeviceNotFound { device } => Self::DeviceNotFound { device },
             other => Self::Other(other.to_string()),
         }
     }
@@ -260,6 +273,8 @@ pub enum Message {
     Input(String),
     /// Enter in the `>` line.
     Submit,
+    /// The `>` line lost focus (Esc or Tab in it).
+    InputUnfocused,
     Refresh,
     /// `[c]reate` / `[d]elete` hints.
     StartCreate,
@@ -304,8 +319,9 @@ impl cosmic::Application for AppModel {
             popup: None,
             menu: None,
             config,
-            backend: Arc::new(TimeshiftCli::new(PkexecRunner)),
+            pkexec: Arc::new(TimeshiftCli::new(PkexecRunner)),
             listing: Listing::NotLoaded,
+            known_uuid: None,
             loading: false,
             running: None,
             prompt: Prompt::Command,
@@ -466,6 +482,8 @@ impl cosmic::Application for AppModel {
                 }
             },
             Message::Submit => return self.submit(),
+            Message::InputUnfocused if self.popup.is_some() => return focus_input(),
+            Message::InputUnfocused => {}
             Message::Refresh => return self.start_list(),
             Message::StartCreate => return self.on_key(KeyAction::Create),
             Message::StartDelete => return self.on_key(KeyAction::Delete),
@@ -580,22 +598,16 @@ impl AppModel {
         self.prompt = Prompt::Command;
     }
 
-    /// Runs `pkexec timeshift --list` on a blocking thread. Does nothing while a list, create
-    /// or delete is running (Timeshift runs one at a time).
+    /// Lists in the background, through `apsis-helper` or pkexec. Does nothing while a list,
+    /// create or delete is running (Timeshift runs one at a time).
     fn start_list(&mut self) -> Task<cosmic::Action<Message>> {
         if self.loading || self.running.is_some() {
             return Task::none();
         }
         self.loading = true;
         self.spinner = 0;
-        let backend = Arc::clone(&self.backend);
-        cosmic::task::future(async move {
-            let result = match tokio::task::spawn_blocking(move || backend.list()).await {
-                Ok(listed) => listed.map_err(CliError::from),
-                Err(join) => Err(CliError::Other(join.to_string())),
-            };
-            Message::Listed(result)
-        })
+        let pkexec = Arc::clone(&self.pkexec);
+        cosmic::task::future(async move { Message::Listed(list_snapshots(pkexec).await) })
     }
 
     fn on_listed(&mut self, result: Result<SnapshotList, CliError>) {
@@ -606,6 +618,7 @@ impl AppModel {
                 // If it was deleted, stay at the same position.
                 let selected_name = self.snapshots().get(self.selected).map(|s| s.name.clone());
                 list.snapshots.sort_by_key(|s| std::cmp::Reverse(s.created));
+                self.known_uuid.clone_from(&list.uuid);
                 let near = self.selected.min(list.snapshots.len().saturating_sub(1));
                 self.selected = selected_name
                     .and_then(|name| list.snapshots.iter().position(|s| s.name == name))
@@ -735,7 +748,7 @@ impl AppModel {
         }
     }
 
-    /// Runs `pkexec timeshift --create/--delete` on a blocking thread.
+    /// Creates or deletes in the background, through `apsis-helper` or pkexec.
     fn run(&mut self, operation: Operation) -> Task<cosmic::Action<Message>> {
         if self.loading || self.running.is_some() {
             return Task::none();
@@ -743,25 +756,16 @@ impl AppModel {
         self.running = Some(operation.clone());
         self.status = None;
         self.spinner = 0;
-        let backend = Arc::clone(&self.backend);
+        let pkexec = Arc::clone(&self.pkexec);
         cosmic::task::future(async move {
-            let task_operation = operation.clone();
-            let result = match tokio::task::spawn_blocking(move || match &task_operation {
-                Operation::Create(comment) => backend.create(comment),
-                Operation::Delete(name) => backend.delete(name),
-            })
-            .await
-            {
-                Ok(done) => done.map_err(CliError::from),
-                Err(join) => Err(CliError::Other(join.to_string())),
-            };
+            let result = operate(pkexec, operation.clone()).await;
             Message::Finished(operation, result)
         })
     }
 
-    /// Shows how it went and refreshes the list if Timeshift ran (not when pkexec refused, or
-    /// the input or device check stopped it first: nothing changed, and a refresh would be
-    /// another password prompt).
+    /// Shows how it went and refreshes the list if Timeshift ran (not when polkit refused, or
+    /// the input or device check stopped it first: nothing changed, and without the helper a
+    /// refresh would be another password prompt).
     fn on_finished(
         &mut self,
         operation: &Operation,
@@ -771,16 +775,24 @@ impl AppModel {
         let ran = match &result {
             Ok(()) => true,
             Err(CliError::Failed { code, .. }) => !pkexec_refused(*code),
-            Err(CliError::NotInstalled | CliError::Other(_)) => false,
+            // Nothing ran, or (disk missing) a list would only fail again.
+            Err(
+                CliError::NotInstalled
+                | CliError::NotAuthorized
+                | CliError::DeviceNotFound { .. }
+                | CliError::Other(_),
+            ) => false,
         };
         self.status = Some(match (operation, result) {
             (Operation::Create(_), Ok(())) => Status::Info(fl!("created")),
             (Operation::Delete(name), Ok(())) => Status::Info(fl!("deleted", name = name.clone())),
             (Operation::Create(_), Err(error)) => {
-                Status::Error(fl!("create-failed", reason = error_summary(&error)))
+                let reason = error_summary(&error, self.known_uuid.as_deref());
+                Status::Error(fl!("create-failed", reason = reason))
             }
             (Operation::Delete(_), Err(error)) => {
-                Status::Error(fl!("delete-failed", reason = error_summary(&error)))
+                let reason = error_summary(&error, self.known_uuid.as_deref());
+                Status::Error(fl!("delete-failed", reason = reason))
             }
         });
         let mut tasks = Vec::new();
@@ -912,7 +924,7 @@ impl AppModel {
                 }
             }
             (_, Listing::Loaded(list)) => self.list(&list.snapshots),
-            (_, Listing::Failed(error)) => scroll(error_view(error)),
+            (_, Listing::Failed(error)) => scroll(error_view(error, self.known_uuid.as_deref())),
             (_, Listing::NotLoaded) if self.loading => lines([fl!("waiting")]),
             (_, Listing::NotLoaded) => lines([fl!("not-loaded")]),
         };
@@ -957,7 +969,17 @@ impl AppModel {
         }
     }
 
-    /// The activity pane, active (accent border) while a create or delete runs.
+    /// What Timeshift complained about in the last good list (e.g. a stale mount), for the
+    /// activity pane.
+    fn list_warnings(&self) -> &[String] {
+        match &self.listing {
+            Listing::Loaded(list) => &list.warnings,
+            Listing::NotLoaded | Listing::Failed(_) => &[],
+        }
+    }
+
+    /// The activity pane, active (accent border) while a create or delete runs: the current or
+    /// last create/delete, then the last list's warnings.
     fn activity(&self) -> Element<'_, Message> {
         let (text, tone) = self.activity_line();
         let line = monotext(text).wrapping(Wrapping::WordOrGlyph);
@@ -966,11 +988,20 @@ impl AppModel {
             Tone::Dim => line.class(theme::Text::Custom(dim_text)),
             Tone::Error => line.class(theme::Text::Custom(error_text)),
         };
+        let mut lines = vec![line.into()];
+        lines.extend(self.list_warnings().iter().map(|warning| {
+            monotext(fl!("activity-list-warning", warning = warning.clone()))
+                .wrapping(Wrapping::WordOrGlyph)
+                .class(theme::Text::Custom(warning_text))
+                .into()
+        }));
         pane(
             fl!("pane-activity"),
             self.running.is_some(),
             Length::Fill,
-            container(line).padding([0, 6]),
+            widget::column::with_children(lines)
+                .spacing(2)
+                .padding([0, 6]),
         )
     }
 
@@ -1082,22 +1113,29 @@ impl AppModel {
     /// placeholder shows a running list (`timeshift --list ⠹`); a running create or delete is
     /// shown in the activity pane. For a create or delete it asks, after a label, for the comment
     /// or the `y`.
+    ///
+    /// Always the same three widgets (`>`, label, input) in the same places, so switching modes
+    /// never moves the input to a new spot in the widget tree, where it would get a new state
+    /// and lose focus.
     fn prompt(&self) -> Element<'_, Message> {
         let spinner = SPINNER[self.spinner];
-        let (label, value, placeholder) = match (&self.running, &self.prompt) {
-            (Some(_), _) => (None, "", String::new()),
-            (None, Prompt::Comment(comment)) => {
+        // While a create or delete runs the line stays empty; the activity pane shows it.
+        let prompt = if self.running.is_some() {
+            &Prompt::Command
+        } else {
+            &self.prompt
+        };
+        let (label, value, placeholder) = match prompt {
+            Prompt::Comment(comment) => {
                 (Some(fl!("prompt-comment")), comment.as_str(), String::new())
             }
-            (None, Prompt::ConfirmDelete { name, typed }) => (
+            Prompt::ConfirmDelete { name, typed } => (
                 Some(fl!("prompt-delete", name = name.clone())),
                 typed.as_str(),
                 String::new(),
             ),
-            (None, Prompt::Command) if self.loading => {
-                (None, "", format!("timeshift --list {spinner}"))
-            }
-            (None, Prompt::Command) => (None, "", String::new()),
+            Prompt::Command if self.loading => (None, "", format!("timeshift --list {spinner}")),
+            Prompt::Command => (None, "", String::new()),
         };
         let input = widget::text_input::inline_input(placeholder, value)
             .id(INPUT_ID.clone())
@@ -1107,14 +1145,18 @@ impl AppModel {
             .line_height(iced_text::LineHeight::Absolute(20.0.into()))
             .padding(0)
             .on_input(Message::Input)
-            .on_submit(|_| Message::Submit);
-        let mut children = vec![monotext(">").class(theme::Text::Accent).into()];
-        children.extend(label.map(|label| monotext(label).into()));
-        children.push(input.into());
-        widget::row::with_children(children)
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .into()
+            .on_submit(|_| Message::Submit)
+            // Esc and Tab unfocus it and leave it read-only (libcosmic); take focus straight back.
+            .on_unfocus(Message::InputUnfocused);
+        // The label's spaces stand in for row spacing, so the row is the same in every mode.
+        let label = label.map_or_else(|| " ".to_owned(), |label| format!(" {label} "));
+        widget::row::with_children(vec![
+            monotext(">").class(theme::Text::Accent).into(),
+            monotext(label).into(),
+            input.into(),
+        ])
+        .align_y(Alignment::Center)
+        .into()
     }
 }
 
@@ -1217,11 +1259,14 @@ fn lines<'a>(lines: impl IntoIterator<Item = String>) -> Element<'a, Message> {
         .into()
 }
 
-fn error_view(error: &CliError) -> Element<'_, Message> {
+/// The list's error state. `known_uuid` names the disk if it's gone missing.
+fn error_view<'a>(error: &'a CliError, known_uuid: Option<&str>) -> Element<'a, Message> {
     let mut out = Vec::new();
     match error {
         CliError::NotInstalled => out.push(fl!("not-installed")),
-        CliError::Failed { code, stderr } => {
+        CliError::NotAuthorized => out.push(fl!("failed-auth")),
+        CliError::DeviceNotFound { device } => out.push(disk_missing(device, known_uuid)),
+        CliError::Failed { code, output } => {
             out.push(match code {
                 Some(code) => fl!("failed-code", code = code.to_string()),
                 None => fl!("failed-signal"),
@@ -1229,7 +1274,7 @@ fn error_view(error: &CliError) -> Element<'_, Message> {
             if pkexec_refused(*code) {
                 out.push(fl!("failed-auth"));
             }
-            out.extend(stderr.iter().cloned());
+            out.extend(output.iter().cloned());
         }
         CliError::Other(message) => out.push(fl!("failed-other", message = message.clone())),
     }
@@ -1248,24 +1293,78 @@ fn error_view(error: &CliError) -> Element<'_, Message> {
         .into()
 }
 
+/// Lists through `apsis-helper` when it's installed (no password for the active session),
+/// else through pkexec (a password prompt each time).
+async fn list_snapshots(pkexec: Arc<Cli>) -> Result<SnapshotList, CliError> {
+    if let Some(helper) = HelperClient::connect().await {
+        return helper.list().await.map_err(CliError::from);
+    }
+    blocking(move || pkexec.list()).await
+}
+
+/// Creates or deletes through `apsis-helper` when it's installed, else through pkexec. With
+/// the helper this returns when its `Finished` signal arrives, however long Timeshift takes.
+///
+/// A helper that's installed but fails is reported, not replaced by pkexec, so a broken
+/// install gets noticed.
+async fn operate(pkexec: Arc<Cli>, operation: Operation) -> Result<(), CliError> {
+    if let Some(helper) = HelperClient::connect().await {
+        let done = match &operation {
+            Operation::Create(comment) => helper.create(comment).await,
+            Operation::Delete(name) => helper.delete(name).await,
+        };
+        return done.map_err(CliError::from);
+    }
+    blocking(move || match &operation {
+        Operation::Create(comment) => pkexec.create(comment),
+        Operation::Delete(name) => pkexec.delete(name),
+    })
+    .await
+}
+
+/// Runs blocking pkexec work off the UI's runtime.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> apsis_core::Result<T> + Send + 'static,
+) -> Result<T, CliError> {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(done) => done.map_err(CliError::from),
+        Err(join) => Err(CliError::Other(join.to_string())),
+    }
+}
+
 /// pkexec: 126 = not authorised or dialog dismissed, 127 = couldn't authenticate. Timeshift
 /// didn't run.
 fn pkexec_refused(code: Option<i32>) -> bool {
     matches!(code, Some(126 | 127))
 }
 
-/// One line for the status line: why a create or delete failed.
-fn error_summary(error: &CliError) -> String {
+/// Why a create or delete failed, for the activity pane: Timeshift's last lines (one per
+/// line), or what else went wrong.
+fn error_summary(error: &CliError, known_uuid: Option<&str>) -> String {
     match error {
         CliError::NotInstalled => fl!("not-installed"),
+        CliError::NotAuthorized => fl!("failed-auth"),
+        CliError::DeviceNotFound { device } => disk_missing(device, known_uuid),
         CliError::Failed { code, .. } if pkexec_refused(*code) => fl!("failed-auth"),
-        CliError::Failed { code, stderr } => match (stderr.last(), code) {
-            (Some(line), _) => line.clone(),
-            (None, Some(code)) => fl!("failed-code", code = code.to_string()),
-            (None, None) => fl!("failed-signal"),
+        CliError::Failed { code, output } if output.is_empty() => match code {
+            Some(code) => fl!("failed-code", code = code.to_string()),
+            None => fl!("failed-signal"),
         },
+        CliError::Failed { output, .. } => output.join("\n"),
         CliError::Other(message) => message.clone(),
     }
+}
+
+/// `backup disk not connected (UUID 1a2b…): plug it in and press r`. Names the disk by the
+/// UUID from the last good list; Timeshift's own message often has a `/dev` name instead,
+/// which changes when a USB disk reconnects.
+fn disk_missing(device: &str, known_uuid: Option<&str>) -> String {
+    let id = match known_uuid {
+        Some(uuid) => format!("UUID {}", fmt::short_uuid(uuid)),
+        None if !device.starts_with('/') => format!("UUID {}", fmt::short_uuid(device)),
+        None => device.to_owned(),
+    };
+    fl!("disk-missing", id = id)
 }
 
 /// Full name, creation time, age, tags spelled out and the whole comment.
@@ -1386,9 +1485,11 @@ fn spawn(command: std::process::Command) -> Task<cosmic::Action<Message>> {
     .discard()
 }
 
-/// Focuses the `>` line.
+/// Focuses the `>` line, with the cursor after what's in it. Focusing also clears the
+/// read-only state libcosmic leaves after Esc or Tab.
 fn focus_input() -> Task<cosmic::Action<Message>> {
     widget::text_input::focus(INPUT_ID.clone())
+        .chain(widget::text_input::move_cursor_to_end(INPUT_ID.clone()))
 }
 
 /// Command keys that are typed as characters.
@@ -1522,6 +1623,11 @@ fn dim_text(theme: &Theme) -> iced_text::Style {
     text_style(theme, Color::from(on).scale_alpha(0.7))
 }
 
+/// Timeshift's warnings in the activity pane.
+fn warning_text(theme: &Theme) -> iced_text::Style {
+    text_style(theme, theme.cosmic().warning_text_color().into())
+}
+
 fn error_text(theme: &Theme) -> iced_text::Style {
     text_style(theme, theme.cosmic().destructive_text_color().into())
 }
@@ -1627,8 +1733,9 @@ mod tests {
             popup: None,
             menu: None,
             config: Config::default(),
-            backend: Arc::new(TimeshiftCli::new(PkexecRunner)),
+            pkexec: Arc::new(TimeshiftCli::new(PkexecRunner)),
             listing: Listing::Failed(CliError::NotInstalled),
+            known_uuid: None,
             loading: false,
             running: None,
             prompt: Prompt::Command,
@@ -1733,7 +1840,7 @@ mod tests {
     fn failed(code: i32) -> Result<(), CliError> {
         Err(CliError::Failed {
             code: Some(code),
-            stderr: vec!["E: boom".to_owned()],
+            output: vec!["E: boom".to_owned()],
         })
     }
 
@@ -1875,6 +1982,7 @@ mod tests {
             (failed(126), false),
             (failed(127), false),
             (Err(CliError::NotInstalled), false),
+            (Err(CliError::NotAuthorized), false),
             (Err(CliError::Other("no snapshot device".to_owned())), false),
         ] {
             let mut app = listed(DEVICE_LIST);
@@ -1885,6 +1993,117 @@ mod tests {
             assert_eq!(app.loading, refresh);
             assert_eq!(matches!(app.status, Some(Status::Info(_))), ok);
         }
+    }
+
+    #[test]
+    fn helper_refusal_reads_as_not_authorised() {
+        let mut app = listed(DEVICE_LIST);
+        let create = Operation::Create(String::new());
+        let refused = apsis_core::Error::NotAuthorized;
+        send(&mut app, Message::Finished(create, Err(refused.into())));
+        let Some(Status::Error(text)) = &app.status else {
+            panic!("{:?}", app.status)
+        };
+        assert!(text.ends_with(&fl!("failed-auth")), "{text}");
+    }
+
+    const STALE_MOUNT_LIST: &str =
+        include_str!("../../apsis-core/tests/fixtures/list-rsync-stale-mount.txt");
+
+    fn status_error(app: &AppModel) -> &str {
+        match &app.status {
+            Some(Status::Error(text)) => text,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_disk_is_named_by_its_short_uuid_and_not_retried() {
+        let mut app = listed(DEVICE_LIST);
+        let create = Operation::Create(String::new());
+        app.running = Some(create.clone());
+        let missing = apsis_core::Error::DeviceNotFound {
+            device: "/dev/sdX1".to_owned(),
+        };
+        send(&mut app, Message::Finished(create, Err(missing.into())));
+        assert!(!app.loading, "a list would only fail again");
+        let want = fl!("disk-missing", id = "UUID 0000…");
+        assert!(
+            status_error(&app).ends_with(&want),
+            "{}",
+            status_error(&app)
+        );
+    }
+
+    #[test]
+    fn missing_disk_keeps_the_uuid_it_was_last_seen_with() {
+        let mut app = listed(DEVICE_LIST);
+        let missing = CliError::DeviceNotFound {
+            device: "/dev/sdX1".to_owned(),
+        };
+        app.on_listed(Err(missing.clone()));
+        assert_eq!(
+            error_summary(&missing, app.known_uuid.as_deref()),
+            fl!("disk-missing", id = "UUID 0000…")
+        );
+        // Never seen: Timeshift's own name for it.
+        assert_eq!(
+            error_summary(&missing, None),
+            fl!("disk-missing", id = "/dev/sdX1")
+        );
+    }
+
+    #[test]
+    fn timeshift_output_is_shown_not_just_the_exit_code() {
+        let mut app = listed(DEVICE_LIST);
+        let failed = apsis_core::Error::Failed {
+            code: Some(1),
+            output: "E: first\nE: second".to_owned(),
+        };
+        let delete = Operation::Delete("2026-09-19_09-29-57".to_owned());
+        send(&mut app, Message::Finished(delete, Err(failed.into())));
+        assert!(
+            status_error(&app).ends_with("E: first\nE: second"),
+            "{}",
+            status_error(&app)
+        );
+    }
+
+    #[test]
+    fn list_warnings_reach_the_activity_pane() {
+        let mut app = listed(DEVICE_LIST);
+        assert!(app.list_warnings().is_empty());
+        app.on_listed(Ok(apsis_core::parse_list(STALE_MOUNT_LIST).unwrap()));
+        assert_eq!(app.snapshots().len(), 5);
+        assert_eq!(app.list_warnings(), ["E: Failed to remove directory"]);
+    }
+
+    #[test]
+    fn losing_focus_keeps_what_was_typed() {
+        let mut app = listed(DEVICE_LIST);
+        typed(&mut app, "c");
+        typed(&mut app, "half");
+        send(&mut app, Message::InputUnfocused);
+        assert_eq!(app.prompt, Prompt::Comment("half".to_owned()));
+    }
+
+    #[test]
+    fn one_c_opens_the_comment_prompt_and_is_not_typed() {
+        let mut app = listed(DEVICE_LIST);
+        typed(&mut app, "c");
+        assert_eq!(app.prompt, Prompt::Comment(String::new()));
+        typed(&mut app, "c");
+        assert_eq!(
+            app.prompt,
+            Prompt::Comment("c".to_owned()),
+            "second c is text"
+        );
+
+        let mut app = listed(DEVICE_LIST);
+        let popup = app.popup.unwrap();
+        // The same when the key arrives through the event stream (input not focused).
+        send(&mut app, Message::Key(popup, KeyAction::Delete));
+        assert!(matches!(&app.prompt, Prompt::ConfirmDelete { typed, .. } if typed.is_empty()));
     }
 
     #[test]

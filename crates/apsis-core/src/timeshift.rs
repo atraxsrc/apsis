@@ -7,12 +7,15 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use crate::backend::Backend;
 use crate::error::{Error, Result};
 use crate::model::{SnapshotList, parse_snapshot_name};
-use crate::parse::parse_list;
+use crate::parse::{device_not_found, failure_output, parse_list};
 
 const PROGRAM: &str = "timeshift";
 
 /// Longest comment Apsis passes to `timeshift --comments`, in characters.
 pub const MAX_COMMENT_CHARS: usize = 200;
+
+/// Lines of Timeshift's output kept in [`Error::Failed`].
+pub const MAX_OUTPUT_LINES: usize = 5;
 
 /// What a finished command produced.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -37,6 +40,9 @@ pub trait Runner {
 ///
 /// After each successful [`list`](Backend::list) it remembers the backup device and passes it as
 /// `--snapshot-device` on later calls, so every call targets the device the user is looking at.
+/// That's the filesystem UUID whenever the list showed one; the device path (`/dev/sdX1`, which
+/// can change when a USB disk reconnects) only when it didn't. A failed list keeps the previous
+/// device.
 /// [`create`](Backend::create) and [`delete`](Backend::delete) refuse to run until a list has
 /// shown a device ([`Error::NoSnapshotDevice`]), rather than fall back to Timeshift's default.
 pub struct TimeshiftCli<R> {
@@ -50,6 +56,11 @@ impl<R: Runner> TimeshiftCli<R> {
             runner,
             snapshot_device: Mutex::new(None),
         }
+    }
+
+    /// What `--snapshot-device` would be now: the UUID (or path) from the last good list.
+    pub fn snapshot_device(&self) -> Option<String> {
+        self.remembered_device().clone()
     }
 
     /// `timeshift <action...> --scripted [--snapshot-device <dev>]`
@@ -74,10 +85,7 @@ impl<R: Runner> TimeshiftCli<R> {
             _ => Error::Io(e),
         })?;
         if !output.success {
-            return Err(Error::Failed {
-                code: output.code,
-                stderr: output.stderr,
-            });
+            return Err(failure(output.code, &output.stdout, &output.stderr));
         }
         Ok(output.stdout)
     }
@@ -87,6 +95,30 @@ impl<R: Runner> TimeshiftCli<R> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// The error for a failed run: [`Error::DeviceNotFound`] if Timeshift said so, else
+/// [`Error::Failed`] with the last lines of what it said.
+fn failure(code: Option<i32>, stdout: &str, stderr: &str) -> Error {
+    let output = failure_output(stdout, stderr);
+    if let Some(device) = missing_device(output.iter().map(String::as_str)) {
+        return Error::DeviceNotFound { device };
+    }
+    let kept = &output[output.len().saturating_sub(MAX_OUTPUT_LINES)..];
+    Error::Failed {
+        code,
+        output: kept.join("\n"),
+    }
+}
+
+/// The device of the first `E: Device not found: '<device>'` line.
+fn missing_device<'a>(mut lines: impl Iterator<Item = &'a str>) -> Option<String> {
+    lines.find_map(|line| {
+        let line = line.trim();
+        line.starts_with("E: ")
+            .then(|| device_not_found(line))
+            .flatten()
+    })
 }
 
 fn build_command(action: &[&str], device: Option<&str>) -> Vec<OsString> {
@@ -128,7 +160,11 @@ pub fn validate_comment(comment: &str) -> Result<&str> {
 impl<R: Runner> Backend for TimeshiftCli<R> {
     fn list(&self) -> Result<SnapshotList> {
         let stdout = self.run(&self.command(&["--list"]))?;
-        let list = parse_list(&stdout)?;
+        // A missing disk should fail with an exit code (see `failure`), but if Timeshift
+        // exits 0 without a table, still say what it said.
+        let list = parse_list(&stdout).map_err(|error| {
+            missing_device(stdout.lines()).map_or(error, |device| Error::DeviceNotFound { device })
+        })?;
         *self.remembered_device() = list.snapshot_device().map(str::to_owned);
         Ok(list)
     }

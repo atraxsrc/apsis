@@ -250,12 +250,119 @@ Append-only. Newest at the bottom. Format: date — decision — why.
   - Pane height: the snapshots pane fits the list, `clamp(len, 5, 8)` rows, then scrolls; help
     and errors use 8 rows, About 6, the other states 5. The details pane takes the same height.
 
+- 2026-09-25 - Phase 4 privileged helper (`crates/apsis-helper`). Written and unit-tested by
+  Claude; never installed or run as root by Claude. The user installs and tests it.
+  - Install layout agreed with the user before any file was written: `/usr/libexec/apsis-helper`,
+    D-Bus activation + bus policy under `/usr/share/dbus-1/`, a `Type=dbus` systemd unit (the
+    user chose to keep it), and the polkit `.policy`. Details in ARCHITECTURE.md.
+  - The user's changes to the plan: polkit subject is the caller's unique bus name
+    (`system-bus-name`), not a PID; interactive only for create/delete; the helper never exits
+    while Timeshift runs; a second call is refused with `Busy`, not queued; reload with the bus's
+    `ReloadConfig` via `busctl` (works for dbus-broker and dbus-daemon) instead of a unit name;
+    all shared names in one module, `apsis_core::helper::names`.
+  - Long operations: `Create`/`Delete` return once Timeshift has started, and a `Finished(op, ok,
+    message)` signal follows. The alternative was one blocking call with a long timeout. The
+    signal was chosen because (a) a second call can get `Busy` straight away rather than wait
+    behind a running create; (b) nothing depends on anyone's call timeout (`busctl`/`gdbus` use
+    25 s); (c) closing the popup leaves no reply pending while the operation carries on. The
+    signal is unicast (destination = the caller), so other users on the bus don't see snapshot
+    names or errors. The applet also watches the helper's bus name, so a helper that dies
+    mid-operation is reported instead of a spinner that never stops.
+  - Checked in the zbus 5.19 source (cargo cache): no default method timeout; interface
+    methods run in their own tasks by default (so a list or a password dialog doesn't hold up
+    other calls); `SignalEmitter::set_destination` exists; signal streams on a well-known name
+    follow owner changes (the helper only appears during the first call).
+  - No new crates: zbus 5.19 (with tokio) was already in the tree via libcosmic;
+    `futures-util` too. `zbus_polkit` wasn't in the cache, so the one `CheckAuthorization` call
+    is written out (`apsis-helper/src/polkit.rs`). polkit errors count as "not authorised".
+  - `List` returns parsed data, `(sssa(sss))`, not Timeshift's raw text: the helper parses it
+    anyway to find the device, and the applet re-checks names and tags (`helper::from_wire`).
+  - Create/Delete in the helper run a fresh `--list` first and use the device it reports, since a
+    helper started by D-Bus has no earlier list. Delete also refuses a name that list doesn't have
+    (`Error::NoSuchSnapshot`).
+  - Timeshift failures cross the bus as one message: a header line with the exit code, then the
+    last 20 stderr lines (`helper::encode_failure` / `failure_error`). Other failures are plain
+    text and show as-is.
+  - `HelperClient` is async, not a `Backend` (ARCHITECTURE.md had planned it as one): waiting for a
+    signal doesn't fit a blocking trait, and the applet already runs on tokio. The pkexec path still
+    goes through `Backend` on a blocking thread.
+  - Applet: before each list/create/delete it asks the bus whether the helper is activatable or
+    running. If so it uses the helper, else pkexec. An installed helper that fails is shown as an
+    error, not silently replaced by pkexec. New `CliError::NotAuthorized` (polkit said no through
+    the helper), handled like pkexec's 126/127: no refresh afterwards.
+  - The runner clears the environment and uses a fixed `PATH`, so nothing from D-Bus activation's
+    environment picks the program run as root. `HOME`, `USER` and `LOGNAME` are set like pkexec
+    sets them, in case Timeshift reads them.
+  - The systemd unit isn't sandboxed: Timeshift mounts devices and rsyncs `/`.
+  - Not verified here (no root, no way to install): that polkitd accepts the
+    `CheckAuthorization` reply shape as deserialised; that dbus-broker delivers the unicast
+    `Finished` under the installed policy; `systemd-analyze verify` on the unit (read-only
+    filesystem in Claude's sandbox). A staged `just --set rootdir <tmp> install`/`uninstall` ran
+    fine as a normal user, which skips the system reloads.
+  - pedantic clippy (`just check`) still flags one pre-existing `match_same_arms` in
+    `AppModel::prompt` (Phase 3.5).
+
+- 2026-09-25 - Phase 4 test round (user tested the installed helper): fixes before commit.
+  - **Disk drop.** A create through the helper worked (journal: started 14:51:57, done 14:53:53),
+    but the refresh after it failed with only `timeshift exited with code 1`. The USB backup disk
+    had dropped off. `sudo timeshift --list` said `E: Device not found: '/dev/sda1'`,
+    `E: Failed to remove directory`, `Ret=256`. Apsis never showed that because **Timeshift prints
+    its `E:`/`W:` lines on stdout**, and Apsis only kept stderr (empty).
+    - Now a failed run keeps the `E:`/`W:` lines from stdout plus stderr, the last 5
+      (`MAX_OUTPUT_LINES`), in `Error::Failed { code, output }` (renamed from `stderr`). The same
+      text reaches the popup through the pkexec path and through the helper
+      (`helper::encode_error`/`decode_error`).
+    - `E: Device not found: '<device>'` becomes `Error::DeviceNotFound`. The helper sends it as its
+      own D-Bus error (`...Error.DeviceNotFound`). The popup shows `backup disk not connected (UUID
+      1a2b…): plug it in and press r`, with the UUID from the last good list (first 4
+      characters), or Timeshift's name if no list has been seen. No automatic refresh after it: a
+      list would only fail again.
+    - Device targeting was already UUID-first (`--snapshot-device <UUID>`, the path only if a list
+      had no UUID, and a failed list keeps the previous one). It's now pinned by tests in core and
+      the helper, and the helper logs which device each list targets. The `/dev/sda1` above came
+      from the user's manual run without `--snapshot-device`. What Apsis's own refresh passed
+      wasn't logged at the time; the new log line shows it. A freshly started helper has no
+      device yet, so its first list uses Timeshift's configured device, as before.
+  - **Parser decision.** After the disk was back, a list succeeded but ended with an extra
+    `E: Failed to remove directory` (probably a stale `/run/timeshift/<pid>/backup` mount), and the
+    parser failed (`line 17: unexpected snapshot row`). Now `E:`/`W:` lines anywhere are
+    diagnostics: they go into `SnapshotList::warnings` and are shown in the activity pane
+    (`list: E: ...`, theme warning colour). A table line that isn't a snapshot row is also a
+    warning (`line N: not a snapshot row: ...`) instead of `Error::BadRow` (removed). A list fails
+    only on a non-zero exit, or when there's neither a table nor `No snapshots found`. The
+    trade-off: a real format change would show up as warnings and missing rows, not as a failed
+    list; the warnings make that visible. New fixtures: `list-rsync-stale-mount.txt` (the redacted
+    device fixture plus the trailing line) and `list-device-not-found.txt` (rebuilt from the three
+    lines the user quoted).
+  - Wire change: `List` returns `(sssa(sss)as)`, with the warnings added. The interface isn't
+    released yet, so it stays `Helper1`.
+  - **Logging.** Every `List`, `Create` and `Delete` is logged with its result: `list for :1.42
+    (device <uuid>): ok, 5 snapshots` (plus warnings), or `failed, exit code 1: E: ... | E: ...`, or
+    `refused: not authorised` / `busy ...`. Create logs the comment quoted and cut to 40 characters.
+    Delete logs the name quoted. polkit errors are logged before they count as "not authorised".
+  - **[c] needed ~3 presses, and clicks didn't focus the `>` line.** Cause, from libcosmic's
+    `text_input` (03d7dcb): Esc or Tab in the input sets its internal `is_read_only`, and for a plain
+    input the widget copies that state back on every rebuild. A click only clears it when the input
+    isn't focused, but `always_active` keeps it "focused" permanently. So after any Esc (closing
+    help, cancelling a prompt) the input ignored typing and clicks until something called
+    `text_input::focus`, which does clear it. On top of that, the prompt row added a label widget
+    before the input when a prompt opened, which moved the input to a new spot in the widget tree
+    (a new, fresh state), racing with the focus task.
+    - The row is now always `>`, label, input (the label is a space when there's no prompt), so
+      the input never moves. `on_unfocus` sends `InputUnfocused`, which refocuses at once (clearing
+      read-only). `focus_input()` is now focus followed by move-cursor-to-end. The `c` or `d` that
+      opens a prompt is handled as a command, not typed: in command mode the input's value stays
+      empty, and the next keypress is the first character of the comment.
+    - Not verifiable in unit tests (no widget tree there); the tests cover the model side (one `c`
+      opens an empty prompt, a second `c` is text, losing focus keeps what was typed).
+
 ## Open
 
 - ~~App ID~~ - resolved 2026-09-25, see above.
 - ~~License~~ - resolved 2026-09-25, see above.
 - ~~Icon artwork~~ - resolved 2026-09-25, see above.
-- Phase 4 helper vs. shipping a narrow pkexec wrapper script — decide after Phase 3.
+- ~~Phase 4 helper vs. shipping a narrow pkexec wrapper script — decide after Phase 3.~~ - resolved
+  2026-09-25: the D-Bus helper, see above.
 - ~~`--snapshot-device`: device path or UUID?~~ - resolved 2026-09-25, see above.
 - ~~Does `--scripted` change the `--list` format?~~ - resolved 2026-09-25, see above.
 - No real fixture yet for "configured device, zero snapshots" or for multi-tag rows (`BD` etc.);

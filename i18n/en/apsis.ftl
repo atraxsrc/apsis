@@ -5,7 +5,7 @@ app-keywords =
 tooltip-last = Apsis - last snapshot { $ago }
 tooltip-none = Apsis - no snapshots
 
-waiting = waiting for timeshift (authenticate in the polkit dialog)
+waiting = waiting for timeshift (authenticate if asked)
 not-loaded = press [r] to list snapshots
 empty = no snapshots yet - press [c] to create one
 no-device = no snapshot device selected in Timeshift
@@ -17,6 +17,7 @@ failed-code = timeshift exited with code { $code }
 failed-signal = timeshift was killed by a signal
 failed-auth = not authorised, or the password dialog was dismissed
 failed-other = { $message }
+disk-missing = backup disk not connected ({ $id }): plug it in and press r
 
 pane-snapshots = snapshots
 pane-details = details
@@ -32,6 +33,7 @@ details-comment = comment
 details-none = no snapshot selected
 
 activity-idle = idle
+activity-list-warning = list: { $warning }
 
 help-move = move selection
 help-ends = first / last snapshot

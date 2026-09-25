@@ -10,12 +10,15 @@ repository = "https://github.com/atraxsrc/apsis"
 
 [workspace.dependencies]
 apsis-core = { path = "crates/apsis-core" }
+futures-util = "0.3"
 i18n-embed-fl = "0.10"
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 rust-embed = "8.11"
 thiserror = "2"
 tokio = { version = "1.52.0", features = ["full"] }
 xdgen = "0.1"
+# The same zbus libcosmic uses; async on tokio (the applet's and the helper's runtime).
+zbus = { version = "5.15", default-features = false, features = ["tokio"] }
 
 [workspace.dependencies.i18n-embed]
 version = "0.16"

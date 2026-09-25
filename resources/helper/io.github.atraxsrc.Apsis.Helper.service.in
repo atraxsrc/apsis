@@ -1,0 +1,8 @@
+# D-Bus activation for apsis-helper: the system bus starts it (as root, through systemd)
+# when something calls io.github.atraxsrc.Apsis.Helper. Installed by `just install` to
+# /usr/share/dbus-1/system-services/ with @libexecdir@ filled in.
+[D-BUS Service]
+Name=io.github.atraxsrc.Apsis.Helper
+Exec=@libexecdir@/apsis-helper
+User=root
+SystemdService=apsis-helper.service

@@ -8,10 +8,14 @@ use crate::model::{Mode, Snapshot, SnapshotList, Tag, parse_snapshot_name};
 /// See `docs/TIMESHIFT-CLI.md` for the format. Lines are matched by content, not by column
 /// position, and `GLib` warnings are skipped wherever they appear.
 ///
+/// Timeshift's own `E:`/`W:` lines, anywhere, and table lines that aren't snapshot rows don't
+/// fail the list: they're collected in [`SnapshotList::warnings`]. Whether Timeshift failed is
+/// decided by its exit code, not here.
+///
 /// # Errors
 ///
 /// [`Error::UnrecognisedOutput`] when the output has neither a snapshot table nor
-/// "No snapshots found", and [`Error::BadRow`] when a line in the table isn't a snapshot row.
+/// "No snapshots found".
 pub fn parse_list(output: &str) -> Result<SnapshotList> {
     let mut list = SnapshotList::default();
     let mut recognised = false;
@@ -22,16 +26,21 @@ pub fn parse_list(output: &str) -> Result<SnapshotList> {
         if line.is_empty() || is_glib_message(line) {
             continue;
         }
+        if is_diagnostic(line) {
+            list.warnings.push(line.to_owned());
+            continue;
+        }
 
         if in_table {
             if line.chars().all(|c| c == '-') {
                 continue;
             }
-            let snapshot = parse_row(line).ok_or_else(|| Error::BadRow {
-                line: index + 1,
-                text: raw.to_owned(),
-            })?;
-            list.snapshots.push(snapshot);
+            match parse_row(line) {
+                Some(snapshot) => list.snapshots.push(snapshot),
+                None => list
+                    .warnings
+                    .push(format!("line {}: not a snapshot row: {line}", index + 1)),
+            }
         } else if line == "No snapshots found" {
             recognised = true;
         } else if is_table_header(line) {
@@ -58,6 +67,40 @@ pub fn parse_list(output: &str) -> Result<SnapshotList> {
 /// `** (process:N): CRITICAL **: ...` or `(timeshift:N): GLib-WARNING **: ...`
 fn is_glib_message(line: &str) -> bool {
     (line.starts_with("** (") || line.starts_with('(')) && line.contains(" **: ")
+}
+
+/// `E: <message>` or `W: <message>`: Timeshift's own errors and warnings. It prints them on
+/// stdout, mixed with its normal output.
+pub(crate) fn is_diagnostic(line: &str) -> bool {
+    line.starts_with("E: ") || line.starts_with("W: ")
+}
+
+/// What Timeshift said went wrong, from a failed run: its `E:`/`W:` lines from stdout, then
+/// stderr's lines (without `GLib` noise). If neither has anything, stdout's lines, so there's
+/// always something to show.
+pub(crate) fn failure_output(stdout: &str, stderr: &str) -> Vec<String> {
+    let meaningful = |line: &&str| !line.is_empty() && !is_glib_message(line);
+    let mut lines: Vec<&str> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| is_diagnostic(line))
+        .chain(stderr.lines().map(str::trim).filter(meaningful))
+        .collect();
+    if lines.is_empty() {
+        lines = stdout.lines().map(str::trim).filter(meaningful).collect();
+    }
+    lines.into_iter().map(str::to_owned).collect()
+}
+
+/// The device in `E: Device not found: '<device>'`.
+pub(crate) fn device_not_found(line: &str) -> Option<String> {
+    let rest = line.split_once("Device not found")?.1;
+    let rest = rest.trim_start_matches(':').trim();
+    let device = rest
+        .strip_prefix('\'')
+        .and_then(|quoted| quoted.split_once('\''))
+        .map_or(rest, |(device, _)| device);
+    Some(device.to_owned())
 }
 
 /// `Num     Name                 Tags  Description`

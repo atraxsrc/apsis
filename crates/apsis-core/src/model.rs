@@ -88,6 +88,10 @@ pub struct SnapshotList {
     pub uuid: Option<String>,
     pub mode: Option<Mode>,
     pub snapshots: Vec<Snapshot>,
+    /// What Timeshift complained about in an otherwise good list: its `E:`/`W:` lines (e.g.
+    /// `E: Failed to remove directory` after a stale mount), and table lines that weren't
+    /// snapshot rows. Shown to the user; they don't fail the list.
+    pub warnings: Vec<String>,
 }
 
 impl SnapshotList {

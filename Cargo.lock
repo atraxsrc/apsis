@@ -211,8 +211,20 @@ dependencies = [
 name = "apsis-core"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "jiff",
  "thiserror 2.0.21",
+ "tokio",
+ "zbus",
+]
+
+[[package]]
+name = "apsis-helper"
+version = "0.1.0"
+dependencies = [
+ "apsis-core",
+ "tokio",
+ "zbus",
 ]
 
 [[package]]

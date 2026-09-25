@@ -34,8 +34,15 @@ come back to.
 ```sh
 just            # build release
 just run        # run for development
-sudo just install
+sudo just install    # the applet and apsis-helper (see below)
+sudo just uninstall
 ```
+
+`just install` also installs `apsis-helper`: a small root D-Bus service that runs Timeshift for
+the applet, with polkit deciding who may do what. Listing needs no password; creating or
+deleting asks once ("Apsis needs your password…") and polkit remembers it for a few minutes.
+Without the helper the applet falls back to `pkexec`, which asks every time. Files and design:
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## License
 

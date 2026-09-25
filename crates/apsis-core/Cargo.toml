@@ -7,5 +7,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+futures-util.workspace = true
 jiff.workspace = true
 thiserror.workspace = true
+zbus.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }

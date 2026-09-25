@@ -1,0 +1,19 @@
+[package]
+name = "apsis-helper"
+description = "Root D-Bus service that runs Timeshift for Apsis, guarded by polkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "apsis-helper"
+path = "src/main.rs"
+
+[dependencies]
+apsis-core.workspace = true
+tokio.workspace = true
+zbus.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

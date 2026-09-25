@@ -34,7 +34,8 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
 - Enter or a double-click makes the details pane active; Enter again, Esc or a click on a row
   goes back to the list.
 - Activity pane: the running create/delete with a spinner (accent border while it runs), else the
-  last result, else `idle` (dimmed).
+  last result, else `idle` (dimmed). A failure shows Timeshift's last lines. Below that, any
+  warnings from the last list (`list: E: Failed to remove directory`) in the theme's warning colour.
 - The `>` line stays the input line (comment, `[y/N]`, and the `timeshift --list` spinner). The
   key hints are the footer, the last row.
 
@@ -69,7 +70,8 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
 | empty | `no snapshots yet — press [c] to create one` |
 | running | `creating snapshot… ⠹` / `deleting <name>… ⠹` in the activity pane, keys disabled except Esc (does not cancel root op) |
 | result | in the activity pane: `snapshot created` / `deleted <name>` (dimmed), or `create failed: <last stderr line>` (error colour); stays until the next create/delete |
-| error | `error:` + last lines of stderr, `[r]etry` |
+| error | `error:` + Timeshift's last lines (its `E:`/`W:` lines and stderr), `[r]etry` |
+| disk missing | `backup disk not connected (UUID 1a2b…): plug it in and press r` (list error, or the create/delete result) |
 | not installed | `timeshift not found — install it or wait for the native backend` |
 
 ## Panel button

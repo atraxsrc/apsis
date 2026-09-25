@@ -9,6 +9,10 @@ use jiff::civil::{DateTime, date};
 const DEVICE: &str = include_str!("fixtures/list-rsync-device.txt");
 const PLAIN: &str = include_str!("fixtures/list-rsync-plain.txt");
 const UNCONFIGURED: &str = include_str!("fixtures/list-unconfigured.txt");
+/// The device fixture plus the trailing line a stale mount leaves (user's report, 2026-09-25).
+const STALE_MOUNT: &str = include_str!("fixtures/list-rsync-stale-mount.txt");
+/// Rebuilt from the lines the user quoted for an unplugged disk (not a full capture).
+const DEVICE_NOT_FOUND: &str = include_str!("fixtures/list-device-not-found.txt");
 
 const HEADER: &str = concat!(
     "Device : /dev/sdX1\n",
@@ -170,17 +174,52 @@ fn glib_warnings_inside_table_are_ignored() {
 }
 
 #[test]
-fn malformed_row_is_reported_with_line_number() {
+fn malformed_row_becomes_a_warning_with_its_line_number() {
     // HEADER is 9 lines, so the bad row is line 11.
     let output =
         format!("{HEADER}0    >  2026-09-24_03-00-01  O     \n1    >  2026-09-24_03-00  O     \n");
-    match parse_list(&output) {
-        Err(Error::BadRow { line, text }) => {
-            assert_eq!(line, 11);
-            assert_eq!(text, "1    >  2026-09-24_03-00  O     ");
-        }
-        other => panic!("expected BadRow, got {other:?}"),
+    let list = parse_list(&output).unwrap();
+    assert_eq!(list.snapshots.len(), 1);
+    assert_eq!(
+        list.warnings,
+        ["line 11: not a snapshot row: 1    >  2026-09-24_03-00  O"]
+    );
+}
+
+#[test]
+fn trailing_timeshift_error_after_the_table_is_a_warning() {
+    // Real case: a stale /run/timeshift/<pid>/backup mount. Timeshift lists fine, exits 0, and
+    // adds this line after the table (line 17).
+    let list = parse_list(STALE_MOUNT).unwrap();
+    assert_eq!(list.snapshots.len(), 5);
+    assert_eq!(
+        list.uuid.as_deref(),
+        Some("00000000-0000-0000-0000-000000000000")
+    );
+    assert_eq!(list.warnings, ["E: Failed to remove directory"]);
+}
+
+#[test]
+fn timeshift_errors_and_warnings_anywhere_are_collected() {
+    let output = format!("W: something odd\n{HEADER}E: inside the table\n");
+    let list = parse_list(&output).unwrap();
+    assert_eq!(list.warnings, ["W: something odd", "E: inside the table"]);
+    assert!(list.snapshots.is_empty());
+}
+
+#[test]
+fn clean_lists_have_no_warnings() {
+    for output in [DEVICE, UNCONFIGURED] {
+        assert!(parse_list(output).unwrap().warnings.is_empty());
     }
+}
+
+#[test]
+fn device_not_found_output_is_not_a_list() {
+    assert!(matches!(
+        parse_list(DEVICE_NOT_FOUND),
+        Err(Error::UnrecognisedOutput)
+    ));
 }
 
 #[test]
