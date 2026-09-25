@@ -30,6 +30,8 @@ features = ["fluent-system", "desktop-requester"]
 
 [workspace.dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic.git"
+# No `rev`: Cargo.lock pins the commit (CI builds `--locked`). A `rev` here would make
+# cosmic-panel-config's unpinned libcosmic a second source, see docs/DECISIONS.md.
 # See https://github.com/pop-os/libcosmic/blob/master/Cargo.toml for available features.
 features = [
     # Applet support

@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # libcosmic's build dependencies (its README and CI), plus rsync, which the native
+      # backend's and file-level restore's tests run on temp folders.
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkgconf libexpat1-dev libfontconfig-dev libfreetype-dev \
+            libxkbcommon-dev libwayland-dev rsync
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      # Nothing here needs root. The ext4-image tests only run when APSIS_EXT4_MNT is set
+      # (`just test-ext4`, a loop mount needs root), so they're skipped by leaving it unset.
+      - name: cargo test
+        run: cargo test --locked --workspace

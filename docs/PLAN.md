@@ -332,3 +332,6 @@ original, and the journal shows each call.
 
 - README screenshots, metainfo, `just vendor` tarball, tag `v0.1.0` (user pushes).
 - Draft the cosmic-project-collection entry for `applets.ron`; the user opens the PR.
+- **Status: prep done 2026-09-26** (libcosmic pinned by `Cargo.lock`, CI, SECURITY.md, README, metainfo,
+  CHANGELOG, collection drafts). Left for the user: see the checklist in `docs/RELEASE.md`
+  (vendor tarball, tag, release, collection PR).

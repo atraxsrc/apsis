@@ -5,14 +5,36 @@
   <project_license>GPL-3.0-only</project_license>
   <name>Apsis</name>
   <summary>Timeshift-style system snapshots for the COSMIC™ desktop</summary>
+  <developer id="io.github.atraxsrc">
+    <name>atraxsrc</name>
+  </developer>
+  <description>
+    <p>
+      Apsis is a panel applet for the COSMIC desktop that lists, creates and deletes system
+      snapshots through Timeshift. Its popup looks like a small terminal, works with the
+      keyboard or the mouse, and follows the live COSMIC theme.
+    </p>
+    <ul>
+      <li>Snapshot list with tags, comments and a details pane</li>
+      <li>Create and delete snapshots, with one password prompt per few minutes through a small polkit-guarded helper</li>
+      <li>Timeshift settings: backup device, schedules, home folders and filters</li>
+      <li>Vim-style keys and a command line, or the mouse</li>
+      <li>Also opens as a resizable window from the app launcher</li>
+      <li>Experimental: a native rsync backend that creates Timeshift-compatible snapshots, with a dry run first</li>
+      <li>Experimental: browse a snapshot's files and restore them to a folder in your home, or back to their original place</li>
+    </ul>
+    <p>
+      Timeshift must be installed and set up. Full-system restore is left to Timeshift.
+    </p>
+  </description>
   <icon type="stock">io.github.atraxsrc.Apsis</icon>
+  <url type="homepage">https://github.com/atraxsrc/apsis</url>
+  <url type="bugtracker">https://github.com/atraxsrc/apsis/issues</url>
   <url type="vcs-browser">https://github.com/atraxsrc/apsis</url>
   <launchable type="desktop-id">io.github.atraxsrc.Apsis.desktop</launchable>
   <provides>
     <id>com.system76.CosmicApplet</id>
-    <binaries>
-      <binary>apsis</binary>
-    </binaries>
+    <binary>apsis</binary>
   </provides>
   <requires>
     <display_length compare="ge">360</display_length>
@@ -24,9 +46,37 @@
   </supports>
   <categories>
     <category>COSMIC</category>
+    <category>System</category>
+    <category>Utility</category>
   </categories>
   <keywords>
     <keyword>COSMIC</keyword>
+    <keyword>snapshot</keyword>
+    <keyword>backup</keyword>
+    <keyword>restore</keyword>
+    <keyword>timeshift</keyword>
+    <keyword>rsync</keyword>
   </keywords>
+  <screenshots>
+    <screenshot type="default">
+      <caption>The popup: snapshot list, details and activity</caption>
+      <image type="source" width="1538" height="1036">https://raw.githubusercontent.com/atraxsrc/apsis/v0.1.0/docs/screenshot.png</image>
+    </screenshot>
+  </screenshots>
+  <releases>
+    <release version="0.1.0" date="2026-09-26">
+      <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.1.0</url>
+      <description>
+        <p>First release.</p>
+        <ul>
+          <li>List, create and delete Timeshift snapshots from a COSMIC panel applet</li>
+          <li>Terminal-style popup and window mode, keyboard and mouse</li>
+          <li>Timeshift settings view</li>
+          <li>apsis-helper: a D-Bus service guarded by polkit</li>
+          <li>Experimental native rsync backend and file-level restore</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
   <content_rating type="oars-1.1" />
 </component>

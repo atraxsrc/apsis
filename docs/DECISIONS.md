@@ -705,6 +705,29 @@ Append-only. Newest at the bottom. Format: date — decision — why.
   selected row still reads as the cursor). The details pane adds `restore   marked`. The
   double-click on a file still marks in place.
 
+- 2026-09-26 - **Phase 7 prep (v0.1.0), nothing tagged or pushed.**
+  - libcosmic pin: tried `rev = "03d7dcb8..."` (the commit `Cargo.lock` already had), then
+    dropped it at the user's request. `cosmic-panel-config` (pulled in by the `applet`
+    feature) asks for libcosmic's git URL with no rev, so a `rev` put `cosmic-config`,
+    `cosmic-config-derive`, `iced_core`, `iced_futures` and `build_helpers` in `Cargo.lock`
+    twice (same commit, two sources), and `cargo vendor` refuses one name and version from
+    two sources. A `[patch]` to the same URL with a rev is refused by cargo ("patches must
+    point to different sources"). So the pin is `Cargo.lock` plus `--locked` in CI; bump with
+    `cargo update -p libcosmic` on purpose.
+  - CI (`.github/workflows/ci.yml`): ubuntu-latest, libcosmic's build deps from its README and
+    CI (`pkgconf libexpat1-dev libfontconfig-dev libfreetype-dev libxkbcommon-dev
+    libwayland-dev`), plus `rsync` for the native/restore tests. `--locked` so the pin holds.
+    No test needs root; the ext4 tests only run with `APSIS_EXT4_MNT` set, which CI doesn't.
+  - Metainfo: `<binaries>` inside `<provides>` (from the template) replaced by `<binary>`,
+    which AppStream knows. `appstreamcli validate` still warns about the `COSMIC` category;
+    kept, as COSMIC applets use it. Screenshot and release URLs point at the `v0.1.0` tag, so
+    they resolve once it's pushed.
+  - `just tag` isn't used for 0.1.0: the version is already 0.1.0 (empty commit) and it tags
+    without the `v`. The manual steps are in `docs/RELEASE.md`.
+  - The collection entries in `docs/RELEASE.md` are drafted without reading
+    `applets.ron` / `applications.ron` (no network); their fields must be checked against the
+    real files before the PR.
+
 ## Open
 
 - ~~App ID~~ - resolved 2026-09-25, see above.
