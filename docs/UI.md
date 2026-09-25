@@ -100,12 +100,15 @@ password (polkit `browse`, cached a few minutes).
   same, or a folder that exists, dimmed), `*` if marked, the name (`/` after folders,
   `-> target` for symlinks), the size of files. Folders first, then by name.
 - Keys: j/k/↑/↓/Home/End move; Enter or `l` into a folder; Backspace or `h` up (selecting the
-  folder you came from); space marks or unmarks and moves down (marks are kept across
-  folders); `r` reads the folder again; `R` restores; Esc back to the snapshot list. Click
-  selects, double-click goes into a folder or marks a file.
+  folder you came from); space marks or unmarks and stays on the row; `J` marks or unmarks
+  and moves down, for marking a run of rows (marks are kept across folders); `r` reads the
+  folder again; `R` restores; Esc back to the snapshot list. Click selects, double-click goes
+  into a folder or marks a file.
+- Marked rows: an accent `*` and a fainter accent background than the selected row (the
+  selection's background wins on the selected row).
 - Details: path, type, size, modified, mode (`ls -l` style), owner, link target, and `live`:
   not on the running system / same size and time / folder exists (contents not compared) /
-  differs (with both sizes and times for a file).
+  differs (with both sizes and times for a file). A marked entry adds `restore   marked`.
 - `R` restores the marked entries, or the selected one if none are marked:
   1. `> restore 3 item(s) to [f]older (~/Apsis-restored) or [o]riginal? _`; Enter with nothing
      or `f` is folder mode, `o` original, anything else cancels.

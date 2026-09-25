@@ -320,12 +320,13 @@ original, and the journal shows each call.
 - Never restore the running root live. Stage the restore, require typing the snapshot name,
   then reboot. Pop!_OS uses systemd-boot (no GRUB), so no grub-btrfs style boot entries.
 
-## Polish (not started)
+## Polish
 
-- Browser: space marks and moves the cursor down, so the details pane shows the next row and
+- ~~Browser: space marks and moves the cursor down, so the details pane shows the next row and
   the mark looks like it failed. Keep the cursor on the marked row (or use a separate
   mark-and-move key), highlight marked rows more clearly, and show `marked` in the details
-  pane.
+  pane.~~ - done 2026-09-26: space marks in place, `J` marks and moves down, marked rows get
+  a faint accent background, details show `restore   marked`.
 
 ## Phase 7 — Release
 

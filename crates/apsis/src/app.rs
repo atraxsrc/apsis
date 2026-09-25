@@ -372,6 +372,8 @@ pub enum KeyAction {
     /// Browser: `h` or Backspace goes up a folder, `l` into one.
     Back,
     Into,
+    /// Browser: `J` marks or unmarks, then moves down (space marks in place).
+    MarkDown,
     /// Browser: `R` restores the marked entries.
     Restore,
     /// Tab: the details pane of the selected snapshot.
@@ -948,6 +950,7 @@ impl AppModel {
             // Browser keys.
             | KeyAction::Back
             | KeyAction::Into
+            | KeyAction::MarkDown
             | KeyAction::Restore => None,
         };
         let Some(index) = target else {
@@ -1409,6 +1412,10 @@ impl AppModel {
                 return self.fetch_browse(path);
             }
             KeyAction::Toggle => browser.toggle_mark(),
+            KeyAction::MarkDown => {
+                browser.toggle_mark_and_move();
+                return scroll_to(&BROWSE_LIST_ID, browser.cursor, browser.entries().len());
+            }
             KeyAction::Restore if !browser.is_loading() => {
                 let count = browser.targets().len();
                 if count > 0 {
@@ -2673,12 +2680,13 @@ fn browse_row<'a>(browser: &Browser, index: usize, entry: &'a Entry) -> Element<
     } else {
         String::new()
     };
+    let marked = browser.is_marked(entry);
     let line = widget::row::with_children(vec![
         monotext(if selected { "▸" } else { " " })
             .class(theme::Text::Accent)
             .into(),
         marker.into(),
-        monotext(if browser.is_marked(entry) { "*" } else { " " })
+        monotext(if marked { "*" } else { " " })
             .class(theme::Text::Accent)
             .into(),
         monotext(name)
@@ -2695,6 +2703,8 @@ fn browse_row<'a>(browser: &Browser, index: usize, entry: &'a Entry) -> Element<
         .padding([2, 6]);
     if selected {
         row = row.class(theme::Container::custom(selected_row));
+    } else if marked {
+        row = row.class(theme::Container::custom(marked_row));
     }
     widget::mouse_area(row)
         .on_press(Message::BrowseSelect(index))
@@ -2730,6 +2740,9 @@ fn entry_details(browser: &Browser, entry: &Entry) -> Element<'static, Message> 
         fields.push((fl!("details-link"), entry.target.clone()));
     }
     fields.push((fl!("details-live"), live_text(entry)));
+    if browser.is_marked(entry) {
+        fields.push((fl!("details-restore"), fl!("details-marked")));
+    }
     key_value_rows(fields, DETAILS_KEY_WIDTH)
 }
 
@@ -2912,6 +2925,7 @@ fn help() -> Element<'static, Message> {
         ("Enter l", fl!("help-browse-into")),
         ("⌫ h", fl!("help-browse-up")),
         ("space", fl!("help-browse-mark")),
+        ("J", fl!("help-browse-mark-down")),
         ("R", fl!("help-browse-restore")),
         ("r", fl!("help-browse-reload")),
     ];
@@ -3030,6 +3044,7 @@ fn char_action(c: char) -> Option<KeyAction> {
         'h' => Some(KeyAction::Back),
         'l' => Some(KeyAction::Into),
         'R' => Some(KeyAction::Restore),
+        'J' => Some(KeyAction::MarkDown),
         _ => None,
     }
 }
@@ -3152,6 +3167,21 @@ fn selected_row(theme: &Theme) -> container::Style {
     }
 }
 
+/// A marked browser row that isn't selected: a fainter accent background than the selection.
+fn marked_row(theme: &Theme) -> container::Style {
+    let cosmic = theme.cosmic();
+    container::Style {
+        background: Some(Background::Color(
+            Color::from(cosmic.accent_color()).scale_alpha(0.07),
+        )),
+        border: Border {
+            radius: cosmic.corner_radii.radius_s.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
 /// Symbolic icons in the accent colour, like the accent text beside them.
 fn accent_svg(theme: &Theme) -> iced_svg::Style {
     iced_svg::Style {
@@ -3235,7 +3265,8 @@ mod tests {
         assert_eq!(char_action('l'), Some(KeyAction::Into));
         assert_eq!(char_action('R'), Some(KeyAction::Restore));
         assert_eq!(char_action('z'), None);
-        assert_eq!(char_action('J'), None);
+        assert_eq!(char_action('J'), Some(KeyAction::MarkDown));
+        assert_eq!(char_action('K'), None);
     }
 
     #[test]
@@ -3871,6 +3902,16 @@ mod tests {
         typed(&mut app, " ");
         assert!(
             app.body_title().ends_with("1 marked"),
+            "{}",
+            app.body_title()
+        );
+        // Space stays on the marked row; J marks and moves down.
+        assert_eq!(app.browser.as_ref().unwrap().cursor, 1);
+        typed(&mut app, "k");
+        typed(&mut app, "J");
+        assert_eq!(app.browser.as_ref().unwrap().cursor, 1);
+        assert!(
+            app.body_title().ends_with("2 marked"),
             "{}",
             app.body_title()
         );

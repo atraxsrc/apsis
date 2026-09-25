@@ -120,7 +120,8 @@ impl Browser {
             .unwrap_or(0);
     }
 
-    /// Marks or unmarks the selected entry, then moves down.
+    /// Marks or unmarks the selected entry. The cursor stays on it, so the details pane shows
+    /// what was marked.
     pub fn toggle_mark(&mut self) {
         let Some(path) = self.current_path() else {
             return;
@@ -128,6 +129,11 @@ impl Browser {
         if !self.marked.remove(&path) {
             self.marked.insert(path);
         }
+    }
+
+    /// `J`: marks or unmarks the selected entry, then moves down, for marking a run of rows.
+    pub fn toggle_mark_and_move(&mut self) {
+        self.toggle_mark();
         self.select(self.cursor + 1);
     }
 
@@ -288,7 +294,14 @@ mod tests {
         );
         assert_eq!(browser.targets(), ["/etc"]);
         browser.toggle_mark();
-        assert_eq!(browser.cursor, 1, "space moves down");
+        assert_eq!(browser.cursor, 0, "space stays on the marked row");
+        assert!(browser.is_marked(&browser.entries()[0].clone()));
+        browser.toggle_mark_and_move();
+        assert_eq!(browser.cursor, 1, "J moves down");
+        assert!(browser.marked.is_empty(), "J toggles too");
+        browser.select(0);
+        browser.toggle_mark();
+        browser.select(1);
         browser.enter();
         browser.loaded(
             &at("/opt"),

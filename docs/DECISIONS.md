@@ -697,6 +697,14 @@ Append-only. Newest at the bottom. Format: date — decision — why.
     `rustix` entry in `Cargo.lock` was added by hand for the same reason (1.1.5 was already
     locked, through libcosmic).
 
+- 2026-09-26 - **Polish: browser marks.** Space marks or unmarks and keeps the cursor on the
+  row, so the details pane shows what was just marked. `J` (vim-style, shift+j) marks and
+  moves down, for marking a run; shift+space was the other option, but `J` needs no modifier
+  handling in the key map and doesn't collide with anything (`K` stays unbound). Marked rows
+  that aren't selected get the accent colour at 7% alpha (the selection uses 15%, so the
+  selected row still reads as the cursor). The details pane adds `restore   marked`. The
+  double-click on a file still marks in place.
+
 ## Open
 
 - ~~App ID~~ - resolved 2026-09-25, see above.
