@@ -33,7 +33,7 @@ come back to.
 
 ```sh
 just            # build release
-just run        # run for development
+just run        # run for development (opens in a window)
 sudo just install    # the applet and apsis-helper (see below)
 sudo just uninstall
 ```
@@ -43,6 +43,9 @@ the applet, with polkit deciding who may do what. Listing needs no password; cre
 deleting asks once ("Apsis needs your password…") and polkit remembers it for a few minutes.
 Without the helper the applet falls back to `pkexec`, which asks every time. Files and design:
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+Add the applet to a panel in *Settings → Desktop → Panel → Applets*. The app launcher's
+**Apsis** entry opens the same view in a window (`apsis --window`).
 
 ## License
 

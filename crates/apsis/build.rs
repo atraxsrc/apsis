@@ -16,8 +16,13 @@ fn main() {
         .comment(FluentString("app-comment"))
         .keywords(FluentString("app-keywords"));
 
+    // `app.desktop` is the applet's entry (panel settings only); `launcher.desktop` is the app
+    // launcher's, which opens Apsis in a window.
     let desktop_entry = app
         .expand_desktop(resources.join("app.desktop"), &ctx)
+        .unwrap();
+    let launcher_entry = app
+        .expand_desktop(resources.join("launcher.desktop"), &ctx)
         .unwrap();
     let metainfo = app
         .expand_metainfo(resources.join("app.metainfo.xml"), &ctx)
@@ -27,5 +32,6 @@ fn main() {
     let output = root.join("target/xdgen");
     fs::create_dir_all(&output).unwrap();
     fs::write(output.join("app.desktop"), desktop_entry).unwrap();
+    fs::write(output.join("launcher.desktop"), launcher_entry).unwrap();
     fs::write(output.join("app.metainfo.xml"), metainfo).unwrap();
 }

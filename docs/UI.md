@@ -92,6 +92,23 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
   No "Quit": the panel owns the applet process. Only one of popup and menu is open at a time.
   Esc closes the menu.
 
+## Window mode
+
+`apsis --window` shows the popup's UI (header, panes, activity, `>` line, footer) in a normal
+window instead of a panel button. The app launcher's entry (`io.github.atraxsrc.Apsis.Window.desktop`,
+`Exec=apsis --window`) starts it that way; the applet's own entry is `NoDisplay=true`, so it only
+shows in the panel settings.
+
+- Started outside cosmic-panel (launcher, terminal, `just run`), `apsis` opens the window even
+  without `--window`: on its own the panel button would be a tiny square. "In a panel" is
+  libcosmic's own test: cosmic-panel sets `COSMIC_PANEL_NAME` for its applets.
+- COSMIC header bar with the title `Apsis` and a close button; no maximize or minimize.
+- Fixed 720 x 520 (min size = max size) and not resizable, so COSMIC floats it instead of tiling.
+  The snapshots and details panes fill the height; the list scrolls past what fits.
+- Same keys and focus as the popup: command keys work at once, `[c]` focuses the `>` line. Esc
+  backs out of a prompt or overlay first, then closes the window (and quits).
+- Lists as soon as it opens.
+
 ## About view
 
 Shown inside the popup, like help and details; Esc goes back to the list.

@@ -355,6 +355,30 @@ Append-only. Newest at the bottom. Format: date — decision — why.
       empty, and the next keypress is the first character of the comment.
     - Not verifiable in unit tests (no widget tree there); the tests cover the model side (one `c`
       opens an empty prompt, a second `c` is text, losing focus keeps what was typed).
+- 2026-09-25 - Window mode (`apsis --window`), after the user reported that starting Apsis from
+  the app launcher showed only a tiny square with the panel button. Written and unit-tested by
+  Claude; the user tested the window and it works.
+  - **Panel detection**, from libcosmic 03d7dcb: `applet::Context::default()` reads
+    `COSMIC_PANEL_NAME` (set by cosmic-panel for its applets) into `panel_type`, and libcosmic's
+    own `autosize_window` treats `PanelType::Other("")` (unset or empty) as "not in a panel".
+    `main.rs` uses the same test: outside a panel, or with `--window`, Apsis runs
+    `cosmic::app::run` instead of `cosmic::applet::run`. So `just run` now opens the window.
+  - One `AppModel` with a `Mode` flag, not a second app. In window mode `popup` holds the main
+    window's id, so key routing, the spinner and the `>` line focus work exactly as in the popup.
+    Esc's last step is `window::close` instead of `destroy_popup`; closing the main window quits
+    (libcosmic's `exit_on_main_window_closed`). `view()` shows the popup's contents
+    (`surface()`), the panes fill the height instead of 5-8 rows, and the window keeps libcosmic's
+    opaque default style instead of the applet's transparent one.
+  - Size 720 x 520 with min = max and `resizable(None)`, so COSMIC floats it. Header bar kept
+    (title, close, drag to move), without maximize and minimize.
+  - Launcher entry `resources/launcher.desktop`, expanded by `build.rs` like the applet's entry
+    and installed as `io.github.atraxsrc.Apsis.Window.desktop`. The applet's entry keeps its file
+    name (panel configs refer to it). The window's app ID is still `io.github.atraxsrc.Apsis`;
+    `StartupWMClass` in the launcher entry points the dock at it. If the dock picks the applet's
+    entry instead, launching from there still opens the window (outside the panel).
+  - The applet's entry already had `NoDisplay=true` (from the template), in the source and in
+    `target/xdgen/app.desktop`. If the launcher still showed it, the cause is elsewhere (an older
+    installed copy, or a launcher ignoring `NoDisplay`); not verified by Claude.
 
 ## Open
 

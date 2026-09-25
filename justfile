@@ -6,6 +6,8 @@ prefix := '/usr'
 
 metainfo := appid + '.metainfo.xml'
 desktop := appid + '.desktop'
+# The app launcher's entry (`apsis --window`); the applet's entry above is panel-only.
+launcher := appid + '.Window.desktop'
 
 # Installation paths
 base-dir := absolute_path(clean(rootdir / prefix))
@@ -13,6 +15,7 @@ cargo-target-dir := env('CARGO_TARGET_DIR', 'target')
 metainfo-dst := base-dir / 'share' / 'metainfo' / metainfo
 bin-dst := base-dir / 'bin' / name
 desktop-dst := base-dir / 'share' / 'applications' / desktop
+launcher-dst := base-dir / 'share' / 'applications' / launcher
 icons-dir := base-dir / 'share' / 'icons' / 'hicolor'
 icon-dst := icons-dir / 'scalable' / 'apps' / appid + '.svg'
 icon-symbolic-dst := icons-dir / 'symbolic' / 'apps' / appid + '-symbolic.svg'
@@ -71,6 +74,7 @@ run *args:
 install:
     install -Dm0755 {{ cargo-target-dir / 'release' / name }} {{bin-dst}}
     install -Dm0644 {{ 'target' / 'xdgen' / 'app.desktop' }} {{desktop-dst}}
+    install -Dm0644 {{ 'target' / 'xdgen' / 'launcher.desktop' }} {{launcher-dst}}
     install -Dm0644 {{ 'target' / 'xdgen' / 'app.metainfo.xml' }} {{metainfo-dst}}
     install -Dm0644 {{ 'resources' / 'icons' / 'hicolor' / 'scalable' / 'apps' / appid + '.svg' }} {{icon-dst}}
     install -Dm0644 {{ 'resources' / 'icons' / 'hicolor' / 'symbolic' / 'apps' / appid + '-symbolic.svg' }} {{icon-symbolic-dst}}
@@ -86,6 +90,7 @@ uninstall:
     if [ -z '{{rootdir}}' ]; then systemctl stop {{helper}}.service || true; fi
     rm -f {{helper-dst}} {{dbus-service-dst}} {{systemd-unit-dst}} {{dbus-policy-dst}} {{polkit-dst}}
     {{reload-system}}
+    rm -f {{launcher-dst}}
     rm {{bin-dst}} {{desktop-dst}} {{metainfo-dst}} {{icon-dst}} {{icon-symbolic-dst}}
 
 # Vendor dependencies locally

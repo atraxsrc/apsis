@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Apsis
+Comment=Timeshift-style system snapshots for the COSMIC™ desktop
+Type=Application
+Icon=io.github.atraxsrc.Apsis
+Exec=apsis --window
+Terminal=false
+StartupNotify=true
+StartupWMClass=io.github.atraxsrc.Apsis
+Categories=System;Utility;
+Keywords=snapshot;backup;timeshift;

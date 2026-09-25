@@ -18,8 +18,8 @@ use cosmic::iced::platform_specific::shell::wayland::commands::popup::{destroy_p
 use cosmic::iced::widget::scrollable::{Direction, RelativeOffset, Scrollbar, snap_to};
 use cosmic::iced::widget::svg as iced_svg;
 use cosmic::iced::widget::text::{self as iced_text, Ellipsize, Wrapping};
-use cosmic::iced::{Alignment, Background, Border, Color, Length, Limits, Padding, Subscription};
-use cosmic::iced::{event, mouse, time, window::Id};
+use cosmic::iced::{Alignment, Background, Border, Color, Length, Limits, Padding, Size};
+use cosmic::iced::{Subscription, event, mouse, time, window, window::Id};
 use cosmic::prelude::*;
 use cosmic::widget::text::{body, monotext};
 use cosmic::widget::{self, container, icon};
@@ -31,6 +31,9 @@ use crate::fmt;
 
 /// Popup width in logical pixels (UI.md: ~720, room for the list and details side by side).
 const POPUP_WIDTH: f32 = 720.0;
+/// Window mode: the popup's width, and a fixed height (the panes fill it). Fixed size, so COSMIC
+/// floats the window instead of tiling it.
+const WINDOW_SIZE: Size = Size::new(POPUP_WIDTH, 520.0);
 /// Width of the right-click menu.
 const MENU_WIDTH: f32 = 240.0;
 /// Height of one snapshot row: monotext line height (20) plus vertical padding.
@@ -79,11 +82,37 @@ static DEBUG_KEYS: LazyLock<bool> =
 
 type Cli = TimeshiftCli<PkexecRunner>;
 
-/// The applet: a panel button and a terminal-style popup listing Timeshift snapshots.
+/// How Apsis was started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Started by cosmic-panel: a panel button that opens the popup.
+    Applet,
+    /// `apsis --window`, or started outside the panel: the popup's UI in a normal window.
+    Window,
+}
+
+/// Runs the popup's UI in a normal, fixed-size window. Esc closes it.
+pub fn run_window() -> cosmic::iced::Result {
+    let settings = cosmic::app::Settings::default()
+        .size(WINDOW_SIZE)
+        .size_limits(
+            Limits::NONE
+                .min_width(WINDOW_SIZE.width)
+                .max_width(WINDOW_SIZE.width)
+                .min_height(WINDOW_SIZE.height)
+                .max_height(WINDOW_SIZE.height),
+        )
+        .resizable(None);
+    cosmic::app::run::<AppModel>(settings, Mode::Window)
+}
+
+/// The applet: a panel button and a terminal-style popup listing Timeshift snapshots. In
+/// [`Mode::Window`] the main window takes the popup's place.
 pub struct AppModel {
     /// Application state which is managed by the COSMIC runtime.
     core: cosmic::Core,
-    /// The popup id.
+    mode: Mode,
+    /// The popup id. In window mode, the main window's id while it's open.
     popup: Option<Id>,
     /// The right-click menu's popup id. At most one of `popup` and `menu` is open.
     menu: Option<Id>,
@@ -291,7 +320,7 @@ pub enum Message {
 
 impl cosmic::Application for AppModel {
     type Executor = cosmic::executor::Default;
-    type Flags = ();
+    type Flags = Mode;
     type Message = Message;
 
     /// Unique identifier in RDNN (reverse domain name notation) format.
@@ -305,17 +334,15 @@ impl cosmic::Application for AppModel {
         &mut self.core
     }
 
-    fn init(
-        core: cosmic::Core,
-        _flags: Self::Flags,
-    ) -> (Self, Task<cosmic::Action<Self::Message>>) {
+    fn init(core: cosmic::Core, mode: Self::Flags) -> (Self, Task<cosmic::Action<Self::Message>>) {
         let config = cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
             .map(|context| match Config::get_entry(&context) {
                 Ok(config) | Err((_, config)) => config,
             })
             .unwrap_or_default();
-        let app = AppModel {
+        let mut app = AppModel {
             core,
+            mode,
             popup: None,
             menu: None,
             config,
@@ -331,7 +358,11 @@ impl cosmic::Application for AppModel {
             overlay: Overlay::None,
             icon: symbolic_icon(),
         };
-        (app, Task::none())
+        let task = match mode {
+            Mode::Applet => Task::none(),
+            Mode::Window => app.open_window(),
+        };
+        (app, task)
     }
 
     fn on_close_requested(&self, id: Id) -> Option<Message> {
@@ -340,7 +371,12 @@ impl cosmic::Application for AppModel {
 
     /// The panel button, with a tooltip saying how old the newest snapshot is. Left click opens
     /// the popup, right click the menu. The button itself only reacts to the left button.
+    ///
+    /// In window mode, the popup's UI instead.
     fn view(&self) -> Element<'_, Self::Message> {
+        if self.mode == Mode::Window {
+            return self.surface();
+        }
         let button = self
             .core
             .applet
@@ -364,36 +400,9 @@ impl cosmic::Application for AppModel {
         if self.menu == Some(id) {
             return self.menu_view();
         }
-        // The details pane is active after Enter or a double-click; otherwise the left pane is.
-        let details_active = self.overlay == Overlay::Details;
-        let panes = widget::row::with_children(vec![
-            pane(
-                self.body_title(),
-                !details_active,
-                Length::FillPortion(3),
-                self.body(),
-            ),
-            pane(
-                fl!("pane-details"),
-                details_active,
-                Length::FillPortion(2),
-                self.details(),
-            ),
-        ])
-        .spacing(8);
-        let content = widget::column::with_children(vec![
-            self.header(),
-            panes.into(),
-            self.activity(),
-            self.prompt(),
-            self.hints(),
-        ])
-        .spacing(6)
-        .padding([10, 12]);
-
         self.core
             .applet
-            .popup_container(content)
+            .popup_container(self.surface())
             .limits(
                 Limits::NONE
                     .min_width(POPUP_WIDTH)
@@ -510,13 +519,35 @@ impl cosmic::Application for AppModel {
         Task::none()
     }
 
+    /// The applet's transparent surfaces; a window keeps the default opaque background.
     fn style(&self) -> Option<cosmic::iced::theme::Style> {
-        Some(cosmic::applet::style())
+        match self.mode {
+            Mode::Applet => Some(cosmic::applet::style()),
+            Mode::Window => None,
+        }
     }
 }
 
 // Update helpers.
 impl AppModel {
+    /// Window mode: the main window is the popup. Lists at once, and focuses the `>` line so
+    /// typing works straight away (command keys work without it too, see [`key_action`]).
+    fn open_window(&mut self) -> Task<cosmic::Action<Message>> {
+        self.core.window.show_maximize = false;
+        self.core.window.show_minimize = false;
+        self.core.set_header_title(fl!("app-title"));
+        self.popup = self.core.main_window_id();
+        Task::batch([focus_input(), self.start_list()])
+    }
+
+    /// Closes the popup, or in window mode the window (which quits Apsis).
+    fn close_surface(&self, id: Id) -> Task<cosmic::Action<Message>> {
+        match self.mode {
+            Mode::Applet => destroy_popup(id),
+            Mode::Window => window::close(id),
+        }
+    }
+
     fn toggle_popup(&mut self) -> Task<cosmic::Action<Message>> {
         if let Some(popup) = self.popup.take() {
             self.reset_popup_state();
@@ -806,7 +837,7 @@ impl AppModel {
         Task::batch(tasks)
     }
 
-    /// Esc cancels a prompt, then closes the overlay, then the popup.
+    /// Esc cancels a prompt, then closes the overlay, then the popup (or the window).
     fn escape(&mut self) -> Task<cosmic::Action<Message>> {
         if self.prompt != Prompt::Command {
             self.prompt = Prompt::Command;
@@ -822,7 +853,7 @@ impl AppModel {
         match self.popup.take() {
             Some(popup) => {
                 self.reset_popup_state();
-                destroy_popup(popup)
+                self.close_surface(popup)
             }
             None => Task::none(),
         }
@@ -860,6 +891,38 @@ impl AppModel {
 
 // View helpers. Everything is monotext; colours come from the theme.
 impl AppModel {
+    /// The popup's contents: header, panes, activity, `>` line and hints. The popup wraps it in a
+    /// popup container; in window mode it fills the window.
+    fn surface(&self) -> Element<'_, Message> {
+        // The details pane is active after Enter or a double-click; otherwise the left pane is.
+        let details_active = self.overlay == Overlay::Details;
+        let panes = widget::row::with_children(vec![
+            pane(
+                self.body_title(),
+                !details_active,
+                Length::FillPortion(3),
+                self.body(),
+            ),
+            pane(
+                fl!("pane-details"),
+                details_active,
+                Length::FillPortion(2),
+                self.details(),
+            ),
+        ])
+        .spacing(8);
+        widget::column::with_children(vec![
+            self.header(),
+            panes.into(),
+            self.activity(),
+            self.prompt(),
+            self.hints(),
+        ])
+        .spacing(6)
+        .padding([10, 12])
+        .into()
+    }
+
     /// ` ~/apsis $ ls --snapshots                 rsync · 3 snapshots`
     fn header(&self) -> Element<'_, Message> {
         let summary = match &self.listing {
@@ -907,8 +970,12 @@ impl AppModel {
         }
     }
 
-    fn pane_height(&self) -> f32 {
-        ROW_HEIGHT * f32::from(self.pane_rows())
+    /// In window mode the panes fill the window's height instead.
+    fn pane_height(&self) -> Length {
+        match self.mode {
+            Mode::Applet => Length::Fixed(ROW_HEIGHT * f32::from(self.pane_rows())),
+            Mode::Window => Length::Fill,
+        }
     }
 
     /// The left pane: the list (or why there is none), help or About.
@@ -930,7 +997,7 @@ impl AppModel {
         };
         container(content)
             .width(Length::Fill)
-            .height(Length::Fixed(self.pane_height()))
+            .height(self.pane_height())
             .into()
     }
 
@@ -948,7 +1015,7 @@ impl AppModel {
         };
         container(content)
             .width(Length::Fill)
-            .height(Length::Fixed(self.pane_height()))
+            .height(self.pane_height())
             .into()
     }
 
@@ -1730,6 +1797,7 @@ mod tests {
         core.set_main_window_id(Some(Id::unique()));
         AppModel {
             core,
+            mode: Mode::Applet,
             popup: None,
             menu: None,
             config: Config::default(),
@@ -1816,6 +1884,46 @@ mod tests {
         let menu = app.menu.expect("menu open");
         send(&mut app, Message::PopupClosed(menu));
         assert!(app.menu.is_none());
+        assert!(app.popup.is_none());
+    }
+
+    /// Window mode, as `init` leaves it: the main window is the popup and a list is running.
+    fn window_model() -> AppModel {
+        let mut app = model();
+        app.mode = Mode::Window;
+        app.listing = Listing::NotLoaded;
+        let _ = app.open_window();
+        app
+    }
+
+    #[test]
+    fn window_mode_uses_the_main_window_and_lists_at_once() {
+        let app = window_model();
+        assert!(app.popup.is_some());
+        assert_eq!(app.popup, app.core.main_window_id());
+        assert!(app.loading);
+    }
+
+    #[test]
+    fn window_mode_takes_keys_for_the_main_window() {
+        let mut app = window_model();
+        app.on_listed(Ok(apsis_core::parse_list(DEVICE_LIST).unwrap()));
+        let window = app.popup.expect("window open");
+        send(&mut app, Message::Key(window, KeyAction::Down));
+        assert_eq!(app.selected, 1);
+        send(&mut app, Message::Key(window, KeyAction::Create));
+        assert_eq!(app.prompt, Prompt::Comment(String::new()));
+    }
+
+    #[test]
+    fn window_mode_esc_backs_out_then_closes_the_window() {
+        let mut app = window_model();
+        let window = app.popup.expect("window open");
+        send(&mut app, Message::ToggleHelp);
+        send(&mut app, Message::Key(window, KeyAction::Escape));
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.popup, Some(window));
+        send(&mut app, Message::Key(window, KeyAction::Escape));
         assert!(app.popup.is_none());
     }
 
