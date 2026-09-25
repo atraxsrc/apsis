@@ -200,6 +200,7 @@ dependencies = [
  "apsis-core",
  "i18n-embed",
  "i18n-embed-fl",
+ "jiff",
  "libcosmic",
  "rust-embed",
  "tokio",

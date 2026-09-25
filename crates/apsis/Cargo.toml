@@ -17,6 +17,8 @@ xdgen.workspace = true
 apsis-core.workspace = true
 i18n-embed.workspace = true
 i18n-embed-fl.workspace = true
+# The tooltip and details need the local time zone.
+jiff = { workspace = true, features = ["tz-system", "tzdb-zoneinfo"] }
 libcosmic.workspace = true
 rust-embed.workspace = true
 tokio.workspace = true

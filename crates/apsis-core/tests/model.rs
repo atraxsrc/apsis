@@ -49,3 +49,10 @@ fn tag_letters_map_to_tags() {
         assert_eq!(Tag::from_char(c), want, "{c:?}");
     }
 }
+
+#[test]
+fn tag_letter_round_trips() {
+    for c in "OBHDWM".chars() {
+        assert_eq!(Tag::from_char(c).map(Tag::letter), Some(c));
+    }
+}

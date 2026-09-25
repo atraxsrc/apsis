@@ -33,6 +33,32 @@ impl Tag {
             _ => None,
         }
     }
+
+    /// The letter Timeshift uses for this tag.
+    #[must_use]
+    pub fn letter(self) -> char {
+        match self {
+            Self::OnDemand => 'O',
+            Self::Boot => 'B',
+            Self::Hourly => 'H',
+            Self::Daily => 'D',
+            Self::Weekly => 'W',
+            Self::Monthly => 'M',
+        }
+    }
+
+    /// Lower-case English name, as in Timeshift's `--help`.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::OnDemand => "on-demand",
+            Self::Boot => "boot",
+            Self::Hourly => "hourly",
+            Self::Daily => "daily",
+            Self::Weekly => "weekly",
+            Self::Monthly => "monthly",
+        }
+    }
 }
 
 /// How Timeshift stores snapshots.

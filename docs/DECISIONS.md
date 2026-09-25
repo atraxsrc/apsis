@@ -70,6 +70,38 @@ Append-only. Newest at the bottom. Format: date — decision — why.
     so a tag-less row whose comment starts with e.g. "BOW" would be misread. Timeshift always prints
     at least one tag, so this shouldn't happen.
 
+- 2026-09-25 - Phase 2 applet (read-only):
+  - `PkexecRunner` lives in `apsis-core`. It resolves `timeshift` on the user's `PATH` first (missing
+    -> `NotInstalled`), then runs `pkexec --disable-internal-agent /abs/path/timeshift ...` with no
+    shell, stdin null, `LC_ALL=C.UTF-8` and no `LANGUAGE` (pkexec passes both through; the parser
+    matches Timeshift's English, UTF-8 keeps non-ASCII comments). `--disable-internal-agent`: with
+    no graphical polkit agent, fail instead of prompting on the terminal `just run` came from. A
+    missing `pkexec` is a distinct I/O error, not "timeshift not installed".
+  - The first list runs when the popup first opens, not at login, because every list is a password
+    prompt until the Phase 4 helper. Re-opening shows the cached list; `r` refreshes. Only one list
+    runs at a time. Once the helper allows `list` without a prompt, list on every open instead.
+  - Snapshots are shown newest first (Timeshift lists oldest first). The selection follows the
+    snapshot name across refreshes.
+  - Tooltip: `Apsis - last snapshot 3h ago` / `Apsis - no snapshots`, plain `Apsis` before the first
+    list. Plain hyphen instead of UI.md's dash (project writing style).
+  - Panel icon: stock `document-open-recent-symbolic` (a clock with an arrow) until there's original
+    artwork, so there's no SVG with a baked-in colour. "Icon artwork" stays open.
+  - Hints are `[r]efresh` (`[r]etry` after an error), `[?]help`, `[esc]`. `[c]`/`[d]` and the input
+    line arrive with Phase 3; for now the `>` line shows `_`, or `timeshift --list` and a spinner.
+  - Keys come from `event::listen_with`, only while the popup is open and only for the popup's
+    window; Ctrl/Alt/Super combinations are ignored. Esc closes details/help first, then the popup.
+    Rows: click selects, double-click (or Enter) shows details.
+  - Colours, all from the theme: accent text (`~/apsis`, `>`, the `▸` marker, help/detail keys);
+    accent at 15% alpha for the selected row; the background's `on` colour at 70% for the summary;
+    destructive text for errors. Text is `monotext` (libcosmic's monospace preset).
+  - Layout: popup 520 px wide, 24 px rows, 8 rows then scroll. Row comments are cut to 28
+    characters; details show the whole comment. Arrow keys scroll by `snap_to(i / (n - 1))`, which
+    always keeps an equal-height row in view.
+  - Errors show the exit code and the last 6 non-blank stderr lines; exit 126/127 (pkexec) adds
+    "not authorised, or the password dialog was dismissed".
+  - Fluent's Unicode isolation marks are turned off; they render as stray glyphs in monospace text.
+  - The applet enables `jiff`'s `tz-system` + `tzdb-zoneinfo` to get local "now" for "3h ago".
+
 ## Open
 
 - ~~App ID~~ - resolved 2026-09-25, see above.
@@ -81,4 +113,7 @@ Append-only. Newest at the bottom. Format: date — decision — why.
 - No real fixture yet for "configured device, zero snapshots" or for multi-tag rows (`BD` etc.);
   both are covered by synthetic tests built from the real layout.
 - Phase 2: check whether Timeshift prints the `--list` table on stdout or stderr, and what exit codes
-  it uses on failure (Apsis treats any non-zero exit as failure).
+  it uses on failure (Apsis treats any non-zero exit as failure). Apsis parses stdout only; if the
+  popup says "unrecognised `timeshift --list` output", the table is probably on stderr.
+- Phase 2: confirm on a real panel that the popup gets keyboard focus (keys were only reasoned
+  about, not run, by Claude) and that `document-open-recent-symbolic` exists in the icon theme.

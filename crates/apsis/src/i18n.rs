@@ -34,6 +34,8 @@ pub static LANGUAGE_LOADER: LazyLock<FluentLanguageLoader> = LazyLock::new(|| {
     loader
         .load_fallback_language(&Localizations)
         .expect("Error while loading fallback language");
+    // No U+2068/U+2069 around placeables: they show up as stray glyphs in monospace text.
+    loader.set_use_isolating(false);
 
     loader
 });
