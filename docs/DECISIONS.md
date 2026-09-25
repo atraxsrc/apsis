@@ -633,6 +633,17 @@ Append-only. Newest at the bottom. Format: date — decision — why.
   - With the old 26.09.0 order, the builder would **not** have produced the real list: the
     four user filters would have come first.
 
+- 2026-09-26 - **Phase 5 v1 done.** Real-disk results, run by the user as root on their machine
+  (Claude ran nothing as root):
+  - Dry run: the plan matched Timeshift: the 60-line exclude list, `--link-dest` to the newest
+    snapshot, the rsync argv and `info.json`.
+  - Real native create `2026-09-26_07-31-23`, comment "native test 1": `sudo timeshift --list`
+    lists it as one of its own.
+  - `du`: previous snapshot 235G, the new native snapshot 3.3G, so unchanged files are
+    hard-linked.
+  - Left over (recorded in PLAN.md): native retention, idle I/O priority for the native rsync,
+    Btrfs (Phase 5.1), and recognising Timeshift's `Ret=NNN` lines as diagnostics.
+
 ## Open
 
 - ~~App ID~~ - resolved 2026-09-25, see above.
@@ -649,9 +660,9 @@ Append-only. Newest at the bottom. Format: date — decision — why.
   popup says "unrecognised `timeshift --list` output", the table is probably on stderr.
 - Phase 5: ~~a real `info.json` and `exclude.list` from one of the user's Timeshift 24.01.1
   snapshots (redacted) as a fixture, to check the hand-made one~~ - done 2026-09-26, see above.
-  And `timeshift --list` on a
+  ~~And `timeshift --list` on a
   device with a native snapshot, to confirm Timeshift lists it (the tests only mirror
-  Timeshift's reader).
+  Timeshift's reader).~~ - done 2026-09-26, see above.
 - Phase 2: confirm on a real panel that the popup gets keyboard focus (keys were only reasoned
   about, not run, by Claude). ~~Check that `document-open-recent-symbolic` exists~~ - replaced by
   the Apsis symbolic icon, 2026-09-25.

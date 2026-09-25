@@ -111,6 +111,11 @@ v1, rsync only (split from the original Phase 5 at the user's request):
 - Tests on a loop-mounted ext4 image under `target/` (mounted by the user), not the real disk.
 - **Done when:** the tests pass on the ext4 image, the user has reviewed a dry run on their
   machine, and a native snapshot shows up in `timeshift --list`.
+- **Status: done 2026-09-26** (see DECISIONS.md). Left over from v1:
+  - native retention (Timeshift applies it on its next run until then)
+  - idle I/O priority for the native rsync (Timeshift 24.01.1 doesn't use it either)
+  - Btrfs: Phase 5.1 below
+  - recognise Timeshift's `Ret=NNN` lines as diagnostics (they're ignored now)
 
 ## Phase 5.1 - Native btrfs
 
