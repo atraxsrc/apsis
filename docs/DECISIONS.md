@@ -805,6 +805,36 @@ Append-only. Newest at the bottom. Format: date — decision — why.
   - `Cargo.lock` bumped with `cargo update --workspace --offline`; only the three apsis crates
     changed.
 
+- 2026-09-27 - **Polish: bulk delete, menu, `Ret=` lines.**
+  - Bulk delete is one `Operation::DeleteMany { names, done }` that runs one helper `Delete`
+    per step: `on_finished` starts the next step on success. No new helper method: `Delete`
+    already checks the name against a fresh `--list`, takes the lock, and polkit's
+    `auth_admin_keep` makes the password prompt a one-off. `running` stays set between steps, so
+    no list or other operation slips in. The pkexec fallback works too, with a prompt per
+    snapshot (said in UI.md rather than refused).
+  - Marks are snapshot names (`BTreeSet`), not indexes, so a refresh keeps the right ones; the
+    delete order is list order. After a failure the not-deleted ones stay marked, to retry.
+  - The confirm line lists every name. The `>` row gives a bulk-delete label the width and
+    lets it wrap, and shrinks the input (only `y` goes there) to a fixed 48 px.
+  - Menu labels: looked at pop-os/cosmic-applets and a few community applets (read-only, with
+    the user's OK for the network). The pop-os applets have no applet-level remove or settings
+    item (cosmic-app-list's `Quit` quits apps, not the applet); community applets use
+    `Settings…` and `Refresh`; the panel design issue (pop-os/cosmic-epoch#102) says an
+    applet's menu should offer removing it. No common label, so `Remove or move applet…` as
+    the user asked, and `Close` rather than `Quit`.
+  - `Ret=<digits>`: Timeshift's `log_msg("Ret=%d")` after `Failed to remove directory`
+    (`Main.vala`, from `.scratch/timeshift`). A bare `Ret=` or `Ret=25x` isn't matched.
+    It is now also one of a failure's last lines, which shows the status next to the `E:` line.
+  - Building in Claude's sandbox: `~/.cargo` is read-only there and the libcosmic git checkout
+    can't update, so builds used the unpacked `vendor.tar` (via `--config` with an absolute
+    `directory`) and a scratch `CARGO_HOME`. For `cargo clippy`, `--config` has to come after
+    the subcommand; `cargo --config X clippy` loses it. Nothing in the repo changed for this.
+  - After the user's test: delete text shows snapshot labels (`fmt::label`, `%m-%d %H:%M` plus
+    the quoted comment), looked up in the current list when shown. `Operation` and the prompts
+    still carry raw names, so the helper and its journal are unchanged. The format follows the
+    user's example; the list rows themselves still show the year (`2026-09-27 09:12`). Single
+    delete's prompt now also gets the wrapping label, since a comment can be long.
+
 ## Open
 
 - ~~App ID~~ - resolved 2026-09-25, see above.

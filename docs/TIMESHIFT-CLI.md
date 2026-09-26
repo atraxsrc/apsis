@@ -143,8 +143,13 @@ Found 2026-09-25 when the user's USB backup disk dropped off after a create (Tim
 
   Before this, the parser failed on it (`line 17: unexpected snapshot row`). Now it's a warning.
   Fixture: `list-rsync-stale-mount.txt` (the redacted device fixture plus that line).
-- `Ret=256` appears to be Timeshift's internal status (256 = exit status 1 in `wait()` terms). Apsis
-  ignores it.
+- `Ret=256` is the status of the command that failed, as `system()` returns it (256 = exit status
+  1). Timeshift's source prints it with `log_msg("Ret=%d")` right after
+  `log_error("Failed to remove directory")` (`Main.vala`), so it's on stdout. Since 2026-09-27
+  Apsis treats `Ret=<digits>` like an `E:`/`W:` line: a list warning (`list: Ret=256`), anywhere
+  in the output, never `not a snapshot row`, and one of a failure's last lines. Fixture:
+  `list-rsync-stale-mount-ret.txt` (the stale-mount fixture plus `Ret=256`, rebuilt, not
+  captured).
 - `--snapshot-device`: Apsis passes the UUID whenever a list has shown one, and keeps it when a
   later list fails. The `/dev/sdX1` in the message above came from Timeshift's own configuration
   (the user ran it without `--snapshot-device`).

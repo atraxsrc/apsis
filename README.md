@@ -125,6 +125,7 @@ Files and design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | see your snapshots | click the panel icon. The newest is at the top; the right pane shows details |
 | create a snapshot | press `c`, type a comment (e.g. `before driver update`), press Enter |
 | delete a snapshot | select it, press `d`, type `y`, press Enter (anything else cancels) |
+| delete several | mark each with `space` (or `J` to mark and move down), press `d`, type `y`, press Enter. The password is asked once; they're deleted one by one and it stops at the first failure, saying which were deleted |
 | refresh | `r` |
 
 A spinner in the **activity** pane shows what's running; the result stays there afterwards.
@@ -148,6 +149,7 @@ Every `[key]` hint at the bottom of the popup is also a button, every row can be
 | list | `c` / `d` / `r` | create / delete / refresh | `[c]reate` / `[d]elete` / `[r]efresh` |
 | list | `Enter` | browse the snapshot's files | double-click |
 | list | `Tab` | details pane, and back | |
+| list | `space` / `J` | mark or unmark for deletion / mark and move down | |
 | list | `s` / `?` | settings / help | `[s]ettings` / `[?]help`, or right-click the panel icon |
 | browser | `Enter` or `l` / `⌫` or `h` | into a folder / up one | double-click a folder |
 | browser | `space` / `J` | mark or unmark / mark and move down | double-click a file |
@@ -156,7 +158,7 @@ Every `[key]` hint at the bottom of the popup is also a button, every row can be
 | settings | `+` `-` `e` | keep one more / one fewer / type it | `[+]` `[-]` |
 | settings | `a` / `x` | add filter / remove selected filter | `[a]dd` / `[x]remove` |
 | settings | `w` / `r` | write to Timeshift / reload, dropping changes | `[w]rite` / `[r]eload` |
-| anywhere | `Esc` | cancel, go back, then close | `[esc]` |
+| anywhere | `Esc` | cancel, go back, clear marks, then close | `[esc]` |
 
 ### Restoring a file (experimental)
 
@@ -213,7 +215,7 @@ marked `(unsaved)` until you press `w`.
 |---|---|
 | `backup disk not connected (...)` | plug the backup disk in (and unlock it if needed), then press `r` |
 | the applet isn't in the panel list, or doesn't show after installing | log out and back in, or remove it in *Configure panel applets* and add it again |
-| `list: E: Failed to remove directory` in the activity pane | a harmless Timeshift warning, usually a leftover mount from an earlier run (often after the disk was unplugged). The list itself is still correct; a reboot clears the stale mount |
+| `list: E: Failed to remove directory` (often followed by `list: Ret=256`) in the activity pane | a harmless Timeshift warning, usually a leftover mount from an earlier run (often after the disk was unplugged). The list itself is still correct; a reboot clears the stale mount |
 | `... needs apsis-helper (sudo just install)` | the helper isn't installed: reinstall the .deb or run `sudo just install` |
 | anything else | read the helper's log: `journalctl -u apsis-helper -e` (add `-f` to follow it live) |
 

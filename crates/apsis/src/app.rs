@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -81,6 +82,9 @@ const BREADCRUMB_CHARS: usize = 40;
 const WINDOW_BREADCRUMB_CHARS: usize = 80;
 /// Longest answer kept at the `[y/N]` prompt; only `y` means yes.
 const CONFIRM_CHARS: usize = 3;
+/// Width of the `>` line's input when a long label (the names of a bulk delete) takes the rest
+/// of the row and wraps.
+const SHORT_INPUT_WIDTH: f32 = 48.0;
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Themed name of the panel icon; installed by `just install`.
@@ -166,6 +170,8 @@ pub struct AppModel {
     spinner: usize,
     /// Index into the displayed (newest first) snapshots.
     selected: usize,
+    /// Names of the snapshots marked for a bulk delete (space / `J`).
+    marked: BTreeSet<String>,
     overlay: Overlay,
     /// Timeshift's settings, for the settings view.
     settings: SettingsLoad,
@@ -255,6 +261,9 @@ enum Prompt {
     Comment(String),
     /// `> delete <name>? [y/N] _`. Enter with `y` deletes, anything else cancels.
     ConfirmDelete { name: String, typed: String },
+    /// `> delete 3 snapshots: <name>, <name>, <name>? [y/N] _`, for the marked ones, in list
+    /// order. Enter with `y` deletes them one by one, anything else cancels.
+    ConfirmDeleteMany { names: Vec<String>, typed: String },
     /// Settings: `> add filter: _`. Enter adds it.
     Filter(String),
     /// Settings: `> keep daily: 5_`. Enter sets the count.
@@ -272,6 +281,12 @@ pub enum Operation {
     /// With the comment as typed; the backend trims it.
     Create(String),
     Delete(String),
+    /// The marked snapshots, deleted one at a time; the first `done` are gone. Stops at the
+    /// first failure.
+    DeleteMany {
+        names: Vec<String>,
+        done: usize,
+    },
     /// Native backend with dry run on: what a create would do. Nothing is written.
     DryRun(String),
     /// A file-level restore, or its dry run.
@@ -372,7 +387,8 @@ pub enum KeyAction {
     /// Browser: `h` or Backspace goes up a folder, `l` into one.
     Back,
     Into,
-    /// Browser: `J` marks or unmarks, then moves down (space marks in place).
+    /// Browser and snapshot list: `J` marks or unmarks, then moves down (space marks in
+    /// place).
     MarkDown,
     /// Browser: `R` restores the marked entries.
     Restore,
@@ -392,8 +408,10 @@ pub enum Message {
     MenuAbout,
     /// Menu: open the popup on the settings view.
     MenuSettings,
-    /// Menu: `cosmic-settings panel`.
+    /// Menu: `cosmic-settings panel`, where the applet is removed or moved.
     MenuPanelSettings,
+    /// Menu: closes it, like Esc.
+    MenuClose,
     /// The repository link in the About view.
     OpenRepository,
     PopupClosed(Id),
@@ -481,6 +499,7 @@ impl cosmic::Application for AppModel {
             status: None,
             spinner: 0,
             selected: 0,
+            marked: BTreeSet::new(),
             overlay: Overlay::None,
             settings: SettingsLoad::NotLoaded,
             saving_settings: false,
@@ -590,6 +609,7 @@ impl cosmic::Application for AppModel {
             Message::SettingsActivate(index) => return self.select_setting(index, true),
             Message::SettingsKey(action) => return self.on_key(action),
             Message::WindowShown => return self.make_window_resizable(),
+            Message::MenuClose => return self.close_menu(),
             Message::MenuPanelSettings => {
                 let close = self.close_menu();
                 let mut settings = std::process::Command::new("cosmic-settings");
@@ -635,16 +655,16 @@ impl cosmic::Application for AppModel {
                 Prompt::Comment(comment) => {
                     *comment = text.chars().take(MAX_COMMENT_CHARS).collect();
                 }
-                Prompt::ConfirmDelete { typed, .. } => {
-                    *typed = text.chars().take(CONFIRM_CHARS).collect();
-                }
                 Prompt::Filter(pattern) => {
                     *pattern = text.chars().take(FILTER_CHARS).collect();
                 }
                 Prompt::Count { typed, .. } => {
                     *typed = text.chars().filter(char::is_ascii_digit).take(3).collect();
                 }
-                Prompt::RestoreWhere { typed, .. } | Prompt::ConfirmRestore { typed, .. } => {
+                Prompt::ConfirmDelete { typed, .. }
+                | Prompt::ConfirmDeleteMany { typed, .. }
+                | Prompt::RestoreWhere { typed, .. }
+                | Prompt::ConfirmRestore { typed, .. } => {
                     *typed = text.chars().take(CONFIRM_CHARS).collect();
                 }
             },
@@ -819,11 +839,12 @@ impl AppModel {
         }
     }
 
-    /// The popup closed: drop overlays, the browser and any half-typed prompt. A running
-    /// operation and its status line stay.
+    /// The popup closed: drop overlays, the browser, marks and any half-typed prompt. A running
+    /// operation (a bulk delete keeps its own list) and its status line stay.
     fn reset_popup_state(&mut self) {
         self.overlay = Overlay::None;
         self.prompt = Prompt::Command;
+        self.marked.clear();
         self.browser = None;
         self.pending_restore = None;
     }
@@ -854,11 +875,15 @@ impl AppModel {
                 self.selected = selected_name
                     .and_then(|name| list.snapshots.iter().position(|s| s.name == name))
                     .unwrap_or(near);
+                // Marks on snapshots that are gone go too.
+                self.marked
+                    .retain(|name| list.snapshots.iter().any(|s| &s.name == name));
                 self.listing = Listing::Loaded(list);
             }
             Err(error) => {
                 self.listing = Listing::Failed(error);
                 self.selected = 0;
+                self.marked.clear();
             }
         }
         if self.overlay == Overlay::Details && self.snapshots().is_empty() {
@@ -923,12 +948,34 @@ impl AppModel {
                 if self.can_delete() {
                     self.overlay = Overlay::None;
                     self.status = None;
-                    self.prompt = Prompt::ConfirmDelete {
-                        name: self.snapshots()[self.selected].name.clone(),
-                        typed: String::new(),
+                    let names = self.marked_names();
+                    self.prompt = if names.is_empty() {
+                        Prompt::ConfirmDelete {
+                            name: self.snapshots()[self.selected].name.clone(),
+                            typed: String::new(),
+                        }
+                    } else {
+                        Prompt::ConfirmDeleteMany {
+                            names,
+                            typed: String::new(),
+                        }
                     };
                 }
                 return focus_input();
+            }
+            KeyAction::Toggle | KeyAction::MarkDown
+                if matches!(self.overlay, Overlay::None | Overlay::Details) =>
+            {
+                let Some(name) = self.snapshots().get(self.selected).map(|s| s.name.clone())
+                else {
+                    return Task::none();
+                };
+                if !self.marked.remove(&name) {
+                    self.marked.insert(name);
+                }
+                (action == KeyAction::MarkDown)
+                    .then(|| self.selected + 1)
+                    .filter(|&i| i < count)
             }
             KeyAction::Help => {
                 self.toggle_overlay(Overlay::Help);
@@ -1230,6 +1277,14 @@ impl AppModel {
                     Task::none()
                 }
             }
+            Prompt::ConfirmDeleteMany { names, typed } => {
+                if typed.trim().eq_ignore_ascii_case("y") {
+                    self.run(Operation::DeleteMany { names, done: 0 })
+                } else {
+                    self.status = Some(Status::Info(fl!("delete-cancelled")));
+                    Task::none()
+                }
+            }
         }
     }
 
@@ -1269,6 +1324,16 @@ impl AppModel {
         result: Result<(), CliError>,
     ) -> Task<cosmic::Action<Message>> {
         self.running = None;
+        if let Operation::DeleteMany { names, done } = operation
+            && result.is_ok()
+            && done + 1 < names.len()
+        {
+            // The next one; the password is cached (`auth_admin_keep`) through the helper.
+            return self.run(Operation::DeleteMany {
+                names: names.clone(),
+                done: done + 1,
+            });
+        }
         let ran = match &result {
             Ok(()) => true,
             Err(CliError::Failed { code, .. }) => !pkexec_refused(*code),
@@ -1280,9 +1345,28 @@ impl AppModel {
                 | CliError::Other(_),
             ) => false,
         };
+        // A bulk delete that got past its first snapshot changed the list either way.
+        let ran = ran || matches!(operation, Operation::DeleteMany { done, .. } if *done > 0);
         self.status = Some(match (operation, result) {
             (Operation::Create(_), Ok(())) => Status::Info(fl!("created")),
-            (Operation::Delete(name), Ok(())) => Status::Info(fl!("deleted", name = name.clone())),
+            (Operation::Delete(name), Ok(())) => {
+                Status::Info(fl!("deleted", name = self.snapshot_label(name)))
+            }
+            (Operation::DeleteMany { names, .. }, Ok(())) => {
+                self.marked.clear();
+                Status::Info(fl!("deleted-many", count = names.len().to_string()))
+            }
+            (Operation::DeleteMany { names, done }, Err(error)) => {
+                let (deleted, left) = names.split_at((*done).min(names.len()));
+                for name in deleted {
+                    self.marked.remove(name);
+                }
+                let reason = error_summary(&error, self.known_uuid.as_deref());
+                let labels = |names: &[String]| -> Vec<String> {
+                    names.iter().map(|n| self.snapshot_label(n)).collect()
+                };
+                Status::Error(bulk_delete_failed(&labels(deleted), &labels(left), &reason))
+            }
             (Operation::Create(_), Err(error)) => {
                 let reason = error_summary(&error, self.known_uuid.as_deref());
                 Status::Error(fl!("create-failed", reason = reason))
@@ -1540,7 +1624,7 @@ impl AppModel {
     }
 
     /// Esc cancels a prompt, then closes the overlay (a restore plan goes back to the
-    /// browser), then the popup (or the window).
+    /// browser), then clears the snapshot marks, then closes the popup (or the window).
     fn escape(&mut self) -> Task<cosmic::Action<Message>> {
         if self.prompt != Prompt::Command {
             self.prompt = Prompt::Command;
@@ -1581,6 +1665,10 @@ impl AppModel {
             // Esc also unfocused the `>` line.
             return focus_input();
         }
+        if !self.marked.is_empty() {
+            self.marked.clear();
+            return focus_input();
+        }
         match self.popup.take() {
             Some(popup) => {
                 self.reset_popup_state();
@@ -1604,6 +1692,33 @@ impl AppModel {
             Listing::Loaded(list) => &list.snapshots,
             Listing::NotLoaded | Listing::Failed(_) => &[],
         }
+    }
+
+    /// `09-27 09:12 "bulk 1"` for snapshot `name` in the last list (see [`fmt::label`]), or
+    /// `name` itself if it isn't there.
+    fn snapshot_label(&self, name: &str) -> String {
+        self.snapshots()
+            .iter()
+            .find(|s| s.name == name)
+            .map_or_else(|| name.to_owned(), fmt::label)
+    }
+
+    /// Labels of `names`, joined with commas.
+    fn snapshot_labels(&self, names: &[String]) -> String {
+        names
+            .iter()
+            .map(|name| self.snapshot_label(name))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// The marked snapshots' names, in list order (newest first).
+    fn marked_names(&self) -> Vec<String> {
+        self.snapshots()
+            .iter()
+            .filter(|s| self.marked.contains(&s.name))
+            .map(|s| s.name.clone())
+            .collect()
     }
 
     fn tooltip(&self) -> String {
@@ -1694,7 +1809,11 @@ impl AppModel {
                 SettingsLoad::Ready(view) if view.dirty() => fl!("pane-settings-unsaved"),
                 _ => fl!("pane-settings"),
             },
-            Overlay::None | Overlay::Details => fl!("pane-snapshots"),
+            Overlay::None | Overlay::Details if self.marked.is_empty() => fl!("pane-snapshots"),
+            Overlay::None | Overlay::Details => {
+                let marked = fl!("browse-marked", count = self.marked.len().to_string());
+                format!("{} · {marked}", fl!("pane-snapshots"))
+            }
         }
     }
 
@@ -1772,7 +1891,7 @@ impl AppModel {
                     None => lines([]),
                 }
             }
-            (_, Some(snapshot)) => scroll(details(snapshot)),
+            (_, Some(snapshot)) => scroll(details(snapshot, self.marked.contains(&snapshot.name))),
             (_, None) => widget::column::with_children(vec![
                 monotext(fl!("details-none"))
                     .class(theme::Text::Custom(dim_text))
@@ -1795,7 +1914,25 @@ impl AppModel {
                 (format!("{} {spinner}", fl!("creating")), Tone::Normal)
             }
             (Some(Operation::Delete(name)), _) => (
-                format!("{} {spinner}", fl!("deleting", name = name.clone())),
+                format!(
+                    "{} {spinner}",
+                    fl!("deleting", name = self.snapshot_label(name))
+                ),
+                Tone::Normal,
+            ),
+            (Some(Operation::DeleteMany { names, done }), _) => (
+                format!(
+                    "{} {spinner}",
+                    fl!(
+                        "deleting-many",
+                        step = (done + 1).to_string(),
+                        count = names.len().to_string(),
+                        name = names
+                            .get(*done)
+                            .map(|name| self.snapshot_label(name))
+                            .unwrap_or_default()
+                    )
+                ),
                 Tone::Normal,
             ),
             (Some(Operation::DryRun(_)), _) => {
@@ -1887,9 +2024,10 @@ impl AppModel {
             .into()
     }
 
-    /// `▸ 2026-09-25 03:00   D     "comment"`
+    /// `▸ * 2026-09-25 03:00   D     "comment"`: `*` if marked for deletion.
     fn row<'a>(&self, index: usize, snapshot: &'a Snapshot) -> Element<'a, Message> {
         let selected = index == self.selected;
+        let marked = self.marked.contains(&snapshot.name);
         let text = format!(
             "{}   {:<4}  {}",
             fmt::when(snapshot.created),
@@ -1898,6 +2036,9 @@ impl AppModel {
         );
         let line = widget::row::with_children(vec![
             monotext(if selected { "▸" } else { " " })
+                .class(theme::Text::Accent)
+                .into(),
+            monotext(if marked { "*" } else { " " })
                 .class(theme::Text::Accent)
                 .into(),
             // One line, cut to the pane width.
@@ -1914,6 +2055,8 @@ impl AppModel {
             .padding([2, 6]);
         if selected {
             row = row.class(theme::Container::custom(selected_row));
+        } else if marked {
+            row = row.class(theme::Container::custom(marked_row));
         }
         widget::mouse_area(row)
             .on_press(Message::Select(index))
@@ -2206,8 +2349,11 @@ impl AppModel {
                 .on_press(Message::MenuAbout)
                 .into(),
             padded_control(widget::divider::horizontal::default()).into(),
-            menu_button(body(fl!("menu-panel-settings")))
+            menu_button(body(fl!("menu-remove-or-move")))
                 .on_press(Message::MenuPanelSettings)
+                .into(),
+            menu_button(body(fl!("menu-close")))
+                .on_press(Message::MenuClose)
                 .into(),
         ])
         .padding([8, 0]);
@@ -2245,7 +2391,16 @@ impl AppModel {
                 (Some(fl!("prompt-comment")), comment.as_str(), String::new())
             }
             Prompt::ConfirmDelete { name, typed } => (
-                Some(fl!("prompt-delete", name = name.clone())),
+                Some(fl!("prompt-delete", name = self.snapshot_label(name))),
+                typed.as_str(),
+                String::new(),
+            ),
+            Prompt::ConfirmDeleteMany { names, typed } => (
+                Some(fl!(
+                    "prompt-delete-many",
+                    count = names.len().to_string(),
+                    names = self.snapshot_labels(names)
+                )),
                 typed.as_str(),
                 String::new(),
             ),
@@ -2270,7 +2425,18 @@ impl AppModel {
             Prompt::Command if self.loading => (None, "", format!("timeshift --list {spinner}")),
             Prompt::Command => (None, "", String::new()),
         };
+        // A delete's snapshot labels (with their comments) can be longer than the row: the label
+        // takes the row and wraps, and the input (only ever `y`) keeps a small fixed width.
+        let long_label = matches!(
+            prompt,
+            Prompt::ConfirmDelete { .. } | Prompt::ConfirmDeleteMany { .. }
+        );
         let input = widget::text_input::inline_input(placeholder, value)
+            .width(if long_label {
+                Length::Fixed(SHORT_INPUT_WIDTH)
+            } else {
+                Length::Fill
+            })
             .id(INPUT_ID.clone())
             .always_active()
             .font(cosmic::font::mono())
@@ -2285,7 +2451,14 @@ impl AppModel {
         let label = label.map_or_else(|| " ".to_owned(), |label| format!(" {label} "));
         widget::row::with_children(vec![
             monotext(">").class(theme::Text::Accent).into(),
-            monotext(label).into(),
+            monotext(label)
+                .width(if long_label {
+                    Length::Fill
+                } else {
+                    Length::Shrink
+                })
+                .wrapping(Wrapping::WordOrGlyph)
+                .into(),
             input.into(),
         ])
         .align_y(Alignment::Center)
@@ -2607,6 +2780,9 @@ async fn native_dry_run(comment: &str) -> Result<String, CliError> {
 ///
 /// With the native backend, a create is the helper's native create. A delete always goes to
 /// Timeshift, which removes native snapshots like its own.
+///
+/// A bulk delete runs one step per call: the snapshot at `done`. Through the helper the
+/// password is asked once (`auth_admin_keep`); through pkexec, for each snapshot.
 async fn operate(pkexec: Arc<Cli>, operation: Operation, native: bool) -> Result<(), CliError> {
     if native && let Operation::Create(comment) = &operation {
         return native_helper()
@@ -2619,6 +2795,10 @@ async fn operate(pkexec: Arc<Cli>, operation: Operation, native: bool) -> Result
         let done = match &operation {
             Operation::Create(comment) => helper.create(comment).await,
             Operation::Delete(name) => helper.delete(name).await,
+            Operation::DeleteMany { names, done } => match names.get(*done) {
+                Some(name) => helper.delete(name).await,
+                None => Ok(()),
+            },
             Operation::DryRun(comment) => return native_dry_run(comment).await.map(drop),
             Operation::Restore(request) => return restore(request).await.map(drop),
         };
@@ -2627,6 +2807,9 @@ async fn operate(pkexec: Arc<Cli>, operation: Operation, native: bool) -> Result
     blocking(move || match &operation {
         Operation::Create(comment) => pkexec.create(comment),
         Operation::Delete(name) => pkexec.delete(name),
+        Operation::DeleteMany { names, done } => {
+            names.get(*done).map_or(Ok(()), |n| pkexec.delete(n))
+        }
         Operation::DryRun(_) => Err(apsis_core::Error::Helper(fl!("native-need-helper"))),
         Operation::Restore(_) => Err(apsis_core::Error::Helper(fl!("restore-need-helper"))),
     })
@@ -2872,6 +3055,36 @@ fn error_summary(error: &CliError, known_uuid: Option<&str>) -> String {
     }
 }
 
+/// A bulk delete that stopped: which snapshot failed and why, then what was deleted and what
+/// wasn't (including the one that failed). Takes the snapshots' labels, not their names.
+fn bulk_delete_failed(deleted: &[String], left: &[String], reason: &str) -> String {
+    let list = |names: &[String]| {
+        if names.is_empty() {
+            fl!("delete-none")
+        } else {
+            names.join(", ")
+        }
+    };
+    [
+        fl!(
+            "delete-many-stopped",
+            name = left.first().cloned().unwrap_or_default(),
+            reason = reason
+        ),
+        fl!(
+            "delete-many-deleted",
+            count = deleted.len().to_string(),
+            names = list(deleted)
+        ),
+        fl!(
+            "delete-many-kept",
+            count = left.len().to_string(),
+            names = list(left)
+        ),
+    ]
+    .join("\n")
+}
+
 /// `backup disk not connected (UUID 1a2b…): plug it in and press r`. Names the disk by the
 /// UUID from the last good list; Timeshift's own message often has a `/dev` name instead,
 /// which changes when a USB disk reconnects.
@@ -2884,8 +3097,9 @@ fn disk_missing(device: &str, known_uuid: Option<&str>) -> String {
     fl!("disk-missing", id = id)
 }
 
-/// Full name, creation time, age, tags spelled out and the whole comment.
-fn details(snapshot: &Snapshot) -> Element<'_, Message> {
+/// Full name, creation time, age, tags spelled out and the whole comment; `delete   marked` if
+/// it's marked.
+fn details(snapshot: &Snapshot, marked: bool) -> Element<'_, Message> {
     let comment = snapshot.comment.clone().unwrap_or_else(|| "-".to_owned());
     let fields = [
         (fl!("details-name"), snapshot.name.clone()),
@@ -2900,7 +3114,8 @@ fn details(snapshot: &Snapshot) -> Element<'_, Message> {
         (fl!("details-tags"), fmt::tag_names(&snapshot.tags)),
         (fl!("details-comment"), comment),
     ];
-    key_value_rows(fields, DETAILS_KEY_WIDTH)
+    let mark = marked.then(|| (fl!("details-delete"), fl!("details-marked")));
+    key_value_rows(fields.into_iter().chain(mark), DETAILS_KEY_WIDTH)
 }
 
 fn help() -> Element<'static, Message> {
@@ -2910,6 +3125,8 @@ fn help() -> Element<'static, Message> {
         ("Enter", fl!("help-browse")),
         ("Tab", fl!("help-details")),
         ("c", fl!("help-create")),
+        ("space", fl!("help-mark")),
+        ("J", fl!("help-mark-down")),
         ("d", fl!("help-delete")),
         ("r", fl!("help-refresh")),
         ("s", fl!("help-settings")),
@@ -3330,6 +3547,7 @@ mod tests {
             status: None,
             spinner: 0,
             selected: 0,
+            marked: BTreeSet::new(),
             overlay: Overlay::None,
             settings: SettingsLoad::NotLoaded,
             saving_settings: false,
@@ -3412,6 +3630,16 @@ mod tests {
         send(&mut app, Message::PopupClosed(menu));
         assert!(app.menu.is_none());
         assert!(app.popup.is_none());
+    }
+
+    #[test]
+    fn menu_close_closes_only_the_menu() {
+        let mut app = model();
+        send(&mut app, Message::ToggleMenu);
+        send(&mut app, Message::MenuClose);
+        assert!(app.menu.is_none());
+        assert!(app.popup.is_none());
+        assert!(!app.loading);
     }
 
     /// Window mode, as `init` leaves it: the main window is the popup and a list is running.
@@ -3600,6 +3828,194 @@ mod tests {
         typed(&mut app, "Y");
         send(&mut app, Message::Submit);
         assert_eq!(app.running, Some(Operation::Delete(name)));
+    }
+
+    /// Marks rows `indices` (0 = newest) with space, from the top.
+    fn mark(app: &mut AppModel, indices: &[usize]) {
+        for &index in indices {
+            app.selected = index;
+            typed(app, " ");
+        }
+    }
+
+    #[test]
+    fn space_marks_in_place_and_capital_j_marks_and_moves_down() {
+        let mut app = listed(DEVICE_LIST);
+        let popup = app.popup.unwrap();
+        typed(&mut app, " ");
+        assert_eq!(app.selected, 0);
+        assert!(app.marked.contains(&app.snapshots()[0].name));
+        assert!(
+            app.body_title().ends_with("· 1 marked"),
+            "{}",
+            app.body_title()
+        );
+
+        typed(&mut app, "j");
+        typed(&mut app, "J");
+        typed(&mut app, "J");
+        assert_eq!(app.selected, 3);
+        assert_eq!(app.marked.len(), 3);
+        // Space again unmarks.
+        typed(&mut app, "k");
+        typed(&mut app, " ");
+        assert_eq!(app.marked.len(), 2);
+        assert!(app.body_title().ends_with("· 2 marked"));
+
+        // J on the last row marks it and stays.
+        send(&mut app, Message::Key(popup, KeyAction::Last));
+        typed(&mut app, "J");
+        assert_eq!(app.selected, 4);
+        assert_eq!(app.marked.len(), 3);
+
+        // Esc clears the marks first, then closes the popup.
+        send(&mut app, Message::Key(popup, KeyAction::Escape));
+        assert!(app.marked.is_empty());
+        assert_eq!(app.popup, Some(popup));
+        assert_eq!(app.body_title(), fl!("pane-snapshots"));
+        send(&mut app, Message::Key(popup, KeyAction::Escape));
+        assert!(app.popup.is_none());
+    }
+
+    #[test]
+    fn marks_do_nothing_on_help_and_are_dropped_with_their_snapshots() {
+        let mut app = listed(DEVICE_LIST);
+        send(&mut app, Message::ToggleHelp);
+        typed(&mut app, " ");
+        assert!(app.marked.is_empty());
+        send(&mut app, Message::ToggleHelp);
+
+        mark(&mut app, &[0, 1]);
+        let mut list = apsis_core::parse_list(DEVICE_LIST).unwrap();
+        list.snapshots.retain(|s| s.name != app.snapshots()[0].name);
+        send(&mut app, Message::Listed(Ok(list)));
+        assert_eq!(app.marked.len(), 1);
+        send(&mut app, Message::Listed(Err(CliError::NotInstalled)));
+        assert!(app.marked.is_empty());
+    }
+
+    #[test]
+    fn d_with_marks_confirms_all_of_them_in_list_order() {
+        let mut app = listed(DEVICE_LIST);
+        mark(&mut app, &[3, 0, 1]);
+        let names: Vec<String> = [0, 1, 3]
+            .iter()
+            .map(|&i| app.snapshots()[i].name.clone())
+            .collect();
+
+        typed(&mut app, "d");
+        assert_eq!(
+            app.prompt,
+            Prompt::ConfirmDeleteMany {
+                names: names.clone(),
+                typed: String::new()
+            }
+        );
+        typed(&mut app, "n");
+        send(&mut app, Message::Submit);
+        assert!(app.running.is_none());
+        assert_eq!(app.marked.len(), 3, "a cancel keeps the marks");
+
+        typed(&mut app, "d");
+        typed(&mut app, "y");
+        send(&mut app, Message::Submit);
+        assert_eq!(app.running, Some(Operation::DeleteMany { names, done: 0 }));
+        let (activity, _) = app.activity_line();
+        assert!(
+            activity.starts_with("deleting 1/3: 09-25 11:28 \"apsis test"),
+            "{activity}"
+        );
+        // The prompt and the results show labels; the helper still gets the names.
+        assert_eq!(
+            app.snapshot_labels(&[
+                "2026-09-25_11-28-53".to_owned(),
+                "2026-09-23_08-33-55".to_owned()
+            ]),
+            "09-25 11:28 \"apsis test: comment with spaces\", 09-23 08:33"
+        );
+        assert_eq!(
+            app.snapshot_label("2020-01-01_00-00-00"),
+            "2020-01-01_00-00-00"
+        );
+    }
+
+    #[test]
+    fn bulk_delete_goes_one_by_one_then_refreshes() {
+        let mut app = listed(DEVICE_LIST);
+        mark(&mut app, &[0, 1, 2]);
+        let names = app.marked_names();
+        let step = |done| Operation::DeleteMany {
+            names: names.clone(),
+            done,
+        };
+        app.running = Some(step(0));
+
+        send(&mut app, Message::Finished(step(0), Ok(())));
+        assert_eq!(app.running, Some(step(1)));
+        assert!(!app.loading, "no list between steps");
+        let (activity, _) = app.activity_line();
+        assert!(
+            activity.starts_with("deleting 2/3: 09-23 08:33…"),
+            "{activity}"
+        );
+        // Busy: no marking, no second delete.
+        typed(&mut app, " d");
+        assert_eq!(app.marked.len(), 3);
+        assert_eq!(app.prompt, Prompt::Command);
+
+        send(&mut app, Message::Finished(step(1), Ok(())));
+        send(&mut app, Message::Finished(step(2), Ok(())));
+        assert!(app.running.is_none());
+        assert!(app.loading);
+        assert!(app.marked.is_empty());
+        assert_eq!(
+            app.status,
+            Some(Status::Info("deleted 3 snapshots".to_owned()))
+        );
+    }
+
+    #[test]
+    fn bulk_delete_stops_at_the_first_failure_and_says_what_was_deleted() {
+        let mut app = listed(DEVICE_LIST);
+        mark(&mut app, &[0, 1, 2]);
+        let names = app.marked_names();
+        let step = |done| Operation::DeleteMany {
+            names: names.clone(),
+            done,
+        };
+        app.running = Some(step(0));
+        send(&mut app, Message::Finished(step(0), Ok(())));
+        send(&mut app, Message::Finished(step(1), failed(1)));
+
+        assert!(app.running.is_none());
+        assert!(app.loading, "one was deleted, so the list changed");
+        assert_eq!(
+            status_error(&app),
+            "delete stopped at 09-23 08:33: E: boom\n\
+             deleted (1): 09-25 11:28 \"apsis test: comment with spaces\"\n\
+             not deleted (2): 09-23 08:33, 09-22 13:28"
+        );
+        // The ones left stay marked, for another try.
+        assert_eq!(app.marked_names(), names[1..]);
+    }
+
+    #[test]
+    fn refused_bulk_delete_deletes_nothing_and_does_not_refresh() {
+        let mut app = listed(DEVICE_LIST);
+        mark(&mut app, &[0, 1]);
+        let names = app.marked_names();
+        let first = Operation::DeleteMany {
+            names: names.clone(),
+            done: 0,
+        };
+        app.running = Some(first.clone());
+        send(
+            &mut app,
+            Message::Finished(first, Err(CliError::NotAuthorized)),
+        );
+        assert!(!app.loading);
+        assert!(status_error(&app).contains("deleted (0): none"));
+        assert_eq!(app.marked.len(), 2);
     }
 
     #[test]

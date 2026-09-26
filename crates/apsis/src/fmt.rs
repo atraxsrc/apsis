@@ -25,6 +25,17 @@ pub fn when(created: DateTime) -> String {
     created.strftime("%Y-%m-%d %H:%M").to_string()
 }
 
+/// `09-27 09:12 "bulk 1"`, or `09-27 09:12` without a comment: a snapshot as the delete
+/// prompts, progress and results name it. The whole comment; long lines wrap.
+#[must_use]
+pub fn label(snapshot: &Snapshot) -> String {
+    let when = snapshot.created.strftime("%m-%d %H:%M").to_string();
+    match &snapshot.comment {
+        Some(_) => format!("{when} {}", quoted_comment(snapshot)),
+        None => when,
+    }
+}
+
 /// `OB`, the way Timeshift prints the Tags column.
 #[must_use]
 pub fn tag_letters(tags: &[Tag]) -> String {
@@ -115,6 +126,19 @@ pub fn tail(text: &str, n: usize) -> Vec<String> {
 mod tests {
     use super::*;
     use jiff::civil::date;
+
+    #[test]
+    fn labels_are_the_short_date_and_the_quoted_comment() {
+        let mut snapshot = Snapshot {
+            name: "2026-09-27_09-12-33".to_owned(),
+            created: date(2026, 9, 27).at(9, 12, 33, 0),
+            tags: vec![Tag::OnDemand],
+            comment: Some("bulk 1".to_owned()),
+        };
+        assert_eq!(label(&snapshot), "09-27 09:12 \"bulk 1\"");
+        snapshot.comment = None;
+        assert_eq!(label(&snapshot), "09-27 09:12");
+    }
 
     #[test]
     fn sizes_like_lsblk() {

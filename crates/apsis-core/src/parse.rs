@@ -8,7 +8,7 @@ use crate::model::{Mode, Snapshot, SnapshotList, Tag, parse_snapshot_name};
 /// See `docs/TIMESHIFT-CLI.md` for the format. Lines are matched by content, not by column
 /// position, and `GLib` warnings are skipped wherever they appear.
 ///
-/// Timeshift's own `E:`/`W:` lines, anywhere, and table lines that aren't snapshot rows don't
+/// Timeshift's own `E:`/`W:`/`Ret=NNN` lines, anywhere, and table lines that aren't snapshot rows don't
 /// fail the list: they're collected in [`SnapshotList::warnings`]. Whether Timeshift failed is
 /// decided by its exit code, not here.
 ///
@@ -70,12 +70,19 @@ fn is_glib_message(line: &str) -> bool {
 }
 
 /// `E: <message>` or `W: <message>`: Timeshift's own errors and warnings. It prints them on
-/// stdout, mixed with its normal output.
+/// stdout, mixed with its normal output. Also `Ret=<number>`, the status of a command that
+/// failed, which it prints after some errors (`E: Failed to remove directory`, then `Ret=256`).
 pub(crate) fn is_diagnostic(line: &str) -> bool {
-    line.starts_with("E: ") || line.starts_with("W: ")
+    line.starts_with("E: ") || line.starts_with("W: ") || is_ret(line)
 }
 
-/// What Timeshift said went wrong, from a failed run: its `E:`/`W:` lines from stdout, then
+/// `Ret=256`
+fn is_ret(line: &str) -> bool {
+    line.strip_prefix("Ret=")
+        .is_some_and(|code| !code.is_empty() && code.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// What Timeshift said went wrong, from a failed run: its `E:`/`W:`/`Ret=` lines from stdout, then
 /// stderr's lines (without `GLib` noise). If neither has anything, stdout's lines, so there's
 /// always something to show.
 pub(crate) fn failure_output(stdout: &str, stderr: &str) -> Vec<String> {

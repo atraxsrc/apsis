@@ -11,6 +11,9 @@ const PLAIN: &str = include_str!("fixtures/list-rsync-plain.txt");
 const UNCONFIGURED: &str = include_str!("fixtures/list-unconfigured.txt");
 /// The device fixture plus the trailing line a stale mount leaves (user's report, 2026-09-25).
 const STALE_MOUNT: &str = include_str!("fixtures/list-rsync-stale-mount.txt");
+/// The stale-mount fixture plus the `Ret=256` Timeshift prints after that error (`log_msg` right
+/// after `log_error("Failed to remove directory")` in its `Main.vala`).
+const STALE_MOUNT_RET: &str = include_str!("fixtures/list-rsync-stale-mount-ret.txt");
 /// Rebuilt from the lines the user quoted for an unplugged disk (not a full capture).
 const DEVICE_NOT_FOUND: &str = include_str!("fixtures/list-device-not-found.txt");
 
@@ -205,6 +208,32 @@ fn timeshift_errors_and_warnings_anywhere_are_collected() {
     let list = parse_list(&output).unwrap();
     assert_eq!(list.warnings, ["W: something odd", "E: inside the table"]);
     assert!(list.snapshots.is_empty());
+}
+
+#[test]
+fn ret_lines_are_diagnostics_not_unmatched_rows() {
+    let list = parse_list(STALE_MOUNT_RET).unwrap();
+    assert_eq!(list.snapshots.len(), 5);
+    assert_eq!(list.warnings, ["E: Failed to remove directory", "Ret=256"]);
+
+    // Inside the table too: a warning as it is, not `line N: not a snapshot row`.
+    let output = format!("{HEADER}Ret=256\n0    >  2026-09-24_03-00-01  O     \n");
+    let list = parse_list(&output).unwrap();
+    assert_eq!(list.snapshots.len(), 1);
+    assert_eq!(list.warnings, ["Ret=256"]);
+}
+
+#[test]
+fn only_ret_with_a_number_is_a_diagnostic() {
+    let output = format!("{HEADER}Ret=\nRet=25x\n");
+    let warnings = parse_list(&output).unwrap().warnings;
+    assert_eq!(
+        warnings,
+        [
+            "line 10: not a snapshot row: Ret=",
+            "line 11: not a snapshot row: Ret=25x"
+        ]
+    );
 }
 
 #[test]

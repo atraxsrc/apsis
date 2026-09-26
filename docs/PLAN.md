@@ -115,7 +115,8 @@ v1, rsync only (split from the original Phase 5 at the user's request):
   - native retention (Timeshift applies it on its next run until then)
   - idle I/O priority for the native rsync (Timeshift 24.01.1 doesn't use it either)
   - Btrfs: Phase 5.1 below
-  - recognise Timeshift's `Ret=NNN` lines as diagnostics (they're ignored now)
+  - ~~recognise Timeshift's `Ret=NNN` lines as diagnostics (they're ignored now)~~ - done
+    2026-09-27, see Polish
 
 ## Phase 5.1 - Native btrfs
 
@@ -331,6 +332,21 @@ original, and the journal shows each call.
   fails.~~ - done 2026-09-26: it writes `vendor.tar` (`vendor/` with versioned folders, plus
   `.cargo/config.toml`), and `build-vendored` unpacks it, builds `--frozen`, and removes
   `vendor/` and `.cargo/` again, even on failure.
+- Bulk delete in the snapshot list, like Timeshift: space marks or unmarks in place, `J` marks and
+  moves down (as in the browser); marked rows get an accent `*` and a faint accent background, the
+  title `· N marked`. `d` with marks asks once, listing the names (`y` deletes); without marks it's
+  the single delete. One password prompt through the helper (`auth_admin_keep`), then one
+  snapshot at a time, `deleting 2/4: <label>…` in the activity pane, list refreshed after. Stops at
+  the first failure and says which were deleted and which weren't. Refused while busy; Esc clears
+  the marks. - done 2026-09-27, tested by the user. Afterwards, at the user's request: delete
+  prompts, progress and results name snapshots as `09-27 09:12 "comment"` (the date only without
+  a comment) instead of the raw name; the details pane and journal keep the raw name.
+- Right-click menu: add `Close` (closes the menu, like Esc), and rename `Panel settings…` to
+  `Remove or move applet…` (still opens `cosmic-settings panel`). No Quit: the panel owns the
+  process. - done 2026-09-27, tested by the user.
+- Parser: `Ret=NNN` lines are diagnostics like `E:`/`W:` (a list warning, not `not a snapshot
+  row`), and part of a failure's output. Fixture `list-rsync-stale-mount-ret.txt`. - done
+  2026-09-27.
 
 ## Phase 7 — Release
 

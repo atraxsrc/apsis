@@ -472,7 +472,7 @@ fn failure_output_comes_from_stdout_errors_too() {
     let result = TimeshiftCli::new(&runner).list();
     assert!(
         matches!(&result, Err(Error::Failed { code: Some(1), output })
-            if output == "E: first\nW: second\nE: on stderr"),
+            if output == "E: first\nRet=256\nW: second\nE: on stderr"),
         "{result:?}"
     );
 }

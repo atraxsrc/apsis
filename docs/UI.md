@@ -44,6 +44,9 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
 - Monospace font for everything. Text uses theme text colours; the selected row uses the accent
   colour as a left marker `▸` and a subtle accent background — not a hard-coded colour.
 - Every `[key]` hint is also a clickable button. Every row is clickable (select), double-click = details.
+- Marked snapshots (space / `J`, for a bulk delete): an accent `*` after the `▸` column and a
+  fainter accent background than the selected row (the selection's wins on the selected row).
+  The pane title reads `snapshots · 3 marked`, and the details pane adds `delete   marked`.
 - The bottom `>` line is the input line: used for the create comment and delete confirm.
   `[c]reate` and `[d]elete` are only enabled once a list has shown a snapshot device, and
   nothing else is running; delete also needs a selected snapshot.
@@ -56,13 +59,15 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
 |---|---|
 | ↑/↓, j/k | move selection |
 | c | create → input line becomes `> comment: _`, Enter runs, Esc cancels |
-| d | delete selected → `> delete 2026-09-18_12-41-00? [y/N] _`; Enter with `y` deletes, anything else cancels |
+| space | mark or unmark the selected snapshot for deletion, and stay on it |
+| J | mark or unmark, then move down (for marking a run of rows) |
+| d | no marks: delete selected → `> delete 09-18 12:41 "before kernel update"? [y/N] _`. With marks: `> delete 3 snapshots: 09-25 11:28 "bulk 1", 09-23 08:33, 09-19 09:29? [y/N] _` (list order; the line wraps if it's long). See "Naming snapshots" below. Enter with `y` deletes, anything else cancels and keeps the marks |
 | r | refresh list |
 | Enter | browse the selected snapshot's files (Phase 6a) |
 | Tab | make the details pane active, or go back to the list |
 | s | settings view (see below) |
 | ? | help overlay |
-| Esc | cancel input, then go back from details/help/about/settings, then close the popup |
+| Esc | cancel input, then go back from details/help/about/settings, then clear the marks, then close the popup |
 
 ## States
 
@@ -70,11 +75,41 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
 |---|---|
 | loading | `> timeshift --list` then a spinner character cycling `⠋⠙⠹⠸…` |
 | empty | `no snapshots yet — press [c] to create one` |
-| running | `creating snapshot… ⠹` / `deleting <name>… ⠹` in the activity pane, keys disabled except Esc (does not cancel root op) |
-| result | in the activity pane: `snapshot created` / `deleted <name>` (dimmed), or `create failed: <last stderr line>` (error colour); stays until the next create/delete |
+| running | `creating snapshot… ⠹` / `deleting <label>… ⠹` / `deleting 2/4: <label>… ⠹` in the activity pane, keys disabled except Esc (does not cancel root op) |
+| result | in the activity pane: `snapshot created` / `deleted <label>` / `deleted 4 snapshots` (dimmed), or `create failed: <last stderr line>` (error colour); stays until the next create/delete |
+| bulk delete stopped | `delete stopped at <label>: <reason>`, `deleted (1): <labels>`, `not deleted (3): <labels>` (error colour); the ones not deleted stay marked, the list refreshes if any was deleted |
 | error | `error:` + Timeshift's last lines (its `E:`/`W:` lines and stderr), `[r]etry` |
 | disk missing | `backup disk not connected (UUID 1a2b…): plug it in and press r` (list error, or the create/delete result) |
 | not installed | `timeshift not found — install it or wait for the native backend` |
+
+## Bulk delete
+
+Like Timeshift's window: mark several snapshots, then `d`.
+
+- space marks or unmarks the selected snapshot and stays on it; `J` marks or unmarks and moves
+  down. Marks work in the list and the details pane, not on help, About or settings. A refresh
+  drops marks of snapshots that are gone; a failed list or closing the popup drops them all.
+- `d` with marks: `> delete 3 snapshots: <label>, <label>, <label>? [y/N] _`, in list order
+  (newest first). Only `y` deletes. Without marks, `d` is the single delete as before.
+- The snapshots go one at a time through the helper (`Delete`, one call each), so polkit asks for
+  the password once (`auth_admin_keep`) and the next calls use the cached answer. Without the
+  helper each pkexec call asks again. Activity: `deleting 2/4: <label>… ⠹`. No list runs between
+  steps; one runs at the end.
+- All deleted: `deleted 4 snapshots`, marks cleared. A failure stops it there:
+  `delete stopped at <label>: <reason>`, then `deleted (1): ...` and `not deleted (3): ...`
+  (the failed one counts as not deleted). The ones not deleted stay marked. A refused password
+  on the first one deletes nothing and doesn't refresh.
+- While anything runs (list, create, delete, restore, settings write) `d` does nothing; while a
+  create or delete runs, marking doesn't either. Esc clears the marks (after closing a prompt or
+  overlay), and a second Esc closes the popup.
+
+### Naming snapshots
+
+Delete prompts, progress and results (single and bulk) name a snapshot by its label: the short
+date and time, then the comment in quotes if it has one, `09-27 09:12 "bulk 1"` or
+`09-27 09:12`. The whole comment is shown; the `>` line and the activity pane wrap. A name no
+longer in the list shows as itself. The details pane and the helper's journal keep the full
+name (`2026-09-27_09-12-33`), and the helper is always called with it.
 
 ## Snapshot browser (Phase 6a)
 
@@ -133,14 +168,17 @@ password (polkit `browse`, cached a few minutes).
   terminal look):
 
   ```
-  Refresh              opens the popup and lists, like [r]
-  About Apsis          opens the popup on the About view
+  Refresh                  opens the popup and lists, like [r]
+  Settings…                opens the popup on the settings view
+  About Apsis              opens the popup on the About view
   ─────────────────
-  Panel settings…      cosmic-settings panel
+  Remove or move applet…   cosmic-settings panel (where applets are removed or moved)
+  Close                    closes the menu, like Esc
   ```
 
-  No "Quit": the panel owns the applet process. Only one of popup and menu is open at a time.
-  Esc closes the menu.
+  No "Quit": the panel owns the applet process (removing the applet is the way to stop it). Only
+  one of popup and menu is open at a time, so Close only ever has the menu to close. Esc closes
+  the menu too.
 
 ## Settings view (Phase 4.5)
 
