@@ -56,8 +56,15 @@ build-debug *args:
 # Compiles with release profile
 build-release *args: (build-debug '--release' args)
 
-# Compiles release profile with vendored dependencies
-build-vendored *args: vendor-extract (build-release '--frozen --offline' args)
+# Compiles release profile with vendored dependencies. vendor/ and .cargo/ are removed again
+# afterwards, even if the build fails, so plain cargo builds never pick up the vendored sources.
+build-vendored *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -rf vendor .cargo
+    trap 'rm -rf vendor .cargo' EXIT
+    tar pxf vendor.tar
+    cargo build --release --frozen {{args}}
 
 # Runs a clippy check
 check *args:
@@ -108,17 +115,19 @@ uninstall:
     rm -f {{launcher-dst}}
     rm {{bin-dst}} {{desktop-dst}} {{metainfo-dst}} {{icon-dst}} {{icon-symbolic-dst}}
 
-# Vendor dependencies locally
+# Vendors dependencies into vendor.tar (vendor/ plus a .cargo/config.toml that points cargo at it)
 vendor:
+    rm -rf vendor .cargo
     mkdir -p .cargo
-    cargo vendor --sync Cargo.toml | head -n -1 > .cargo/config.toml
-    echo 'directory = "vendor"' >> .cargo/config.toml
-    echo >> .cargo/config.toml
-    rm -rf .cargo vendor
+    # --versioned-dirs: a bare vendor/xml (the `xml` crate) is where atspi-common's
+    # zbus-lockstep macro looks for its XML files (../xml), and it fails to compile.
+    cargo vendor --locked --versioned-dirs > .cargo/config.toml
+    tar pcf vendor.tar vendor .cargo
+    rm -rf vendor .cargo
 
 # Extracts vendored dependencies
 vendor-extract:
-    rm -rf vendor
+    rm -rf vendor .cargo
     tar pxf vendor.tar
 
 # Bump cargo version, create git commit, and create tag

@@ -727,6 +727,44 @@ Append-only. Newest at the bottom. Format: date — decision — why.
   - The collection entries in `docs/RELEASE.md` are drafted without reading
     `applets.ron` / `applications.ron` (no network); their fields must be checked against the
     real files before the PR.
+- 2026-09-26 - **Polish: `just vendor` writes `vendor.tar`.** The template recipe (noted
+  2026-09-25 above) built `.cargo/config.toml` and then deleted it and `vendor/` without
+  archiving, so `just build-vendored` failed at `tar pxf vendor.tar`. Now:
+  `cargo vendor --locked > .cargo/config.toml` (its stdout is the source-replacement config,
+  including the libcosmic git source, pointing at `vendor`), `tar pcf vendor.tar vendor .cargo`,
+  then `rm -rf vendor .cargo`.
+  - `--locked` so the tarball matches `Cargo.lock` (the libcosmic pin) and fails instead of
+    updating it. The template's `--sync Cargo.toml` and `head -n -1` edit are gone: `--sync`
+    only adds extra manifests, and the printed config is already complete.
+  - `vendor-extract` removes `vendor/` and `.cargo/` before unpacking, so a stale config
+    can't point at old sources.
+  - The recipes delete `.cargo/`. The repo has no tracked `.cargo/` (only
+    `/.cargo/config.toml` is ignored), so nothing of ours is lost, but a local
+    `.cargo/config.toml` would be replaced.
+  - **`--versioned-dirs` is required.** The user's first `just build-vendored` failed in
+    `atspi-common` 0.13.0 (292 errors: E0119, E0432/E0433, E0308), while the normal build
+    worked. Not a version or source mismatch: `Cargo.lock` has one version each of
+    atspi/zbus/zvariant, the generated config covers every git source, and the vendored
+    `atspi-common` matched its `.cargo-checksum.json`. Reproduced in a scratch copy, the
+    first error is `#[validate(signal: ...)]` panicking with "File has no extension."
+    `zbus-lockstep` 0.5.2 (`resolve_xml_path`) tries `$CARGO_MANIFEST_DIR/xml`, then
+    `../xml` and more, and the last one that exists wins. In an unversioned vendor dir,
+    `vendor/atspi-common/../xml` is the vendored `xml` 1.4.0 crate (via `xmltree`), so the
+    macro reads that crate's folder, panics on `src/`, and drops the types it annotates
+    (`ObjectRef` and others); the other errors follow from that. The registry cache names
+    folders `xml-1.4.0`, so `../xml` doesn't exist there. With `vendor/xml` renamed to
+    `xml-1.4.0`, `atspi-common` and then the whole workspace built `--release --frozen` in
+    the scratch copy (1m 56s). `--versioned-dirs` names every folder `name-version`, so no
+    vendored crate can be called `xml` again.
+  - `build-vendored` is a bash recipe: it unpacks `vendor.tar`, builds
+    `cargo build --release --frozen` (locked plus offline; the old extra `--offline` was
+    redundant), and a `trap ... EXIT` removes `vendor/` and `.cargo/` whether the build
+    passes or fails, so a vendored build never leaves source replacement active for plain
+    `cargo` runs. `vendor-extract` still unpacks and leaves them, for packagers who want
+    the tree.
+  - The full `just vendor` (downloads every crate) wasn't run by Claude. The user retested:
+    `just vendor` writes versioned dirs, `just build-vendored` builds release with no errors
+    and leaves no `vendor/` or `.cargo/`, and the normal `cargo build` still works.
 
 ## Open
 

@@ -327,6 +327,10 @@ original, and the journal shows each call.
   mark-and-move key), highlight marked rows more clearly, and show `marked` in the details
   pane.~~ - done 2026-09-26: space marks in place, `J` marks and moves down, marked rows get
   a faint accent background, details show `restore   marked`.
+- ~~`just vendor` deletes `vendor/` without writing `vendor.tar`, so `just build-vendored`
+  fails.~~ - done 2026-09-26: it writes `vendor.tar` (`vendor/` with versioned folders, plus
+  `.cargo/config.toml`), and `build-vendored` unpacks it, builds `--frozen`, and removes
+  `vendor/` and `.cargo/` again, even on failure.
 
 ## Phase 7 — Release
 
