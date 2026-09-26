@@ -13,6 +13,7 @@ Files to bump (Claude prepares these; the user reviews and commits):
 - `resources/deb/changelog`: a new entry at the top, `apsis (<version>-1) noble`, signed
   with the repo's commit identity
 - `CHANGELOG.md`: the new section and its compare link
+- `docs/apsis.1`: the version and date in the `.TH` line (check with `man -l docs/apsis.1`)
 
 Then `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, `just deb` and
 `lintian --pedantic target/debian/apsis_<version>-1_amd64.deb` (0 errors; the kept warnings are

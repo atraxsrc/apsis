@@ -24,7 +24,7 @@ rust-embed.workspace = true
 tokio.workspace = true
 
 # `just deb` (cargo-deb). It builds the workspace, renders the `.in` templates into
-# `target/deb-assets/` and runs `cargo deb --no-build`, so the package holds the same files at
+# `target/deb-assets/` (with the gzipped man page) and runs `cargo deb --no-build`, so the package holds the same files at
 # the same paths as `sudo just install`. Paths are relative to this crate; `target/release/`
 # is cargo-deb's shorthand for the build output.
 [package.metadata.deb]
@@ -53,4 +53,5 @@ assets = [
     ["../../resources/helper/io.github.atraxsrc.Apsis.Helper.conf", "usr/share/dbus-1/system.d/", "644"],
     ["../../target/deb-assets/apsis-helper.service", "usr/lib/systemd/system/", "644"],
     ["../../resources/helper/io.github.atraxsrc.Apsis.policy", "usr/share/polkit-1/actions/", "644"],
+    ["../../target/deb-assets/apsis.1.gz", "usr/share/man/man1/", "644"],
 ]

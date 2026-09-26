@@ -786,7 +786,8 @@ Append-only. Newest at the bottom. Format: date — decision — why.
     `desktop-entry-lacks-main-category` (the applet's `NoDisplay` entry, COSMIC applets use
     `Categories=COSMIC`, as for appstreamcli), `maintainer-script-calls-systemctl` (prerm's
     stop; the user chose to keep `systemctl` over `deb-systemd-invoke`),
-    `no-manual-page`, `initial-upload-closes-no-bugs` (Debian archive only).
+    ~~`no-manual-page`~~ (gone since the man page, 2026-09-27), `initial-upload-closes-no-bugs`
+    (Debian archive only).
   - `$auto` gives `libc6, libxkbcommon0`. `libwayland-client.so.0` is dlopen'd (winit /
     wayland-sys), so dpkg-shlibdeps can't see it; `libwayland-client0` is added to Depends
     by hand, at the user's request.
@@ -834,6 +835,49 @@ Append-only. Newest at the bottom. Format: date — decision — why.
     still carry raw names, so the helper and its journal are unchanged. The format follows the
     user's example; the list rows themselves still show the year (`2026-09-27 09:12`). Single
     delete's prompt now also gets the wrapping label, since a comment can be long.
+
+- 2026-09-27 - **Docs + small UI round:** README "Settings explained", man page, settings
+  details that fit.
+  - README: the settings table became a section per setting. The retention text comes from
+    Timeshift 24.01.1's `SnapshotRepo.auto_remove` (`.scratch/timeshift`, lines 615-700): past
+    `keep N` an older snapshot loses that level's tag, hourly/daily/weekly/monthly skip
+    snapshots with a comment (boot doesn't), and a snapshot left without tags is deleted. The
+    third filter example uses `***` on purpose: with `/home/you/**` excluding the rest of the
+    home, `+ /home/you/Projects/**` doesn't match the folder itself, so rsync never enters it.
+  - `docs/apsis.1`: plain `man` macros, no pandoc. `.nh` so polkit action names and paths
+    aren't hyphenated. `groff -man -ww -z` gives no warnings. Installed as
+    `/usr/share/man/man1/apsis.1.gz` by `just install` (and removed by `uninstall`) and in the
+    .deb, both with `gzip -9n` (no name or time stamp, as lintian wants); `just deb` writes it
+    into `target/deb-assets/`. lintian --pedantic: `no-manual-page` gone, no new tags.
+  - Settings details: the text already wrapped (`WordOrGlyph`); what cut it off was height. A
+    headless tiny-skia render (`renderer::Headless`, no window, nothing on the user's screen)
+    showed the popup's fixed 8-row details pane cutting the backend note mid-sentence, and a
+    narrow window needing its scrollbar. Now, in the popup's settings view only, the details
+    pane is unscrolled with a zero-width spacer for the 8-row minimum, has a fixed width (the
+    same 2/5 the portions gave, 275.2 px), the list pane is `Fill` high, and the panes row is
+    `Shrink`. iced's flex then sizes the details first and stretches the list to match; with
+    both panes `FillPortion`, the list was laid out before the details and got zero height. In
+    a window the panes keep the window's height, so the notes were shortened to fit
+    640 x 440 (the home one drops its "space cycles" line; the footer shows `[space]change`).
+  - Test `settings_details_fit_without_scrolling_in_the_popup_and_a_small_window` lays out
+    `surface()` for every settings row in both modes with the headless renderer and fails if a
+    node sticks out of its parent in the details pane, the panes differ in height, or (popup)
+    the height changes from row to row. Checked that it fails with each popup change switched
+    off. **It only runs with `APSIS_LAYOUT_TEST=1`** (`APSIS_LAYOUT_TEST=1 cargo test -p apsis
+    settings_details_fit`); otherwise it prints that it was skipped and passes. It measures
+    real text with whatever fonts are installed, so on CI or another machine different font
+    widths could fail it without anything being wrong in Apsis. Run it locally after changing
+    settings notes or the panes' layout. If no headless renderer can start, it also skips.
+  - After the user's test: the popup no longer changes height while moving between rows.
+    `tallest::Tallest` (a small custom widget) lays out every row's details with the same
+    limits, takes the tallest height, and draws only the selected one. iced has nothing that
+    does this: `Stack` takes its base layer's size, and rows and columns add up. The details
+    are text only, so the hidden ones need no events. The height is worked out on each layout
+    from the rows there are, so it changes only when the rows do (a filter added, another
+    device picked), not when moving.
+  - The .deb here was built with a scratch `CARGO_HOME` whose `config.toml` points at the
+    unpacked `vendor.tar`, so `cargo deb`'s metadata call works offline without writing
+    `vendor/` or `.cargo/` into the repo.
 
 ## Open
 

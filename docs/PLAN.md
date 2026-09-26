@@ -347,6 +347,11 @@ original, and the journal shows each call.
 - Parser: `Ret=NNN` lines are diagnostics like `E:`/`W:` (a list warning, not `not a snapshot
   row`), and part of a failure's output. Fixture `list-rsync-stale-mount-ret.txt`. - done
   2026-09-27.
+- Docs + small UI (2026-09-27, not committed yet): README "Settings explained", man page
+  `docs/apsis.1` installed gzipped by `just install` and the .deb (clears lintian's
+  `no-manual-page`), settings details that wrap and are never cut off in the popup or a narrow
+  window, with a line per home option; the popup keeps one height in the settings view
+  (sized to the tallest row's details). The layout test runs only with `APSIS_LAYOUT_TEST=1`.
 
 ## Phase 7 — Release
 

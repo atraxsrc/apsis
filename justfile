@@ -19,6 +19,9 @@ launcher-dst := base-dir / 'share' / 'applications' / launcher
 icons-dir := base-dir / 'share' / 'icons' / 'hicolor'
 icon-dst := icons-dir / 'scalable' / 'apps' / appid + '.svg'
 icon-symbolic-dst := icons-dir / 'symbolic' / 'apps' / appid + '-symbolic.svg'
+# The man page, written in roff (docs/apsis.1), installed gzipped. `-n` leaves out the name and
+# time stamp, so the file is the same on every build (lintian checks this).
+man-dst := base-dir / 'share' / 'man' / 'man1' / name + '.1.gz'
 
 # Privileged helper (Phase 4): the binary, D-Bus activation and bus policy, systemd unit, and
 # polkit actions. `libexec-path` is where the helper lives at run time (written into the
@@ -100,6 +103,7 @@ install:
     install -Dm0644 {{ 'target' / 'xdgen' / 'app.metainfo.xml' }} {{metainfo-dst}}
     install -Dm0644 {{ 'resources' / 'icons' / 'hicolor' / 'scalable' / 'apps' / appid + '.svg' }} {{icon-dst}}
     install -Dm0644 {{ 'resources' / 'icons' / 'hicolor' / 'symbolic' / 'apps' / appid + '-symbolic.svg' }} {{icon-symbolic-dst}}
+    gzip -9nc {{ 'docs' / name + '.1' }} | install -Dm0644 /dev/stdin {{man-dst}}
     install -Dm0755 {{ cargo-target-dir / 'release' / helper }} {{helper-dst}}
     sed 's|@libexecdir@|{{libexec-path}}|g' {{ helper-res / helper-bus + '.service.in' }} | install -Dm0644 /dev/stdin {{dbus-service-dst}}
     sed 's|@libexecdir@|{{libexec-path}}|g' {{ helper-res / helper + '.service.in' }} | install -Dm0644 /dev/stdin {{systemd-unit-dst}}
@@ -112,13 +116,14 @@ uninstall:
     if [ -z '{{rootdir}}' ]; then systemctl stop {{helper}}.service || true; fi
     rm -f {{helper-dst}} {{dbus-service-dst}} {{systemd-unit-dst}} {{dbus-policy-dst}} {{polkit-dst}}
     {{reload-system}}
-    rm -f {{launcher-dst}}
+    rm -f {{launcher-dst}} {{man-dst}}
     rm {{bin-dst}} {{desktop-dst}} {{metainfo-dst}} {{icon-dst}} {{icon-symbolic-dst}}
 
 # .deb package (cargo-deb, [package.metadata.deb] in crates/apsis/Cargo.toml). Holds the same
-# files as `install`: the templates are rendered with the same prefix into deb-assets-dir, and
-# the maintainer scripts in resources/deb/ do the reload-system step. Extra args go to cargo
-# build (CI passes --locked). Output: target/debian/apsis_<version>-1_amd64.deb
+# files as `install`: the templates are rendered with the same prefix, and the man page gzipped,
+# into deb-assets-dir, and the maintainer scripts in resources/deb/ do the reload-system step.
+# Extra args go to cargo build (CI passes --locked).
+# Output: target/debian/apsis_<version>-1_amd64.deb
 deb-assets-dir := 'target' / 'deb-assets'
 
 deb *args:
@@ -126,6 +131,7 @@ deb *args:
     mkdir -p {{deb-assets-dir}}
     sed 's|@libexecdir@|{{libexec-path}}|g' {{ helper-res / helper-bus + '.service.in' }} > {{ deb-assets-dir / helper-bus + '.service' }}
     sed 's|@libexecdir@|{{libexec-path}}|g' {{ helper-res / helper + '.service.in' }} > {{ deb-assets-dir / helper + '.service' }}
+    gzip -9nc {{ 'docs' / name + '.1' }} > {{ deb-assets-dir / name + '.1.gz' }}
     cargo deb -p {{name}} --no-build
 
 # Vendors dependencies into vendor.tar (vendor/ plus a .cargo/config.toml that points cargo at it)

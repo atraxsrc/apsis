@@ -6,6 +6,7 @@ mod config;
 mod fmt;
 mod i18n;
 mod settings_view;
+mod tallest;
 
 use app::Mode;
 use cosmic::applet::PanelType;

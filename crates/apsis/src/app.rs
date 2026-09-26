@@ -35,6 +35,7 @@ use crate::config::Config;
 use crate::fl;
 use crate::fmt;
 use crate::settings_view::{BackendChoice, Row, Section, SettingsView};
+use crate::tallest::Tallest;
 
 /// Popup width in logical pixels (UI.md: ~720, room for the list and details side by side).
 const POPUP_WIDTH: f32 = 720.0;
@@ -56,6 +57,12 @@ const WINDOW_SHOWN_FALLBACK: Duration = Duration::from_millis(1500);
 const MENU_WIDTH: f32 = 240.0;
 /// Height of one snapshot row: monotext line height (20) plus vertical padding.
 const ROW_HEIGHT: f32 = 24.0;
+/// The popup's padding either side of the panes, and the space between them.
+const POPUP_PADDING: f32 = 12.0;
+const PANE_SPACING: f32 = 8.0;
+/// The popup's details pane: two fifths of the panes' width, as `FillPortion(3)` and
+/// `FillPortion(2)` share it.
+const POPUP_DETAILS_WIDTH: f32 = (POPUP_WIDTH - 2.0 * POPUP_PADDING - PANE_SPACING) * 2.0 / 5.0;
 /// Rows shown before the list scrolls.
 const VISIBLE_ROWS: u16 = 8;
 /// The snapshots pane is at least this many rows high, so short lists don't look cramped.
@@ -1752,11 +1759,23 @@ impl AppModel {
             pane(
                 fl!("pane-details"),
                 details_active,
-                Length::FillPortion(2),
+                // A fixed width lets the row size the details pane first, so the list beside it
+                // can stretch to its height (see `settings_details_grow`).
+                if self.settings_details_grow() {
+                    Length::Fixed(POPUP_DETAILS_WIDTH)
+                } else {
+                    Length::FillPortion(2)
+                },
                 self.details(),
             ),
         ])
-        .spacing(8);
+        .spacing(PANE_SPACING)
+        // A popup's panes are as high as their content (see `settings_details_grow`); a
+        // window's fill it.
+        .height(match self.mode {
+            Mode::Applet => Length::Shrink,
+            Mode::Window => Length::Fill,
+        });
         widget::column::with_children(vec![
             self.header(),
             panes.into(),
@@ -1765,7 +1784,7 @@ impl AppModel {
             self.hints(),
         ])
         .spacing(6)
-        .padding([10, 12])
+        .padding([10.0, POPUP_PADDING])
         .into()
     }
 
@@ -1846,6 +1865,14 @@ impl AppModel {
         }
     }
 
+    /// Popup settings view: the details pane is as high as the tallest row's details (at least
+    /// [`VISIBLE_ROWS`]), so nothing scrolls or is cut off and the popup keeps one height while
+    /// moving between rows; the settings list stretches to match. A window's panes have the
+    /// window's height, so there the notes are kept short enough to fit.
+    fn settings_details_grow(&self) -> bool {
+        self.mode == Mode::Applet && self.overlay == Overlay::Settings
+    }
+
     /// In window mode the panes fill the window's height instead.
     fn pane_height(&self) -> Length {
         match self.mode {
@@ -1877,12 +1904,31 @@ impl AppModel {
         };
         container(content)
             .width(Length::Fill)
-            .height(self.pane_height())
+            .height(if self.settings_details_grow() {
+                // As high as the details pane beside it.
+                Length::Fill
+            } else {
+                self.pane_height()
+            })
             .into()
     }
 
     /// The right pane: everything about the selected snapshot.
     fn details(&self) -> Element<'_, Message> {
+        if self.settings_details_grow() {
+            // Unscrolled, as high as the tallest row's details, beside a zero-width spacer that
+            // keeps it at least as high as a list.
+            let min_height = ROW_HEIGHT * f32::from(VISIBLE_ROWS);
+            return widget::row::with_children(vec![
+                container(self.settings_details_tallest())
+                    .width(Length::Fill)
+                    .into(),
+                widget::space::vertical()
+                    .height(Length::Fixed(min_height))
+                    .into(),
+            ])
+            .into();
+        }
         let content = match (self.overlay, self.snapshots().get(self.selected)) {
             (Overlay::Settings, _) => scroll(self.settings_details()),
             (Overlay::Browse | Overlay::RestorePlan, _) => {
@@ -2164,85 +2210,21 @@ impl AppModel {
         let SettingsLoad::Ready(view) = &self.settings else {
             return lines([]);
         };
-        let row = view.current();
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        let note = match row {
-            Row::Device => match view.device() {
-                Some(device) => {
-                    pairs.extend([
-                        (fl!("settings-key-path"), device.path()),
-                        (fl!("settings-key-type"), device.fstype.clone()),
-                        (fl!("settings-key-size"), fmt::size(device.size)),
-                        (fl!("settings-key-label"), device.label.clone()),
-                        (fl!("settings-key-uuid"), device.uuid.clone()),
-                    ]);
-                    fl!("settings-device-note")
-                }
-                None if view.edited.backup_device_uuid.is_empty() => fl!("settings-device-none"),
-                None => {
-                    let uuid = view.edited.backup_device_uuid.clone();
-                    pairs.push((fl!("settings-key-uuid"), uuid));
-                    fl!("settings-device-missing-note")
-                }
-            },
-            Row::Mode if view.edited.btrfs_mode => fl!("settings-mode-btrfs"),
-            Row::Mode if view.btrfs_available() => fl!("settings-mode-rsync"),
-            Row::Mode => fl!("settings-mode-rsync-only"),
-            Row::BtrfsHome => fl!("settings-btrfs-home-note"),
-            Row::Schedule(level) => {
-                pairs.push((
-                    fl!("settings-key-keep"),
-                    view.edited.count(level).to_string(),
-                ));
-                fl!("settings-schedule-note", level = level.name())
-            }
-            Row::Home(index) => {
-                let user = view.user(index);
-                pairs.extend([
-                    (fl!("settings-key-user"), user.name.clone()),
-                    (fl!("settings-key-home"), user.home.clone()),
-                    (
-                        fl!("settings-key-backup"),
-                        home_state_name(view.home_state(index)),
-                    ),
-                ]);
-                if user.encrypted_home {
-                    fl!("settings-home-encrypted")
-                } else {
-                    fl!("settings-home-note")
-                }
-            }
-            Row::Filter(index) => {
-                let pattern = &view.edited.exclude[index];
-                let kind = if pattern.starts_with("+ ") {
-                    fl!("settings-filter-include")
-                } else {
-                    fl!("settings-filter-exclude")
-                };
-                pairs.push((fl!("settings-key-kind"), kind));
-                fl!("settings-filter-note")
-            }
-            Row::AddFilter => fl!("settings-add-note"),
-            Row::Backend => fl!("settings-backend-note"),
-            Row::DryRun => fl!("settings-dry-run-note"),
+        settings_row_details(view, view.current())
+    }
+
+    /// The popup settings view's right pane: the selected row's details, in a space as high as
+    /// the tallest row's, so the popup keeps its height while moving between rows.
+    fn settings_details_tallest(&self) -> Element<'_, Message> {
+        let SettingsLoad::Ready(view) = &self.settings else {
+            return lines([]);
         };
-        let mut rows: Vec<Element<'_, Message>> = pairs
+        let all = view
+            .rows()
             .into_iter()
-            .map(|(key, value)| {
-                let value = monotext(value).wrapping(Wrapping::WordOrGlyph);
-                key_value_row(key, value.into(), DETAILS_KEY_WIDTH)
-            })
+            .map(|row| settings_row_details(view, row))
             .collect();
-        rows.push(
-            monotext(note)
-                .wrapping(Wrapping::WordOrGlyph)
-                .class(theme::Text::Custom(dim_text))
-                .into(),
-        );
-        widget::column::with_children(rows)
-            .spacing(4)
-            .padding([4, 6])
-            .into()
+        Tallest::new(all, view.cursor).into()
     }
 
     /// The browser's pane title: `2026-09-25_03-00-01:/etc · 3 marked`.
@@ -2586,6 +2568,93 @@ fn settings_row_text(view: &SettingsView, row: Row) -> (String, bool) {
             false,
         ),
     }
+}
+
+/// What settings row `row` means: its values, then a note. Text only; it wraps.
+fn settings_row_details(view: &SettingsView, row: Row) -> Element<'static, Message> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let note = match row {
+        Row::Device => match view.device() {
+            Some(device) => {
+                pairs.extend([
+                    (fl!("settings-key-path"), device.path()),
+                    (fl!("settings-key-type"), device.fstype.clone()),
+                    (fl!("settings-key-size"), fmt::size(device.size)),
+                    (fl!("settings-key-label"), device.label.clone()),
+                    (fl!("settings-key-uuid"), device.uuid.clone()),
+                ]);
+                fl!("settings-device-note")
+            }
+            None if view.edited.backup_device_uuid.is_empty() => fl!("settings-device-none"),
+            None => {
+                let uuid = view.edited.backup_device_uuid.clone();
+                pairs.push((fl!("settings-key-uuid"), uuid));
+                fl!("settings-device-missing-note")
+            }
+        },
+        Row::Mode if view.edited.btrfs_mode => fl!("settings-mode-btrfs"),
+        Row::Mode if view.btrfs_available() => fl!("settings-mode-rsync"),
+        Row::Mode => fl!("settings-mode-rsync-only"),
+        Row::BtrfsHome => fl!("settings-btrfs-home-note"),
+        Row::Schedule(level) => {
+            pairs.push((
+                fl!("settings-key-keep"),
+                view.edited.count(level).to_string(),
+            ));
+            fl!("settings-schedule-note", level = level.name())
+        }
+        Row::Home(index) => {
+            let user = view.user(index);
+            pairs.extend([
+                (fl!("settings-key-user"), user.name.clone()),
+                (fl!("settings-key-home"), user.home.clone()),
+                (
+                    fl!("settings-key-backup"),
+                    home_state_name(view.home_state(index)),
+                ),
+            ]);
+            if user.encrypted_home {
+                fl!("settings-home-encrypted")
+            } else {
+                [
+                    fl!("settings-home-excluded-note"),
+                    fl!("settings-home-hidden-note"),
+                    fl!("settings-home-all-note"),
+                ]
+                .join("\n")
+            }
+        }
+        Row::Filter(index) => {
+            let pattern = &view.edited.exclude[index];
+            let kind = if pattern.starts_with("+ ") {
+                fl!("settings-filter-include")
+            } else {
+                fl!("settings-filter-exclude")
+            };
+            pairs.push((fl!("settings-key-kind"), kind));
+            fl!("settings-filter-note")
+        }
+        Row::AddFilter => fl!("settings-add-note"),
+        Row::Backend => fl!("settings-backend-note"),
+        Row::DryRun => fl!("settings-dry-run-note"),
+    };
+    let mut rows: Vec<Element<'_, Message>> = pairs
+        .into_iter()
+        .map(|(key, value)| {
+            let value = monotext(value).wrapping(Wrapping::WordOrGlyph);
+            key_value_row(key, value.into(), DETAILS_KEY_WIDTH)
+        })
+        .collect();
+    rows.push(
+        monotext(note)
+            .wrapping(Wrapping::WordOrGlyph)
+            .class(theme::Text::Custom(dim_text))
+            .into(),
+    );
+    widget::column::with_children(rows)
+        .spacing(4)
+        .padding([4, 6])
+        .into()
 }
 
 fn section_name(section: Section) -> String {
@@ -4550,6 +4619,89 @@ mod tests {
             let before = view(app).cursor;
             typed(app, "j");
             assert_ne!(view(app).cursor, before, "no row {row:?}");
+        }
+    }
+
+    /// Whether anything in `node` sticks out of the node holding it: text that doesn't wrap, or
+    /// a scrollable whose content is taller than it (the reader has to scroll).
+    fn overflows(node: &cosmic::iced::core::layout::Node) -> Option<String> {
+        let size = node.size();
+        node.children().iter().find_map(|child| {
+            let b = child.bounds();
+            if b.x + b.width > size.width + 0.5 || b.y + b.height > size.height + 0.5 {
+                Some(format!("{b:?} in {size:?}"))
+            } else {
+                overflows(child)
+            }
+        })
+    }
+
+    /// Measures real text, so the result depends on the fonts installed. Runs only with
+    /// `APSIS_LAYOUT_TEST=1` (`APSIS_LAYOUT_TEST=1 cargo test -p apsis settings_details_fit`),
+    /// so CI can't fail over another machine's font widths.
+    #[test]
+    fn settings_details_fit_without_scrolling_in_the_popup_and_a_small_window() {
+        use cosmic::iced::core::layout::Limits as LayoutLimits;
+        use cosmic::iced::core::renderer::Headless;
+        use cosmic::iced::core::widget::Tree;
+
+        if std::env::var_os("APSIS_LAYOUT_TEST").is_none_or(|v| v != "1") {
+            eprintln!("layout test skipped; set APSIS_LAYOUT_TEST=1 to run it");
+            return;
+        }
+        // Headless tiny-skia: real text layout, no window.
+        let Some(renderer) =
+            cosmic::iced::futures::executor::block_on(<cosmic::Renderer as Headless>::new(
+                cosmic::font::default(),
+                14.0.into(),
+                Some("tiny-skia"),
+            ))
+        else {
+            eprintln!("no headless renderer here; skipped");
+            return;
+        };
+        // The popup grows up to its limit; the window is its smallest size.
+        for (mode, size) in [
+            (Mode::Applet, Size::new(POPUP_WIDTH, 1000.0)),
+            (Mode::Window, WINDOW_MIN_SIZE),
+        ] {
+            let mut app = in_settings();
+            app.mode = mode;
+            let rows = view(&app).rows();
+            let mut heights = Vec::new();
+            for (index, row) in rows.into_iter().enumerate() {
+                if let SettingsLoad::Ready(view) = &mut app.settings {
+                    view.select(index);
+                }
+                let mut surface = app.surface();
+                let mut tree = Tree::new(&surface);
+                let limits = LayoutLimits::new(Size::ZERO, size);
+                let node = surface
+                    .as_widget_mut()
+                    .layout(&mut tree, &renderer, &limits);
+                // Header, then the panes; the details pane is the second.
+                let details = &node.children()[1].children()[1];
+                assert_eq!(
+                    overflows(details),
+                    None,
+                    "{mode:?} {row:?}: the details don't fit"
+                );
+                let panes: Vec<f32> = node.children()[1]
+                    .children()
+                    .iter()
+                    .map(|pane| pane.size().height)
+                    .collect();
+                assert!(
+                    (panes[0] - panes[1]).abs() < 0.5,
+                    "{mode:?} {row:?}: panes {panes:?}"
+                );
+                heights.push(panes[1]);
+            }
+            // One height for every row: the popup doesn't jump while moving.
+            assert!(
+                heights.iter().all(|h| (h - heights[0]).abs() < 0.5),
+                "{mode:?}: pane heights {heights:?}"
+            );
         }
     }
 

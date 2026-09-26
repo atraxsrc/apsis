@@ -228,6 +228,7 @@ pkexec.
 - `/usr/share/applications/<app-id>.desktop` (with `X-CosmicApplet=true` as the template sets)
 - `/usr/share/icons/hicolor/{scalable,symbolic}/apps/<app-id>{,-symbolic}.svg`
 - `/usr/share/metainfo/<app-id>.metainfo.xml`
+- `/usr/share/man/man1/apsis.1.gz` - `docs/apsis.1`, gzipped with `-9n`
 - `/usr/libexec/apsis-helper` (0755)
 - `/usr/share/dbus-1/system-services/io.github.atraxsrc.Apsis.Helper.service` - D-Bus activation
 - `/usr/share/dbus-1/system.d/io.github.atraxsrc.Apsis.Helper.conf` - bus policy

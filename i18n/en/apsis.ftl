@@ -139,11 +139,13 @@ settings-mode-rsync-only = rsync copies the system to the backup device. btrfs m
 settings-mode-btrfs = btrfs snapshots the @ and @home subvolumes on the system disk (the backup device must be btrfs). Space switches to rsync.
 settings-btrfs-home-note = Also snapshot the @home subvolume.
 settings-schedule-note = Space turns { $level } snapshots on or off. Timeshift keeps the newest ones up to this count and removes older ones that have no comment.
-settings-home-note = Space cycles excluded, hidden files only, everything: the same filter patterns Timeshift's Users tab writes.
+settings-home-excluded-note = excluded: none of it.
+settings-home-hidden-note = hidden files only: app settings, not documents.
+settings-home-all-note = everything: all files; a full restore rolls documents back too.
 settings-home-encrypted = An encrypted home uses other patterns: change it in Timeshift.
 settings-filter-note = rsync uses the first filter that matches. + in front includes. x removes this one.
-settings-backend-note = Apsis's own setting, saved at once (not by w). Space switches. native rsync: Apsis lists by reading each snapshot's info.json, and creates snapshots with rsync itself, in Timeshift's layout, so Timeshift still lists, restores and deletes them. Deleting always goes through Timeshift. Needs apsis-helper; rsync mode only.
-settings-dry-run-note = On: [c] shows the exact rsync command, exclude list and info.json a native create would use, and writes nothing. Space turns it off, and [c] then creates for real.
+settings-backend-note = Apsis's own setting, saved at once (not by w); space switches. native rsync: Apsis makes snapshots itself, in Timeshift's layout, so Timeshift still lists, restores and deletes them. Needs apsis-helper; rsync mode only.
+settings-dry-run-note = On: [c] shows the rsync command, exclude list and info.json a native create would use, and writes nothing. Off: [c] creates for real.
 settings-add-note = Enter a pattern like /var/lib/libvirt/** or *.mp3. Start with "+ " to include instead of exclude.
 
 settings-reading = reading Timeshift's settings

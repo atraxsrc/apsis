@@ -186,6 +186,14 @@ password (polkit `browse`, cached a few minutes).
 in the left pane (title `settings`, `settings (unsaved)` with changes). The right pane explains
 the selected row. Needs `apsis-helper`: it reads and writes `/etc/timeshift/timeshift.json`.
 
+The explanation wraps and is never cut off. In the popup the details pane is sized once, to
+the tallest row's details (at least as high as a list), and the settings list beside it
+stretches to the same height, so the popup doesn't change height while moving between rows. A
+window's panes keep the window's height, so the notes are short enough to fit its smallest size
+(640 x 440). A layout test (`APSIS_LAYOUT_TEST=1`) checks every row both ways. A home row lists the three options, one line each:
+`excluded`, `hidden files only` (app settings, not documents), `everything` (a full restore
+rolls documents back too).
+
 ```
  ╭─ settings (unsaved) ──────────────────────────╮ ╭─ details ────────────────────╮
  │ ▸ device    sdb1  ext4  931.5G  Backup        │ │ path   /dev/sdb1             │

@@ -1,0 +1,246 @@
+.\" SPDX-License-Identifier: GPL-3.0-only
+.\" Man page for apsis, written directly in roff. Check with: man -l docs/apsis.1
+.TH APSIS 1 "2026-09-27" "apsis 0.1.1" "User Commands"
+.\" No hyphenation: action names and paths must stay whole.
+.nh
+.SH NAME
+apsis \- Timeshift-style system snapshots for the COSMIC desktop
+.SH SYNOPSIS
+.B apsis
+.br
+.B apsis
+.B \-\-window
+.SH DESCRIPTION
+.B apsis
+is a panel applet for the COSMIC desktop that lists, creates, deletes and browses
+.BR timeshift (1)
+system snapshots, restores single files from them, and edits Timeshift's settings.
+Its popup looks like a small terminal and follows the COSMIC theme.
+.PP
+Started by the COSMIC panel,
+.B apsis
+is a panel button that opens the popup.
+Started anywhere else (the app launcher, a terminal), or with
+.BR \-\-window ,
+it shows the same view in a normal window.
+.PP
+Everything that needs root (creating, deleting, browsing, restoring, writing settings) goes
+through
+.BR apsis\-helper ,
+a small system service started on demand over D\-Bus, and polkit asks for the password.
+Without the helper, create, delete and list fall back to
+.BR pkexec (1),
+which asks every time.
+.SH OPTIONS
+.TP
+.B \-\-window
+Show the popup's view in a normal, resizable window, even when started by the panel.
+Esc closes the window.
+.SH KEYS
+Every
+.B [key]
+hint at the bottom of the view is also a button.
+.B ?
+shows these keys inside Apsis.
+.SS Snapshot list
+.TP
+.BR j ", " k ", " Up ", " Down ", " Home ", " End
+Move the selection.
+.TP
+.B c
+Create a snapshot; type a comment at the
+.B >
+line, then Enter.
+.TP
+.B d
+Delete the marked snapshots, or the selected one if none are marked; type
+.B y
+and Enter to confirm.
+Marked snapshots are deleted one at a time, and the delete stops at the first failure.
+.TP
+.B space
+Mark or unmark the selected snapshot for deletion.
+.TP
+.B J
+Mark or unmark, then move down.
+.TP
+.B r
+Refresh the list.
+.TP
+.B Enter
+Browse the selected snapshot's files.
+.TP
+.B Tab
+Make the details pane active, and back.
+.TP
+.B s
+Settings (see
+.BR SETTINGS ).
+.TP
+.B Esc
+Cancel the prompt, go back, clear the marks, then close.
+.SS Snapshot browser
+.TP
+.BR Enter ", " l
+Into the selected folder.
+.TP
+.BR Backspace ", " h
+Up one folder.
+.TP
+.B space
+Mark or unmark for restoring.
+.TP
+.B J
+Mark or unmark, then move down.
+.TP
+.B R
+Restore the marked entries (or the selected one): to a folder under
+.I ~/Apsis-restored
+or back to their original place.
+A dry run shows the plan first; Enter runs it.
+.TP
+.B r
+Read the folder again.
+.SS Settings
+.TP
+.B space
+Change the selected row.
+.TP
+.BR + ", " \- ", " e
+Keep one more, one fewer, or type the count.
+.TP
+.BR a ", " x
+Add a filter, remove the selected filter.
+.TP
+.B w
+Write the settings to Timeshift.
+.TP
+.B r
+Read them again, dropping changes.
+.SH SETTINGS
+These are Timeshift's own settings, in
+.IR /etc/timeshift/timeshift.json ,
+except the
+.B apsis
+section.
+Changes are kept until
+.B w
+writes them.
+.TP
+.B device
+The disk or partition snapshots go to: a Linux filesystem, not encrypted.
+Prefer another disk than the system one.
+.TP
+.B mode
+.B rsync
+copies the system to the backup device; later snapshots only copy what changed.
+.B btrfs
+(only on btrfs systems) snapshots the
+.B @
+subvolume, and
+.B @home
+if chosen, on the system disk.
+.TP
+.B schedule
+Monthly, weekly, daily, hourly and boot snapshots, each on or off, with a count to keep.
+Timeshift removes older scheduled snapshots past the count; on-demand snapshots, and
+scheduled ones (other than boot) with a comment, are kept.
+.TP
+.B home
+Per user, in rsync mode:
+.B excluded
+(nothing from the home folder),
+.B hidden files only
+(dot-files and dot-folders, i.e. settings), or
+.B everything
+(all files).
+With
+.BR everything ,
+a full system restore also rolls documents back.
+.TP
+.B filters
+rsync patterns: plain ones exclude, a leading
+.RB \(dq +
+\(dq includes, and the first match wins.
+.B *
+matches within one folder level,
+.B **
+across folders, and a leading
+.B /
+starts at the root.
+For example
+.I /var/lib/libvirt/**
+leaves out virtual machine images.
+.TP
+.B apsis backend
+.B timeshift
+(default) runs Timeshift for everything;
+.B native rsync
+(experimental) has Apsis make rsync snapshots itself, in Timeshift's layout.
+Saved at once, not by
+.BR w .
+.TP
+.B apsis dry run
+With the native backend,
+.B c
+only shows the plan and writes nothing.
+.SH FILES
+.TP
+.I /etc/timeshift/timeshift.json
+Timeshift's settings, read and written by the settings view (the old file is kept as
+.IR timeshift.json.bak ).
+.TP
+.I ~/Apsis-restored/<snapshot>/
+Where folder-mode restores go, owned by the user.
+Original-mode restores keep each replaced file as
+.IR <name>.apsis-before-<snapshot> .
+.TP
+.I /usr/libexec/apsis-helper
+The privileged helper.
+.TP
+.I /usr/share/dbus-1/system-services/io.github.atraxsrc.Apsis.Helper.service
+.TQ
+.I /usr/share/dbus-1/system.d/io.github.atraxsrc.Apsis.Helper.conf
+.TQ
+.I /usr/lib/systemd/system/apsis-helper.service
+D\-Bus activation, bus policy and systemd unit of the helper.
+.TP
+.I /usr/share/polkit-1/actions/io.github.atraxsrc.Apsis.policy
+The polkit actions below.
+.SH SECURITY
+The applet runs as the user and never as root.
+.B apsis\-helper
+checks each call with polkit, against the caller's D\-Bus name, and runs one operation at a
+time.
+Calls and results are logged to the journal
+.RB ( "journalctl \-u apsis\-helper" ).
+For the active session:
+.TP
+.B io.github.atraxsrc.Apsis.list
+Listing snapshots and reading settings: no password.
+.TP
+.B io.github.atraxsrc.Apsis.create
+.TQ
+.B io.github.atraxsrc.Apsis.delete
+.TQ
+.B io.github.atraxsrc.Apsis.configure
+.TQ
+.B io.github.atraxsrc.Apsis.browse
+.TQ
+.B io.github.atraxsrc.Apsis.restore
+Creating, deleting, writing settings, browsing and folder-mode restores: the password,
+remembered for a few minutes
+.RB ( auth_admin_keep ).
+.TP
+.B io.github.atraxsrc.Apsis.restore-original
+Restoring files over the running system: the password every time
+.RB ( auth_admin ).
+.PP
+Inactive and remote sessions need the password for every action.
+.SH SEE ALSO
+.BR timeshift (1),
+.BR pkexec (1),
+.BR polkit (8),
+.BR rsync (1)
+.PP
+https://github.com/atraxsrc/apsis

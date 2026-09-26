@@ -190,21 +190,71 @@ only when you're sure, e.g. for a config file you know is broken:
 - the dry run warns about `/etc` and `/usr`; replacing system files while they're in use can
   break things. For a whole broken system, use Timeshift's full restore instead.
 
-### Settings
+### Settings explained
 
-`s` (or right-click the panel icon → *Settings…*) opens Timeshift's own settings. Changes are
-marked `(unsaved)` until you press `w`.
+`s` (or right-click the panel icon → *Settings…*) opens Timeshift's own settings, the same file
+Timeshift's window edits (`/etc/timeshift/timeshift.json`). Move with `j`/`k`, change the
+selected row with `space`. Changes are marked `(unsaved)` until `w` writes them (password
+asked once); `r` reads the file again and drops them. The right pane explains the selected row.
 
-| setting | what it does |
+**`device`: where snapshots go.** `space` picks the next disk or partition that can hold
+snapshots (a Linux filesystem such as ext4 or btrfs, not encrypted). Use an external disk or at
+least another disk than the system one: a snapshot on the same disk won't survive that disk
+dying. When the disk isn't plugged in, Timeshift keeps it selected and Apsis shows its UUID.
+
+**`mode`: rsync or btrfs.**
+
+- `rsync` (the usual choice) copies the system to the backup disk. The first snapshot copies
+  everything; later ones only copy what changed and hard-link the rest, so each looks complete
+  but costs only the changes.
+- `btrfs` is only offered when the system is on btrfs (Pop!_OS installs ext4 by default). It
+  takes instant snapshots of the `@` subvolume on the system disk itself; `@home` adds the
+  home subvolume. Fast and small, but they're on the same disk.
+
+**`schedule` and `keep N`.** Five levels: monthly, weekly, daily, hourly and boot. `space`
+turns a level on or off; `+`/`-` keep one more or one fewer, `e` types the number (1 to 999).
+Timeshift runs the schedule itself (cron), not Apsis. When a level has more than `keep N`
+snapshots, the older ones lose that level's tag, and a snapshot with no tags left is deleted.
+Snapshots you make with `c` (tag `O`, on-demand) are never removed this way, and neither are
+hourly, daily, weekly or monthly snapshots that have a comment.
+
+**`home`: what to save of each user's home folder** (rsync mode). `space` cycles:
+
+| option | what it saves | when to use it |
+|---|---|---|
+| `excluded` | nothing from that home folder | the default. Snapshots are for the system; your documents belong in a real backup |
+| `hidden files only` | the dot-files and dot-folders (`~/.config`, `~/.bashrc`, ...): app and desktop settings | you want settings rolled back with the system, but not documents |
+| `everything` | all of it, documents, photos and downloads included | you have no other backup and the backup disk has room |
+
+> **Careful with `everything`:** Timeshift's full restore puts the whole snapshot back, so it
+> also rolls your documents back to that day; anything newer in your home folder is lost.
+> Restoring single files with Apsis (`Enter` on a snapshot) doesn't have this problem.
+
+An encrypted (ecryptfs) home uses other patterns; change it in Timeshift's window.
+
+**`filters`: extra paths to leave out or keep.** Each filter is an rsync pattern. A plain
+pattern excludes; `+ ` in front includes. `a` adds one at the `>` line, `x` removes the
+selected one. rsync takes the **first** filter that matches a path, and Timeshift's own
+excludes (caches, `/proc`, `/tmp`, other mounts, ...) come first.
+
+- `*` matches any name within one folder level; it doesn't cross a `/`.
+- `**` matches anything, across folders.
+- A pattern starting with `/` starts at the root of the system.
+
+| filter | effect |
 |---|---|
-| `device` | the backup disk; `space` picks the next one that can hold snapshots |
-| `mode` | `rsync` copies files to the backup disk (the usual choice); `btrfs` snapshots the system disk itself (only offered on btrfs systems) |
-| `@home` | btrfs mode only: include the home subvolume |
-| `schedule` | monthly, weekly, daily, hourly and at boot: on or off, and how many of each to keep |
-| `home` | rsync mode, per user: home folder excluded, hidden files only (settings), or everything |
-| `filters` | extra paths to include (`+`) or exclude; `a` adds, `x` removes |
-| `apsis` → `backend` | **experimental**: `native rsync` makes snapshots without running Timeshift. Off by default |
-| `apsis` → `dry run` | with the native backend: show the plan instead of creating (on by default) |
+| `/var/lib/libvirt/**` | leave out virtual machine disk images (huge, and they change all the time) |
+| `/home/*/Downloads/**` | leave out every user's Downloads folder (`*` is one user name) |
+| `+ /home/you/Projects/***` | keep `~/Projects` even though the home folder is `excluded` (`***` is the folder itself plus everything in it; `**` alone wouldn't let rsync into the folder) |
+
+**`apsis` → `backend`** (Apsis's own setting, saved at once, not by `w`). `timeshift`, the
+default, runs Timeshift for everything. `native rsync` (**experimental**) has Apsis make rsync
+snapshots itself, in Timeshift's exact layout, so Timeshift still lists, restores and deletes
+them; deleting always goes through Timeshift. Needs `apsis-helper`; rsync mode only.
+
+**`apsis` → `dry run`** (with the native backend; on by default). `c` then only shows what a
+snapshot would do (the rsync command, the exclude list, `info.json`) and writes nothing. Turn it
+off to make real native snapshots.
 
 > **Close Timeshift's own window first.** If it's open while you save here, it writes its own
 > settings over yours when it closes. Apsis warns you in the activity pane when it's open.
