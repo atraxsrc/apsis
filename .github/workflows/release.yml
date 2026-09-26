@@ -1,0 +1,47 @@
+name: Release
+
+# On a pushed v* tag: build the .deb (Ubuntu 24.04 / Pop!_OS 24.04, amd64) and attach it to
+# that tag's GitHub release. If the release doesn't exist yet, a draft is made for it, so the
+# notes (the CHANGELOG section) can be filled in before publishing.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deb:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      # libcosmic's build dependencies (as in ci.yml), just, and dpkg-dev for dpkg-shlibdeps
+      # ($auto in the package's Depends).
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkgconf libexpat1-dev libfontconfig-dev libfreetype-dev \
+            libxkbcommon-dev libwayland-dev just dpkg-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build the .deb
+        run: just deb --locked
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --draft --verify-tag --title "Apsis ${TAG#v}" \
+              --notes "See CHANGELOG.md."
+          gh release upload "$TAG" target/debian/*.deb --clobber

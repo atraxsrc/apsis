@@ -115,6 +115,19 @@ uninstall:
     rm -f {{launcher-dst}}
     rm {{bin-dst}} {{desktop-dst}} {{metainfo-dst}} {{icon-dst}} {{icon-symbolic-dst}}
 
+# .deb package (cargo-deb, [package.metadata.deb] in crates/apsis/Cargo.toml). Holds the same
+# files as `install`: the templates are rendered with the same prefix into deb-assets-dir, and
+# the maintainer scripts in resources/deb/ do the reload-system step. Extra args go to cargo
+# build (CI passes --locked). Output: target/debian/apsis_<version>-1_amd64.deb
+deb-assets-dir := 'target' / 'deb-assets'
+
+deb *args:
+    cargo build --release --workspace {{args}}
+    mkdir -p {{deb-assets-dir}}
+    sed 's|@libexecdir@|{{libexec-path}}|g' {{ helper-res / helper-bus + '.service.in' }} > {{ deb-assets-dir / helper-bus + '.service' }}
+    sed 's|@libexecdir@|{{libexec-path}}|g' {{ helper-res / helper + '.service.in' }} > {{ deb-assets-dir / helper + '.service' }}
+    cargo deb -p {{name}} --no-build
+
 # Vendors dependencies into vendor.tar (vendor/ plus a .cargo/config.toml that points cargo at it)
 vendor:
     rm -rf vendor .cargo

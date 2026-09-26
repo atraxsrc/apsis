@@ -766,6 +766,45 @@ Append-only. Newest at the bottom. Format: date — decision — why.
     `just vendor` writes versioned dirs, `just build-vendored` builds release with no errors
     and leaves no `vendor/` or `.cargo/`, and the normal `cargo build` still works.
 
+- 2026-09-26 - **.deb package (cargo-deb) and release workflow.** Target Pop!_OS / Ubuntu
+  24.04, amd64.
+  - `just deb [cargo args]`: `cargo build --release --workspace`, renders the two `.in`
+    templates with the same sed and `libexec-path` as `install` into `target/deb-assets/`,
+    then `cargo deb -p apsis --no-build` (`--no-build` because `apsis-helper` is another
+    crate's binary). The asset list in `crates/apsis/Cargo.toml` mirrors `install` path for
+    path; checked with `dpkg-deb -c` (11 files, plus cargo-deb's `copyright` and
+    `changelog.Debian.gz`). cargo-deb 3.8 warns that `../../target/...` sources aren't cargo
+    outputs it builds; expected, `just deb` makes them first.
+  - Maintainer scripts in `resources/deb/` (reviewed by the user before the first build) do
+    what `reload-system` and `uninstall` do: daemon-reload + bus `ReloadConfig` after
+    install and remove, stop the helper before remove/upgrade. Each step tolerates a missing
+    systemd or bus (chroots). The unit has no `[Install]`: it's D-Bus activated, nothing to
+    enable.
+  - `resources/deb/changelog` (Debian format) exists because lintian errors without one; it
+    needs a new entry per release, like the metainfo `<release>`.
+  - lintian 0 errors. Warnings kept: `desktop-entry-invalid-category COSMIC` and
+    `desktop-entry-lacks-main-category` (the applet's `NoDisplay` entry, COSMIC applets use
+    `Categories=COSMIC`, as for appstreamcli), `maintainer-script-calls-systemctl` (prerm's
+    stop; the user chose to keep `systemctl` over `deb-systemd-invoke`),
+    `no-manual-page`, `initial-upload-closes-no-bugs` (Debian archive only).
+  - `$auto` gives `libc6, libxkbcommon0`. `libwayland-client.so.0` is dlopen'd (winit /
+    wayland-sys), so dpkg-shlibdeps can't see it; `libwayland-client0` is added to Depends
+    by hand, at the user's request.
+  - `.github/workflows/release.yml`: on `v*` tags, ubuntu-24.04, `permissions: contents:
+    write` only, apt `just` + `dpkg-dev`, `cargo install cargo-deb --locked`,
+    `just deb --locked`, then `gh release upload --clobber` with `GITHUB_TOKEN`; creates a
+    draft release first if the tag has none yet. The tag name reaches the shell through `env`.
+
+- 2026-09-26 - **Release 0.1.1 prepared** (the .deb, README "How to use", the vendor fix).
+  The user tested the 0.1.0-1 .deb on Pop!_OS (installed with nala): 11 files, helper
+  activatable, 7 polkit actions, create/delete, reinstall stops the helper, remove cleans up.
+  - `resources/deb/changelog` starts at `0.1.1-1`: the `0.1.0-1` entry was dropped, since no
+    0.1.0 .deb was ever published.
+  - The metainfo screenshot URL stays on `v0.1.0`: that tag already has the current
+    screenshot (the screenshot commits are before it), and it resolves today.
+  - `Cargo.lock` bumped with `cargo update --workspace --offline`; only the three apsis crates
+    changed.
+
 ## Open
 
 - ~~App ID~~ - resolved 2026-09-25, see above.

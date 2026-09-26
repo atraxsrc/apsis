@@ -4,6 +4,22 @@ All notable changes to Apsis are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-09-26
+
+### Added
+
+- `.deb` package for Pop!_OS / Ubuntu 24.04 or newer (amd64): `just deb` builds it with
+  cargo-deb, with the same files as `sudo just install`. Pushing a `v*` tag builds it in CI and
+  attaches it to the GitHub release.
+- README: a "How to use" section (install, first run, everyday use, restoring files, settings,
+  troubleshooting).
+
+### Fixed
+
+- `just vendor` now writes `vendor.tar` (it used to delete its output), with versioned vendor
+  folders so `atspi-common` builds, and `just build-vendored` builds offline (`--frozen`) and
+  cleans up the unpacked sources afterwards.
+
 ## [0.1.0] - 2026-09-26
 
 First release.
@@ -35,4 +51,5 @@ First release.
   password every time.
 - App and symbolic icons, AppStream metainfo, desktop entries, `just install` / `just uninstall`.
 
+[0.1.1]: https://github.com/atraxsrc/apsis/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/atraxsrc/apsis/releases/tag/v0.1.0

@@ -22,3 +22,35 @@ jiff = { workspace = true, features = ["tz-system", "tzdb-zoneinfo"] }
 libcosmic.workspace = true
 rust-embed.workspace = true
 tokio.workspace = true
+
+# `just deb` (cargo-deb). It builds the workspace, renders the `.in` templates into
+# `target/deb-assets/` and runs `cargo deb --no-build`, so the package holds the same files at
+# the same paths as `sudo just install`. Paths are relative to this crate; `target/release/`
+# is cargo-deb's shorthand for the build output.
+[package.metadata.deb]
+maintainer = "atraxsrc <92285717+atraxsrc@users.noreply.github.com>"
+copyright = "2026 atraxsrc"
+section = "admin"
+priority = "optional"
+depends = "$auto, rsync, dbus, polkitd, libwayland-client0"
+recommends = "timeshift"
+extended-description = """\
+A COSMIC panel applet whose popup looks like a small terminal. It lists, creates and deletes \
+Timeshift snapshots, edits Timeshift's settings, and follows the COSMIC theme. Includes \
+apsis-helper, a D-Bus activated root service guarded by polkit. The native rsync backend and \
+file-level restore are experimental."""
+changelog = "../../resources/deb/changelog"
+maintainer-scripts = "../../resources/deb/"
+assets = [
+    ["target/release/apsis", "usr/bin/", "755"],
+    ["target/release/apsis-helper", "usr/libexec/", "755"],
+    ["../../target/xdgen/app.desktop", "usr/share/applications/io.github.atraxsrc.Apsis.desktop", "644"],
+    ["../../target/xdgen/launcher.desktop", "usr/share/applications/io.github.atraxsrc.Apsis.Window.desktop", "644"],
+    ["../../target/xdgen/app.metainfo.xml", "usr/share/metainfo/io.github.atraxsrc.Apsis.metainfo.xml", "644"],
+    ["../../resources/icons/hicolor/scalable/apps/io.github.atraxsrc.Apsis.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["../../resources/icons/hicolor/symbolic/apps/io.github.atraxsrc.Apsis-symbolic.svg", "usr/share/icons/hicolor/symbolic/apps/", "644"],
+    ["../../target/deb-assets/io.github.atraxsrc.Apsis.Helper.service", "usr/share/dbus-1/system-services/", "644"],
+    ["../../resources/helper/io.github.atraxsrc.Apsis.Helper.conf", "usr/share/dbus-1/system.d/", "644"],
+    ["../../target/deb-assets/apsis-helper.service", "usr/lib/systemd/system/", "644"],
+    ["../../resources/helper/io.github.atraxsrc.Apsis.policy", "usr/share/polkit-1/actions/", "644"],
+]

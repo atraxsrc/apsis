@@ -64,6 +64,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.1.1" date="2026-09-26">
+      <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.1.1</url>
+      <description>
+        <ul>
+          <li>A .deb package for Pop!_OS and Ubuntu 24.04 or newer, attached to each release</li>
+          <li>A "How to use" guide in the README</li>
+          <li>Fixed: just vendor now writes vendor.tar, and just build-vendored builds offline</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-09-26">
       <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.1.0</url>
       <description>

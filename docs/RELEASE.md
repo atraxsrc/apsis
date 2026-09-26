@@ -3,7 +3,50 @@
 Steps for a release, and the drafts for the COSMIC community collection. Claude prepares files;
 the user tags, pushes, publishes the release and opens the collection PR.
 
-## v0.1.0 checklist
+## Every release
+
+Files to bump (Claude prepares these; the user reviews and commits):
+
+- `version` in the root `Cargo.toml` (`[workspace.package]`), then `cargo update --workspace`
+  so `Cargo.lock` follows (only the three apsis crates change)
+- `resources/app.metainfo.xml`: a new `<release>` at the top of `<releases>`
+- `resources/deb/changelog`: a new entry at the top, `apsis (<version>-1) noble`, signed
+  with the repo's commit identity
+- `CHANGELOG.md`: the new section and its compare link
+
+Then `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, `just deb` and
+`lintian --pedantic target/debian/apsis_<version>-1_amd64.deb` (0 errors; the kept warnings are
+in DECISIONS.md, 2026-09-26 ".deb package").
+
+**The .deb is automatic.** Pushing a `v*` tag runs `.github/workflows/release.yml`: it builds
+the .deb on ubuntu-24.04 (`just deb --locked`) and uploads `apsis_<version>-1_amd64.deb` to
+that tag's GitHub release. If the release doesn't exist yet, the workflow makes a **draft**
+with placeholder notes; edit its notes and publish it. If it does exist, the file is added
+(or replaced) there. Check the workflow's run in the Actions tab before announcing the release.
+
+## v0.1.1 checklist
+
+Prepared (2026-09-26): version 0.1.1, metainfo `<release>`, `resources/deb/changelog`,
+`CHANGELOG.md`; the .deb tested by the user on Pop!_OS (install, helper activation, polkit
+actions, create/delete, reinstall, remove).
+
+User steps, in order:
+
+1. Commit, push `main`, and check that CI passes.
+2. Tag and push:
+
+   ```sh
+   git tag -a v0.1.1 -m 'Apsis 0.1.1'
+   git push origin v0.1.1
+   ```
+
+3. Wait for the **Release** workflow (Actions tab). It creates a draft release `Apsis 0.1.1`
+   with the .deb attached.
+4. Edit the draft: paste the `0.1.1` section of `CHANGELOG.md` as its notes, check that
+   `apsis_0.1.1-1_amd64.deb` is attached, and publish.
+5. Optional: download the attached .deb and install it on a clean 24.04 machine or VM.
+
+## v0.1.0 checklist (done)
 
 Prepared (Phase 7 prep, 2026-09-26):
 

@@ -1,0 +1,14 @@
+#!/bin/sh
+# Stop apsis-helper if it is running, so the old binary isn't left running after a remove or
+# while an upgrade replaces it. The bus starts the new one on the next call.
+set -e
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        if [ -d /run/systemd/system ] && systemctl is-active --quiet apsis-helper.service; then
+            systemctl stop apsis-helper.service || true
+        fi
+        ;;
+esac
+
+exit 0

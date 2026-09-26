@@ -1,0 +1,16 @@
+#!/bin/sh
+# The unit, activation file and bus policy are gone: let systemd and the system bus forget
+# them. As in postinst, neither may be running, which isn't an error.
+set -e
+
+case "$1" in
+    remove|purge)
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+        fi
+        busctl call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus \
+            ReloadConfig >/dev/null 2>&1 || true
+        ;;
+esac
+
+exit 0
