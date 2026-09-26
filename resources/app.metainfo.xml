@@ -64,6 +64,18 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.1.2" date="2026-09-27">
+      <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.1.2</url>
+      <description>
+        <ul>
+          <li>Delete several snapshots at once: mark them with space or J, then press d</li>
+          <li>Delete prompts and results show the date and comment instead of the raw name</li>
+          <li>Right-click menu: Close, and Remove or move applet</li>
+          <li>A manual page (man apsis) and a settings guide in the README</li>
+          <li>The settings explanations are no longer cut off</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-09-26">
       <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.1.1</url>
       <description>

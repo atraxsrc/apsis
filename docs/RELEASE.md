@@ -25,7 +25,33 @@ that tag's GitHub release. If the release doesn't exist yet, the workflow makes 
 with placeholder notes; edit its notes and publish it. If it does exist, the file is added
 (or replaced) there. Check the workflow's run in the Actions tab before announcing the release.
 
-## v0.1.1 checklist
+## v0.1.2 checklist
+
+Prepared (2026-09-27): version 0.1.2 (`Cargo.toml`, `Cargo.lock`), metainfo `<release>`,
+`resources/deb/changelog`, the man page's `.TH` line, `CHANGELOG.md`. Covers commits `7076a1c`
+(bulk delete, delete labels, menu, `Ret=`) and `e92d5b9` (settings guide, man page, settings
+details).
+
+User steps, in order:
+
+1. Commit, push `main`, and check that CI passes.
+2. Tag and push:
+
+   ```sh
+   git tag -a v0.1.2 -m 'Apsis 0.1.2'
+   git push origin v0.1.2
+   ```
+
+3. Wait for the **Release** workflow (Actions tab). It creates a draft release `Apsis 0.1.2`
+   with the .deb attached.
+4. Edit the draft: paste the `0.1.2` section of `CHANGELOG.md` as its notes, check that
+   `apsis_0.1.2-1_amd64.deb` is attached, and publish.
+5. Optional: install the attached .deb and check `man apsis` and the right-click menu.
+
+## v0.1.1 checklist (done)
+
+Done: `v0.1.1` tagged and the release published with the .deb attached (confirmed by the user
+2026-09-27).
 
 Prepared (2026-09-26): version 0.1.1, metainfo `<release>`, `resources/deb/changelog`,
 `CHANGELOG.md`; the .deb tested by the user on Pop!_OS (install, helper activation, polkit
