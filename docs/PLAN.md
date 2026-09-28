@@ -143,7 +143,9 @@ reference.
 - **Native create at low priority**: rsync under `ionice -c 3 nice -n <to 19>`.
 - Tests: retention edge cases (unit), the priority of the child processes, applet flows; native
   tests with low priority on temp dirs and (`just test-ext4`) the ext4 image.
-- **Status: built 2026-09-28, not committed, waiting for the user's test.**
+- **Status: built 2026-09-28, committed 2026-09-29 (`90272f5`).** `just test-ext4` passes on the
+  user's machine (native 14/14, restore 11/11). Waiting for the user's `just deb-install` test
+  of the keep-last-N preview/confirm and the reminder.
 
 ### Reference: how Timeshift 24.01.1 schedules and applies retention (not built)
 

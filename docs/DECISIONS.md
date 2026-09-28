@@ -1044,6 +1044,13 @@ Append-only. Newest at the bottom. Format: date — decision — why.
     ("failed to remove ... Read-only file system"), because libgit2 couldn't read the denied
     `~/.gitconfig`. Running cargo with a temporary `HOME` (and `CARGO_HOME`/`RUSTUP_HOME`
     pointing at the real ones, read-only) works offline.
+  - `just test-ext4` on the user's machine, image mounted: native 14/14, restore 11/11. A
+    first run with the image not mounted failed 12 native tests at the "is an ext4 loop
+    mount" guard, as it should (nothing was written to the plain disk).
+  - Seen once: `native::runner::tests::normal_priority_is_left_alone` failed in a full
+    workspace run right after a heavy clippy build (a normal-priority child reported
+    niceness 19); it passed 30+ times alone and in two more full runs. Guess, not verified:
+    the OS scheduler reniced the test process. Left as is for now.
 
 ## Open
 
