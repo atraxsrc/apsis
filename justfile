@@ -134,6 +134,19 @@ deb *args:
     gzip -9nc {{ 'docs' / name + '.1' }} > {{ deb-assets-dir / name + '.1.gz' }}
     cargo deb -p {{name}} --no-build
 
+# The workspace version, from [workspace.package] in the root Cargo.toml (its first `version`).
+version := `sed -n '0,/^version/s/^version = "\(.*\)"$/\1/p' Cargo.toml`
+deb-file := absolute_path(cargo-target-dir / 'debian' / name + '_' + version + '-1_amd64.deb')
+
+# Testing on this machine: builds the .deb and reinstalls it with apt (asks for sudo), then
+# stops the running helper so the next call starts the new one. Never `sudo just install`
+# over an apt-installed Apsis: it overwrites files apt manages.
+deb-install *args: (deb args)
+    test -f {{deb-file}}
+    sudo apt install --reinstall {{deb-file}}
+    sudo systemctl stop {{helper}}.service || true
+    @echo "Installed {{deb-file}}. The panel still runs the old applet: remove Apsis from the panel and add it again (or log out and in)."
+
 # Vendors dependencies into vendor.tar (vendor/ plus a .cargo/config.toml that points cargo at it)
 vendor:
     rm -rf vendor .cargo

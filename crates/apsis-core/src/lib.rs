@@ -11,15 +11,19 @@ mod model;
 pub mod native;
 mod parse;
 mod pkexec;
+pub mod progress;
 pub mod restore;
 pub mod settings;
 mod timeshift;
+pub mod usage;
 
 pub use backend::Backend;
 pub use error::{Error, Result};
 pub use model::{Mode, Snapshot, SnapshotList, Tag, parse_snapshot_name};
 pub use parse::parse_list;
 pub use pkexec::{PkexecRunner, find_in_path, pkexec_command};
+pub use progress::Progress;
 pub use timeshift::{
     MAX_COMMENT_CHARS, MAX_OUTPUT_LINES, RunOutput, Runner, TimeshiftCli, validate_comment,
 };
+pub use usage::DiskUsage;

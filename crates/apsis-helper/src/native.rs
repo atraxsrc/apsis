@@ -189,6 +189,31 @@ pub fn mount_backup<R: Runner + Clone>(runner: &R) -> Result<Mounted<R>> {
     mount(runner, &device, Access::ReadOnly)
 }
 
+/// The device a `timeshift --list` showed (`uuid`), mounted read-only (and `noexec`) at
+/// [`MOUNT_POINT`] while the guard lives: for the disk usage when nothing else has it mounted.
+/// Only a device lsblk shows with a Linux filesystem, as for the native backend.
+///
+/// # Errors
+///
+/// A failed `lsblk` or `mount`; the UUID not among the devices, or encrypted or not a Linux
+/// filesystem.
+pub fn mount_listed<R: Runner + Clone>(runner: &R, uuid: &str) -> Result<Mounted<R>> {
+    let devices = settings::parse_lsblk(&lsblk(runner)?)?;
+    let device = devices
+        .into_iter()
+        .find(|d| d.uuid == uuid)
+        .ok_or_else(|| Error::DeviceNotFound {
+            device: uuid.to_owned(),
+        })?;
+    if !device.selectable() {
+        return Err(Error::Native(format!(
+            "{} is encrypted or not a Linux filesystem",
+            device.path()
+        )));
+    }
+    mount(runner, &device, Access::ReadOnly)
+}
+
 /// Timeshift's lock file (`AppLock.create("timeshift", ...)`, `AppLock.vala:33-37`,
 /// `Main.vala:263`): `<pid>;<mode>`, held while any Timeshift (command line or window) runs.
 pub const TIMESHIFT_LOCK: &str = "/var/run/lock/timeshift/lock";

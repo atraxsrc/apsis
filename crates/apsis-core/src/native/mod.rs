@@ -28,7 +28,7 @@
 pub mod distro;
 pub mod exclude;
 pub mod info;
-mod runner;
+pub(crate) mod runner;
 
 use std::ffi::OsString;
 use std::fmt;
@@ -44,6 +44,7 @@ pub use self::runner::QuietRunner;
 use crate::backend::Backend;
 use crate::error::{Error, Result};
 use crate::model::{Mode, Snapshot, SnapshotList, Tag, parse_snapshot_name};
+use crate::progress::{Progress, parse_rsync};
 use crate::timeshift::{Runner, validate_comment};
 
 /// Timeshift's folder on the backup device, in rsync mode (`SnapshotRepo.vala:159-168`).
@@ -105,6 +106,7 @@ pub struct NativeRsync<R> {
     runner: R,
     clock: Box<dyn Fn() -> Zoned + Send + Sync>,
     log: Box<dyn Fn(&str) + Send + Sync>,
+    progress: Box<dyn Fn(Progress) + Send + Sync>,
 }
 
 impl<R: Runner> NativeRsync<R> {
@@ -115,6 +117,7 @@ impl<R: Runner> NativeRsync<R> {
             runner,
             clock: Box::new(Zoned::now),
             log: Box::new(|_| {}),
+            progress: Box::new(|_| {}),
         }
     }
 
@@ -129,6 +132,14 @@ impl<R: Runner> NativeRsync<R> {
     #[must_use]
     pub fn with_log(mut self, log: impl Fn(&str) + Send + Sync + 'static) -> Self {
         self.log = Box::new(log);
+        self
+    }
+
+    /// Sends rsync's `--info=progress2` progress to `progress` while a create copies (only
+    /// with a runner that streams, like [`QuietRunner`]).
+    #[must_use]
+    pub fn with_progress(mut self, progress: impl Fn(Progress) + Send + Sync + 'static) -> Self {
+        self.progress = Box::new(progress);
         self
     }
 
@@ -296,7 +307,11 @@ impl<R: Runner> NativeRsync<R> {
     fn build(&self, plan: &CreatePlan) -> Result<()> {
         write_synced(&plan.staging.join(EXCLUDE_FILE), &plan.exclude)?;
         (self.log)(&format!("running {}", shell_words(&plan.argv)));
-        let output = self.runner.run(&plan.argv)?;
+        let output = self.runner.run_streaming(&plan.argv, &mut |segment| {
+            parse_rsync(segment)
+                .map(|progress| (self.progress)(progress))
+                .is_some()
+        })?;
         let code = output.code.unwrap_or(-1);
         let stderr = output.stderr.trim();
         if !RSYNC_OK_CODES.contains(&code) {
@@ -388,6 +403,9 @@ impl<R: Runner> Backend for NativeRsync<R> {
             mode: Some(Mode::Rsync),
             snapshots,
             warnings,
+            // The helper adds what `statvfs` says while the device is mounted.
+            reported_free: None,
+            usage: None,
         })
     }
 
@@ -523,7 +541,8 @@ impl fmt::Display for CreatePlan {
 /// `RsyncTask.vala:175-255`, with the options `create_snapshot_with_rsync` sets,
 /// `Main.vala:1538-1559`), as an argv instead of a shell script. `--delete-excluded` is there
 /// twice, as in Timeshift's. The source is `source` with a trailing `/` (Timeshift: `/`), the
-/// destination `<snapshot>/localhost/`.
+/// destination `<snapshot>/localhost/`. Apsis adds `--info=progress2` (whole-transfer percent
+/// and time left, on stdout, which Timeshift's log file doesn't get).
 #[must_use]
 pub fn rsync_argv(source: &Path, snapshot: &Path, link_from: Option<&Path>) -> Vec<OsString> {
     let mut argv: Vec<OsString> = [
@@ -536,6 +555,7 @@ pub fn rsync_argv(source: &Path, snapshot: &Path, link_from: Option<&Path>) -> V
         "--stats",
         "--sparse",
         "--delete-excluded",
+        "--info=progress2",
     ]
     .iter()
     .map(OsString::from)
@@ -638,6 +658,7 @@ mod tests {
                 "--stats",
                 "--sparse",
                 "--delete-excluded",
+                "--info=progress2",
                 "--link-dest=/mnt/timeshift/snapshots/2026-09-24_10-00-00/localhost/",
                 &format!("--log-file={s}/rsync-log"),
                 &format!("--exclude-from={s}/exclude.list"),

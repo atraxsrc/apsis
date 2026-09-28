@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
-use std::io::{self, BufRead, BufReader, Read};
-use std::process::{Command, Stdio};
+use std::io;
+use std::process::{Child, Command, Stdio};
+use std::thread;
 
+use crate::native::runner::stderr_tail;
 use crate::pkexec::find_in_path;
+use crate::progress::read_segments;
 use crate::timeshift::{RunOutput, Runner};
-
-/// Lines of stderr kept.
-const STDERR_LINES: usize = 20;
 
 /// [`Runner`] for a restore's rsync: stdout is kept whole (the itemized list the plan is read
 /// from), stderr's last lines are kept.
@@ -28,8 +27,8 @@ impl RsyncRunner {
     }
 }
 
-impl Runner for RsyncRunner {
-    fn run(&self, argv: &[OsString]) -> io::Result<RunOutput> {
+impl RsyncRunner {
+    fn spawn(&self, argv: &[OsString]) -> io::Result<Child> {
         let (program, rest) = argv
             .split_first()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty argv"))?;
@@ -39,7 +38,7 @@ impl Runner for RsyncRunner {
                 format!("{} not found", program.to_string_lossy()),
             )
         })?;
-        let mut child = Command::new(program)
+        Command::new(program)
             .args(rest)
             .env_clear()
             .env("PATH", &self.path)
@@ -47,30 +46,34 @@ impl Runner for RsyncRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()?;
+            .spawn()
+    }
+}
+
+impl Runner for RsyncRunner {
+    fn run(&self, argv: &[OsString]) -> io::Result<RunOutput> {
+        self.run_streaming(argv, &mut |_| false)
+    }
+
+    /// stdout is kept, except the pieces `on_segment` takes (`--info=progress2` lines), so
+    /// the itemized list reads as before.
+    fn run_streaming(
+        &self,
+        argv: &[OsString],
+        on_segment: &mut dyn FnMut(&str) -> bool,
+    ) -> io::Result<RunOutput> {
+        let mut child = self.spawn(argv)?;
         // stderr on its own thread, so neither pipe fills up while the other is read.
         let stderr = child.stderr.take();
-        let tail = std::thread::spawn(move || {
-            let mut tail = VecDeque::new();
-            if let Some(stderr) = stderr {
-                for line in BufReader::new(stderr).split(b'\n').map_while(Result::ok) {
-                    if tail.len() == STDERR_LINES {
-                        tail.pop_front();
-                    }
-                    tail.push_back(String::from_utf8_lossy(&line).into_owned());
-                }
-            }
-            Vec::from(tail).join("\n")
+        let tail = thread::spawn(move || stderr_tail(stderr));
+        let stdout = child.stdout.take().map_or(Ok(String::new()), |out| {
+            read_segments(out, true, on_segment)
         });
-        let mut stdout = Vec::new();
-        if let Some(mut out) = child.stdout.take() {
-            out.read_to_end(&mut stdout)?;
-        }
         let status = child.wait()?;
         Ok(RunOutput {
             success: status.success(),
             code: status.code(),
-            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stdout: stdout?,
             stderr: tail.join().unwrap_or_default(),
         })
     }

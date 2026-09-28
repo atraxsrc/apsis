@@ -200,3 +200,13 @@ live-same = same size and time as on the running system
 live-present = folder exists on the running system (contents not compared)
 live-changed = differs from the running system
 live-changed-file = differs: size { $size } here, { $live_size } now; modified { $time } here, { $live_time } now
+
+# Disk usage line under the panes, and the panel tooltip's free space
+disk-label = disk
+tooltip-free = { $text } · { $free } free
+
+# Progress of a create or restore in the activity pane: `creating ██████░░░░ 58% ~3 min left`
+progress-creating = creating
+progress-restoring = restoring
+progress-estimating = estimating…
+progress-left = { $time } left

@@ -154,6 +154,25 @@ Found 2026-09-25 when the user's USB backup disk dropped off after a create (Tim
   later list fails. The `/dev/sdX1` in the message above came from Timeshift's own configuration
   (the user ran it without `--snapshot-device`).
 
+## Create progress
+
+Timeshift 24.01.1 prints this about once a second on stdout while rsync copies a new rsync-mode
+snapshot (`Main.vala`, `create_snapshot_with_rsync`), each ending in `\r`, never `\n`:
+
+```
+"%6.2f%% complete (%s remaining)\r"      e.g. " 58.23% complete (00:03:12 remaining)"
+```
+
+The time is `format_duration` (`TeeJee.Misc.vala`): `hh:mm:ss`, hours not capped at 99; `???`
+until there's any progress (`AsyncTask.stat_time_remaining`). After the loop it prints 80
+spaces and `\r`. Before it: `Estimating system size...` (first snapshot), `Creating new
+snapshot...(RSYNC)`, `Saving to device: ..., mounted at path: ...`. btrfs snapshots print no
+progress. With `LC_ALL=C.UTF-8` the words are English and the decimal point a `.`.
+
+`apsis-helper` reads Timeshift's stdout as it comes, split on `\r` and `\n`; progress lines go
+to the `Progress` signal and are left out of the output kept for error messages. Fixture:
+`create-rsync-progress.txt`, rebuilt from those format strings (a real capture needs root).
+
 ## Other notes
 
 - Config lives at `/etc/timeshift/timeshift.json` (root-owned). Apsis reads nothing from it in

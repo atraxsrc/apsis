@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use std::ffi::{OsStr, OsString};
-use std::io;
+use std::io::{self, Read};
 use std::process::{Command, Stdio};
 
+use apsis_core::progress::read_segments;
 use apsis_core::{RunOutput, Runner, find_in_path};
 
 /// Where the helper looks for `timeshift`. Fixed: nothing from the caller or the environment
@@ -31,6 +32,42 @@ impl Runner for DirectRunner {
             code: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+
+    /// Timeshift's stdout as it comes (its progress lines end in `\r`); stderr whole.
+    fn run_streaming(
+        &self,
+        argv: &[OsString],
+        on_segment: &mut dyn FnMut(&str) -> bool,
+    ) -> io::Result<RunOutput> {
+        let (program, rest) = argv
+            .split_first()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty argv"))?;
+        let program =
+            find_in_path(program, OsStr::new(SAFE_PATH)).ok_or(io::ErrorKind::NotFound)?;
+        let mut child = command(&program, rest)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        // stderr on its own thread, so neither pipe fills up while the other is read.
+        let stderr = child.stderr.take();
+        let stderr = std::thread::spawn(move || {
+            let mut text = Vec::new();
+            if let Some(mut stderr) = stderr {
+                let _ = stderr.read_to_end(&mut text);
+            }
+            String::from_utf8_lossy(&text).into_owned()
+        });
+        let stdout = child.stdout.take().map_or(Ok(String::new()), |out| {
+            read_segments(out, true, on_segment)
+        });
+        let status = child.wait()?;
+        Ok(RunOutput {
+            success: status.success(),
+            code: status.code(),
+            stdout: stdout?,
+            stderr: stderr.join().unwrap_or_default(),
         })
     }
 }
@@ -76,6 +113,26 @@ mod tests {
                 ("USER", "root"),
             ]
         );
+    }
+
+    #[test]
+    fn streaming_hands_over_pieces_and_keeps_the_rest() {
+        let mut taken = Vec::new();
+        let output = DirectRunner
+            .run_streaming(
+                &["printf".into(), "a\\r 5%% b\\rline\\n".into()],
+                &mut |segment| {
+                    let progress = segment.contains('%');
+                    if progress {
+                        taken.push(segment.to_owned());
+                    }
+                    progress
+                },
+            )
+            .unwrap();
+        assert!(output.success);
+        assert_eq!(taken, [" 5% b"]);
+        assert_eq!(output.stdout, "a\nline\n");
     }
 
     #[test]

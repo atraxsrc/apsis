@@ -12,7 +12,7 @@ use apsis_core::restore::{
     self, Caller, Listing, Names, Plan, Request, Restore, RsyncRunner, SnapPath, device_of_mount,
     open_snapshot,
 };
-use apsis_core::{Error, Result};
+use apsis_core::{Error, Progress, Result};
 
 use crate::native::{self, MOUNT_POINT};
 use crate::runner::{DirectRunner, SAFE_PATH};
@@ -37,13 +37,13 @@ pub fn browse(snapshot: &str, path: &str) -> Result<Listing> {
     restore::browse(&root, &path, Path::new("/"), &names())
 }
 
-/// Runs `request` for the caller `uid`.
+/// Runs `request` for the caller `uid`, handing rsync's progress to `on_progress`.
 ///
 /// # Errors
 ///
 /// See `apsis_core::restore::Restore::run`; also mounting the backup device, and a caller
 /// without an `/etc/passwd` entry.
-pub fn run(request: &Request, uid: u32) -> Result<Plan> {
+pub fn run(request: &Request, uid: u32, on_progress: &dyn Fn(Progress)) -> Result<Plan> {
     let caller = Caller::from_passwd(&fs::read_to_string("/etc/passwd")?, uid)?;
     let _mounted = native::mount_backup(&DirectRunner)?;
     let backup_dev = device_of_mount(Path::new(MOUNT_POINT))?;
@@ -61,7 +61,7 @@ pub fn run(request: &Request, uid: u32) -> Result<Plan> {
         dry_run_target: Path::new(DRY_RUN_TARGET),
         runner: &runner,
     }
-    .run(request, &caller)
+    .run_with_progress(request, &caller, on_progress)
 }
 
 /// User and group names of the running system. Missing files mean numbers only.

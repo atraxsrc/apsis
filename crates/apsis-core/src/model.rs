@@ -2,6 +2,8 @@
 
 use jiff::civil::DateTime;
 
+use crate::usage::DiskUsage;
+
 /// Why a snapshot was taken, as shown in Timeshift's `Tags` column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tag {
@@ -120,6 +122,12 @@ pub struct SnapshotList {
     /// `E: Failed to remove directory` after a stale mount), and table lines that weren't
     /// snapshot rows. Shown to the user; they don't fail the list.
     pub warnings: Vec<String>,
+    /// Free space Timeshift reported (`5 snapshots, 123.4 GB free`), rounded as it printed it.
+    /// `None` when it didn't say (no device, no snapshots, the native backend).
+    pub reported_free: Option<u64>,
+    /// The backup filesystem's size, used and free space from `statvfs`, when `apsis-helper`
+    /// found it mounted. `None` means unknown: the applet shows no bar then.
+    pub usage: Option<DiskUsage>,
 }
 
 impl SnapshotList {

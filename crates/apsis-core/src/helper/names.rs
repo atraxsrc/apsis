@@ -12,8 +12,12 @@ pub const OBJECT_PATH: &str = "/io/github/atraxsrc/Apsis/Helper";
 /// The helper's interface. The `1` is its version; a breaking change gets a new interface.
 pub const INTERFACE: &str = "io.github.atraxsrc.Apsis.Helper1";
 
-/// `List() -> (sssa(sss)as)`: see [`super::WireList`].
+/// `List() -> (sssa(sss)as)`: see [`super::WireList`]. Kept as it was for older applets;
+/// this applet calls [`METHOD_LIST_WITH_USAGE`].
 pub const METHOD_LIST: &str = "List";
+/// `ListWithUsage() -> ((sssa(sss)as)a{st})`: [`METHOD_LIST`] plus the backup device's disk
+/// usage, see [`super::WireListWithUsage`]. Same polkit action.
+pub const METHOD_LIST_WITH_USAGE: &str = "ListWithUsage";
 /// `Create(s comment)`: returns once the create has started; [`SIGNAL_FINISHED`] follows.
 pub const METHOD_CREATE: &str = "Create";
 /// `Delete(s name)`: returns once the delete has started; [`SIGNAL_FINISHED`] follows.
@@ -27,6 +31,9 @@ pub const METHOD_WRITE_SETTINGS: &str = "WriteSettings";
 /// `NativeList() -> (sssa(sss)as)`: like [`METHOD_LIST`], read by the native backend from the
 /// backup device (mounted read-only) instead of `timeshift --list`.
 pub const METHOD_NATIVE_LIST: &str = "NativeList";
+/// `NativeListWithUsage() -> ((sssa(sss)as)a{st})`: [`METHOD_NATIVE_LIST`] plus the disk
+/// usage, as [`METHOD_LIST_WITH_USAGE`].
+pub const METHOD_NATIVE_LIST_WITH_USAGE: &str = "NativeListWithUsage";
 /// `NativeDryRun(s comment) -> s plan`: what a native create would do, as text. Mounts the
 /// backup device read-only and writes nothing.
 pub const METHOD_NATIVE_DRY_RUN: &str = "NativeDryRun";
@@ -39,6 +46,11 @@ pub const METHOD_BROWSE: &str = "Browse";
 /// `Restore(s snapshot, as paths, s destination, b dry_run)`: returns once started;
 /// [`SIGNAL_FINISHED`] with [`OP_RESTORE`] follows, its message the plan or the result.
 pub const METHOD_RESTORE: &str = "Restore";
+/// `Progress(s op, d percent, x eta_seconds, s text)` while a create or restore runs, at most
+/// about twice a second, sent only to its caller and never after its [`SIGNAL_FINISHED`].
+/// `percent` (0 to 100) and `eta_seconds` are `-1` while unknown; `text` is the line they were
+/// read from. An older helper never sends it; the applet then shows a spinner.
+pub const SIGNAL_PROGRESS: &str = "Progress";
 /// `Finished(s op, b ok, s message)`, sent only to the caller that started the operation.
 pub const SIGNAL_FINISHED: &str = "Finished";
 /// `op` in [`SIGNAL_FINISHED`] after [`METHOD_CREATE`].
@@ -65,7 +77,8 @@ pub const ERROR_DEVICE_NOT_FOUND: &str = "io.github.atraxsrc.Apsis.Helper1.Error
 /// `WriteSettings`: the settings file changed since the caller read it.
 pub const ERROR_CHANGED: &str = "io.github.atraxsrc.Apsis.Helper1.Error.Changed";
 
-/// polkit action for [`METHOD_LIST`], [`METHOD_NATIVE_LIST`] and [`METHOD_NATIVE_DRY_RUN`]:
+/// polkit action for [`METHOD_LIST`], [`METHOD_NATIVE_LIST`], their `WithUsage` forms and
+/// [`METHOD_NATIVE_DRY_RUN`]:
 /// allowed for the active local session, no password.
 pub const ACTION_LIST: &str = "io.github.atraxsrc.Apsis.list";
 /// polkit action for [`METHOD_CREATE`] and [`METHOD_NATIVE_CREATE`]: `auth_admin_keep`.

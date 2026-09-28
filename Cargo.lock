@@ -225,6 +225,7 @@ name = "apsis-helper"
 version = "0.1.2"
 dependencies = [
  "apsis-core",
+ "rustix 1.1.5",
  "tokio",
  "zbus",
 ]

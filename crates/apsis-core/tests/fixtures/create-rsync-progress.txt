@@ -1,0 +1,13 @@
+Estimating system size...
+Creating new snapshot...(RSYNC)
+Saving to device: /dev/sdX1, mounted at path: /run/timeshift/99999/backup
+  0.00% complete (??? remaining)
+  0.00% complete (??? remaining)
+  3.17% complete (00:05:43 remaining)
+ 12.50% complete (00:04:12 remaining)
+ 58.23% complete (00:03:12 remaining)
+ 99.91% complete (00:00:01 remaining)
+                                                                                
+Created control file: /run/timeshift/99999/backup/timeshift/snapshots/2026-09-28_10-00-00/info.json
+RSYNC Snapshot saved successfully (221s)
+Tagged snapshot '2026-09-28_10-00-00': ondemand

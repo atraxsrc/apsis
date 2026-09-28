@@ -879,6 +879,108 @@ Append-only. Newest at the bottom. Format: date — decision — why.
     unpacked `vendor.tar`, so `cargo deb`'s metadata call works offline without writing
     `vendor/` or `.cargo/` into the repo.
 
+- 2026-09-28 - **Disk usage line.** A bar of the backup disk's space under the panes (UI.md,
+  "Disk usage").
+  - **D-Bus: new methods instead of a changed `List`.** `ListWithUsage` and
+    `NativeListWithUsage` return `((sssa(sss)as)a{st})`: `List`'s reply unchanged, plus a
+    dict of byte counts. `List` and `NativeList` keep their signature, because after a .deb
+    upgrade the panel keeps running the old applet until it restarts, while D-Bus starts the
+    new helper; a changed `List` would fail every list there with a signature error. Adding
+    methods is compatible in both directions: the new client falls back to `List` on
+    `org.freedesktop.DBus.Error.UnknownMethod` (an old helper still running). The dict
+    (`total`/`used`/`free` together, `reported-free` alone) means missing values need no
+    sentinel numbers, and a later key doesn't change the signature. Same polkit action
+    `list`, nothing new in the policy file. The interface now has 12 methods (test updated).
+  - **Timeshift's mount path can't be used after the list.** Timeshift 24.01.1's `exit_app`
+    calls `unmount_target_device` and `cleanup_unmount_devices` (`Main.vala`), so
+    `/run/timeshift/<pid>/backup` is gone (or an empty folder, if `rmdir` failed) by the time
+    `timeshift --list` returns. A `statvfs` there would describe `/run`'s tmpfs. So the helper
+    looks for any live mount of the listed device instead: `stat` of
+    `/dev/disk/by-uuid/<uuid>` (canonicalised; the UUID must be hex and dashes) for its
+    `major:minor`, then `/proc/self/mountinfo` for a mount with that device number, or whose
+    canonical source is that node (btrfs shows an anonymous `0:N`). Only mounts of the
+    filesystem root count. Found: an automount under `/media`, or `/` in btrfs mode. Not
+    found (a dedicated disk only Timeshift mounts): free space from Timeshift's line only.
+    Mounting the device read-only just for `statvfs` was possible but left out: a mount per
+    refresh for a bar, and LUKS disks (which Timeshift unlocks itself) wouldn't work anyway.
+  - The free line: `_("%d snapshots, %s free")` with `format_file_size` (`SnapshotRepo.vala`,
+    `TeeJee.FileSystem.vala`): decimal units (`B`, `KB`, `MB`, `GB`, `TB`), one decimal,
+    `%'` grouping (none in the C locale both the helper and pkexec use). Only printed with
+    at least one snapshot. Parsed before the table only; `SnapshotList::reported_free`.
+  - Numbers as `df` shows them: `total = f_blocks * f_frsize`, `used = (f_blocks - f_bfree) *
+    f_frsize`, `free = f_bavail * f_frsize`; the bar and the thresholds use
+    `used / (used + free)`, so ext4's reserved blocks count as neither (as `df`'s `Use%`).
+    Sizes on screen are binary (like `lsblk` and the settings view), so Timeshift's
+    `123.4 GB` shows as `115G`.
+  - Bar width: iced has no "fill with characters" text, so a `responsive` widget gets the
+    width and the cell count is `width / 8.4` (monotext is 14 px; monospace fonts are about
+    0.6 em). A headless tiny-skia layout (`disk_line_fits_...`, opt-in with
+    `APSIS_LAYOUT_TEST=1` like the settings one) measured the installed mono font at exactly
+    8.4 px: 31 cells in 266.8 px (popup), 22 in 186.8 px (640 px window). A wider font would
+    only clip the bar's end (the container clips).
+  - The line is hidden in the settings view: with it, the opt-in settings layout test failed
+    at 640 x 440 (details need 248 px, got 224). Hiding it was simpler than shortening the
+    notes again.
+  - Refresh after a real restore waits until the browser is closed and no `Browse` call is
+    in flight (`list_if_restored`, a count of open browse calls): both take the helper's
+    single-operation lock, and a list refused as busy would replace the snapshot list with
+    an error. Create/delete/bulk delete already listed afterwards.
+  - Builds here again used the unpacked `vendor.tar` and a scratch `CARGO_HOME`, with
+    `CARGO_NET_OFFLINE=true` in the environment (an `--offline` after `--` went to clippy).
+
+- 2026-09-28 - **Full disk bar for Timeshift, progress and ETA, `just deb-install`.**
+  - The user tests from the .deb only: `sudo just install` would overwrite files apt manages.
+    `just deb-install` runs `just deb`, `sudo apt install --reinstall` on
+    `target/debian/apsis_<version>-1_amd64.deb` (version from the root `Cargo.toml`'s first
+    `version`, as `just tag` writes it; absolute path, so apt reads a file, not a package
+    name), stops `apsis-helper.service`, and says to re-add the applet. CLAUDE.md says so.
+  - **Disk usage, changed from the entry above:** when no mount of the backup disk exists
+    after `timeshift --list`, `ListWithUsage` now mounts it `ro,nosuid,nodev,noexec` at
+    `/run/apsis/backup` (`native::mount_listed`: lsblk must show the listed UUID with a Linux
+    filesystem, then the same `mount()` as browse), `statvfs`, unmount (the guard). Under the
+    single-operation lock, like every other use of that mount point. Only `ListWithUsage`
+    does it; the old `List` never mounts. Timeshift's free line only if that fails (LUKS:
+    lsblk shows `crypto_LUKS`, refused before `mount`). The journal line says which source:
+    `disk usage: statvfs of /media/... (already mounted)`, `... of a brief read-only mount at
+    /run/apsis/backup`, or `... failed (...): Timeshift's free line only`.
+  - **Progress, Timeshift:** checked in `.scratch/timeshift` at 24.01.1 (`git describe`):
+    `Main.vala` prints `"%6.2f%% complete (%s remaining)\r"` once a second while rsync runs;
+    the time is `format_duration`, `hh:mm:ss`, or `???` before any progress. Only `\r`, so the
+    helper's runner splits stdout on `\r` and `\n` while reading it. The fixture
+    `create-rsync-progress.txt` is rebuilt from the format strings and the log lines around
+    them (all checked against the source; a GUI-only `Syncing files with rsync...` was taken
+    out again), not captured: a real create needs root.
+  - **Progress, rsync `--info=progress2`:** captured locally with rsync 3.2.7 (no root, files
+    in the scratchpad, `--bwlimit` to make it slow): fixture `rsync-progress2.txt`, only byte
+    counts, rates and times. The time column is the time **left** on plain lines but the time
+    **taken** on lines that end a file (`(xfr#N, to-chk=A/B)`: it counted up 0:00:02, 0:00:03
+    ... while plain lines between counted down). Those lines are most of them with many small
+    files, so they're not skipped: the time left is worked out from elapsed and percent
+    there. With incremental recursion rsync's percent is of what it knows so far, so it can
+    jump; `--no-inc-recursive` would fix that but keeps the whole file list in memory, so it
+    stays off.
+  - `--info=progress2` goes into the native create's rsync (the log file doesn't get it; the
+    exact-argv tests changed) and into real restores only (dry runs keep their argv; they
+    copy nothing). The restore runner takes the progress pieces out of stdout, so the
+    itemized plan reads as before (a test checks no `%` line becomes a note).
+  - `Runner::run_streaming` has a default that doesn't stream (pkexec, test fakes); the
+    helper's `DirectRunner`, `QuietRunner` and `RsyncRunner` stream. A piece the callback
+    takes (a progress line) isn't kept in stdout, so `failure_output` never shows a progress
+    line as Timeshift's last words.
+  - **Signal:** `Progress(s op, d percent, x eta_seconds, s text)`, `-1` for unknown (D-Bus
+    has no optional). `ProgressSink` throttles to one per 500 ms (the `100%` one always gets
+    through) and hands updates over an unbounded channel to a task that emits them, so the
+    blocking work never waits on the bus. That task is awaited before `Finished`, so no
+    progress arrives after it. The helper sends one number-less update when a create or real
+    restore starts: that's how the applet tells "progress will come" (show `estimating…`)
+    from "no progress from this helper" (pkexec, or an old helper that doesn't know the
+    signal: a bare spinner, no error). Subscribing to a signal an old helper never sends is
+    harmless.
+  - Applet: `with_progress` runs the operation's future with a channel sender and turns the
+    receiver plus the final message into one `cosmic::task::stream`; a `Progress` message
+    after the operation ended is dropped. The bar is 20 cells, fixed (the activity pane is
+    always wide enough; the disk bar is the one that adapts).
+
 ## Open
 
 - ~~App ID~~ - resolved 2026-09-25, see above.

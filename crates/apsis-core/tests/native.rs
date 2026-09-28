@@ -233,6 +233,29 @@ const SECOND: &str = "2026-09-25_11-29-53";
 const THIRD: &str = "2026-09-25_11-30-53";
 
 #[test]
+fn create_reports_rsync_progress_up_to_the_end() {
+    for lab in labs("progress") {
+        let kind = lab.kind;
+        populate(&lab.source);
+        let seen: Arc<Mutex<Vec<apsis_core::Progress>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        let (backend, _) = backend(&lab, false);
+        let backend = backend.with_progress(move |p| sink.lock().unwrap().push(p));
+        backend.create("progress").unwrap();
+        let seen = seen.lock().unwrap();
+        // rsync ends `--info=progress2` with a line for the whole transfer.
+        let last = seen.last().unwrap_or_else(|| panic!("{kind}: no progress"));
+        assert_eq!(last.percent, Some(100.0), "{kind}: {seen:?}");
+        assert_eq!(last.eta_seconds, Some(0), "{kind}");
+        // The snapshot itself is as without progress.
+        assert!(
+            localhost(&lab, FIRST).join("etc/changes").exists(),
+            "{kind}"
+        );
+    }
+}
+
+#[test]
 fn unchanged_files_share_inodes_changed_ones_do_not() {
     for lab in labs("hardlinks") {
         let kind = lab.kind;
@@ -618,7 +641,7 @@ fn dry_run_logs_the_plan_and_writes_nothing() {
         assert!(
             log.contains(&format!(
                 "run (argv, no shell): rsync -aii --recursive --verbose --delete --force \
-                 --stats --sparse --delete-excluded --link-dest={}/ --log-file={}/rsync-log \
+                 --stats --sparse --delete-excluded --info=progress2 --link-dest={}/ --log-file={}/rsync-log \
                  --exclude-from={}/exclude.list --delete-excluded {}/ {}/localhost/",
                 localhost(&lab, FIRST).display(),
                 staging.display(),

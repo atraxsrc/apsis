@@ -59,8 +59,11 @@ cargo clippy --workspace -- -D warnings
 cargo fmt --all
 just run          # run the applet in a window for development (no root needed)
 just check        # template's clippy recipe
-# user only (needs root):  sudo just install
+# user only (needs root):  just deb-install
 ```
+
+Testing on the user's machine: `just deb-install` (builds the .deb and reinstalls it with apt).
+Never suggest `sudo just install`.
 
 ## Working style
 

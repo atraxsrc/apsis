@@ -265,3 +265,21 @@ fn output_without_table_or_empty_marker_is_rejected() {
         );
     }
 }
+
+#[test]
+fn free_space_line_is_read_and_is_not_a_statvfs_usage() {
+    for fixture in [DEVICE, PLAIN, STALE_MOUNT, STALE_MOUNT_RET] {
+        let list = parse_list(fixture).unwrap();
+        assert_eq!(list.reported_free, Some(123_400_000_000));
+        // Only the helper's statvfs gives size and used space.
+        assert_eq!(list.usage, None);
+    }
+    assert_eq!(parse_list(UNCONFIGURED).unwrap().reported_free, None);
+}
+
+#[test]
+fn free_space_line_inside_the_table_is_a_warning_not_the_free_space() {
+    let list = parse_list(&format!("{}9 snapshots, 1.0 GB free\n", HEADER)).unwrap();
+    assert_eq!(list.reported_free, Some(123_400_000_000));
+    assert_eq!(list.warnings.len(), 1, "{:?}", list.warnings);
+}

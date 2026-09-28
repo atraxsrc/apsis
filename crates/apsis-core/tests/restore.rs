@@ -668,3 +668,58 @@ fn browse_compares_each_entry_with_the_running_system() {
         assert!(reason.contains("not a folder"), "{reason}");
     }
 }
+
+#[test]
+fn real_restores_report_progress_and_keep_it_out_of_the_plan() {
+    for lab in labs("progress") {
+        small_etc(&lab);
+        let run = |paths: &[&str], destination, dry_run| {
+            let seen = std::cell::RefCell::new(Vec::new());
+            let request = Request {
+                snapshot: SNAPSHOT.to_owned(),
+                paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+                destination,
+                dry_run,
+            };
+            let plan = lab
+                .restore(&rsync())
+                .run_with_progress(&request, &lab.caller(), &|p| seen.borrow_mut().push(p))
+                .unwrap_or_else(|e| panic!("{}: {e}", lab.kind));
+            (plan, seen.into_inner())
+        };
+
+        let (plan, seen) = run(&["/etc/hosts", "/etc/nm"], Destination::Folder, false);
+        let last = seen
+            .last()
+            .unwrap_or_else(|| panic!("{}: no progress", lab.kind));
+        assert_eq!(last.percent, Some(100.0), "{seen:?}");
+        // rsync's progress lines aren't notes in the plan (its FIFO note is).
+        assert!(
+            !plan.notes.iter().any(|n| n.contains('%')),
+            "{:?}",
+            plan.notes
+        );
+        assert!(plan.items.iter().any(|i| i.path == "/etc/hosts"));
+
+        // A dry run copies nothing, so it has no progress.
+        let (_, seen) = run(&["/etc/hosts"], Destination::Folder, true);
+        assert!(seen.is_empty(), "{seen:?}");
+
+        // Original mode: one rsync per path, spread over the whole.
+        write(&lab.live.join("etc/hosts"), "live\n");
+        write(&lab.live.join("etc/fstab"), "live fstab\n");
+        let (plan, seen) = run(&["/etc/fstab", "/etc/hosts"], Destination::Original, false);
+        assert!(
+            !plan.notes.iter().any(|n| n.contains('%')),
+            "{:?}",
+            plan.notes
+        );
+        let percents: Vec<f64> = seen.iter().filter_map(|p| p.percent).collect();
+        assert!(percents.iter().all(|p| *p <= 100.0), "{percents:?}");
+        assert!(
+            percents.iter().any(|p| *p <= 50.0),
+            "first half: {percents:?}"
+        );
+        assert_eq!(percents.last(), Some(&100.0), "{percents:?}");
+    }
+}

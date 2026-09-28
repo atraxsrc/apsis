@@ -2,6 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::model::{Mode, Snapshot, SnapshotList, Tag, parse_snapshot_name};
+use crate::usage::parse_free_line;
 
 /// Parses the output of `timeshift --list`.
 ///
@@ -41,6 +42,8 @@ pub fn parse_list(output: &str) -> Result<SnapshotList> {
                     .warnings
                     .push(format!("line {}: not a snapshot row: {line}", index + 1)),
             }
+        } else if let Some(free) = parse_free_line(line) {
+            list.reported_free = Some(free);
         } else if line == "No snapshots found" {
             recognised = true;
         } else if is_table_header(line) {

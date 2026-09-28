@@ -533,3 +533,80 @@ fn unplugged_disk_keeps_the_uuid_for_the_next_try() {
     ]);
     assert_eq!(runner.calls()[2], third);
 }
+
+/// Rebuilt from Timeshift 24.01.1's source (`Main.vala`: the log lines, and the
+/// `"%6.2f%% complete (%s remaining)\r"` it prints every second while rsync runs, then 80
+/// spaces and `\r`), not captured: creating a snapshot needs root.
+const CREATE_PROGRESS: &str = include_str!("fixtures/create-rsync-progress.txt");
+
+/// Answers `--list` with the device fixture, and streams `stdout` for anything else through
+/// the real segment reader, as the helper's runner does.
+struct Streaming {
+    stdout: &'static str,
+    success: bool,
+}
+
+impl Runner for Streaming {
+    fn run(&self, _argv: &[OsString]) -> io::Result<RunOutput> {
+        ok(DEVICE)
+    }
+
+    fn run_streaming(
+        &self,
+        _argv: &[OsString],
+        on_segment: &mut dyn FnMut(&str) -> bool,
+    ) -> io::Result<RunOutput> {
+        let stdout = apsis_core::progress::read_segments(self.stdout.as_bytes(), true, on_segment)?;
+        Ok(RunOutput {
+            success: self.success,
+            code: Some(i32::from(!self.success)),
+            stdout,
+            stderr: String::new(),
+        })
+    }
+}
+
+/// A `TimeshiftCli` that has listed a device (create needs one), then streams `stdout`.
+fn streaming_cli(stdout: &'static str, success: bool) -> TimeshiftCli<Streaming> {
+    let cli = TimeshiftCli::new(Streaming { stdout, success });
+    cli.list().unwrap();
+    cli
+}
+
+#[test]
+fn create_reports_timeshift_progress_as_it_comes() {
+    let cli = streaming_cli(CREATE_PROGRESS, true);
+    let mut seen = Vec::new();
+    cli.create_with_progress("", &mut |p| seen.push((p.percent, p.eta_seconds)))
+        .unwrap();
+    assert_eq!(
+        seen,
+        [
+            (Some(0.0), None),
+            (Some(0.0), None),
+            (Some(3.17), Some(5 * 60 + 43)),
+            (Some(12.5), Some(4 * 60 + 12)),
+            (Some(58.23), Some(3 * 60 + 12)),
+            (Some(99.91), Some(1)),
+        ]
+    );
+}
+
+#[test]
+fn a_failed_create_still_shows_its_errors_not_progress_lines() {
+    let output = "Estimating system size...\n  5.00% complete (00:01:00 remaining)\r\
+                  E: rsync returned an error\nE: Failed to create new snapshot\n";
+    let cli = streaming_cli(output, false);
+    let mut count = 0;
+    let error = cli
+        .create_with_progress("", &mut |_| count += 1)
+        .unwrap_err();
+    assert_eq!(count, 1);
+    match error {
+        Error::Failed { output, .. } => assert_eq!(
+            output,
+            "E: rsync returned an error\nE: Failed to create new snapshot"
+        ),
+        other => panic!("{other:?}"),
+    }
+}

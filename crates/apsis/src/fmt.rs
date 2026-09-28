@@ -2,7 +2,7 @@
 
 //! Plain-text formatting for the popup and tooltip. No widgets, so it's unit-testable.
 
-use apsis_core::{Mode, Snapshot, Tag};
+use apsis_core::{DiskUsage, Mode, Snapshot, Tag};
 use jiff::civil::DateTime;
 
 /// How long ago `then` was, as seen at `now`: `just now`, `5m ago`, `3h ago`, `2d ago`.
@@ -108,6 +108,106 @@ pub fn size(bytes: u64) -> String {
     format!("{text}{}", UNITS[unit])
 }
 
+/// [`size`] without the decimal from 10 up: `448G`, `4.5G`. For the disk line, where the
+/// numbers sit side by side.
+#[must_use]
+pub fn size_short(bytes: u64) -> String {
+    let text = size(bytes);
+    let split = text
+        .find(|c: char| c.is_ascii_alphabetic())
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    match number.parse::<f64>() {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a displayed size under 1024"
+        )]
+        Ok(value) if value >= 10.0 => format!("{}{unit}", value.round() as u64),
+        _ => text,
+    }
+}
+
+/// The disk line's text: `448G used · 483G free · 9 snapshots` from `statvfs`, or only
+/// `483G free · 9 snapshots` when Timeshift's free line is all there is. `None` when neither
+/// is known: nothing is shown then.
+#[must_use]
+pub fn disk_text(
+    usage: Option<DiskUsage>,
+    reported_free: Option<u64>,
+    count: usize,
+) -> Option<String> {
+    let noun = if count == 1 { "snapshot" } else { "snapshots" };
+    match (usage, reported_free) {
+        (Some(usage), _) => Some(format!(
+            "{} used · {} free · {count} {noun}",
+            size_short(usage.used),
+            size_short(usage.free)
+        )),
+        (None, Some(free)) => Some(format!("{} free · {count} {noun}", size_short(free))),
+        (None, None) => None,
+    }
+}
+
+/// How many of a bar's `cells` are filled for `fraction` used, and how many are empty.
+/// Anything used shows at least one filled cell, and anything free at least one empty one.
+#[must_use]
+pub fn bar_cells(fraction: f64, cells: usize) -> (usize, usize) {
+    let fraction = if fraction.is_nan() {
+        0.0
+    } else {
+        fraction.clamp(0.0, 1.0)
+    };
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "a cell count, clamped to 0..=cells"
+    )]
+    let mut filled = ((fraction * cells as f64).round() as usize).min(cells);
+    if cells >= 2 {
+        if fraction > 0.0 && filled == 0 {
+            filled = 1;
+        } else if fraction < 1.0 && filled == cells {
+            filled = cells - 1;
+        }
+    }
+    (filled, cells - filled)
+}
+
+/// `58%`: whole percent, rounded down, so `100%` means done.
+#[must_use]
+pub fn percent(percent: f64) -> String {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to 0..=100"
+    )]
+    let whole = percent.clamp(0.0, 100.0).floor() as u8;
+    format!("{whole}%")
+}
+
+/// Time left, roughly: `<1 min`, `~3 min`, `~2 h`, `~2 h 5 min`.
+#[must_use]
+pub fn eta(seconds: u64) -> String {
+    if seconds < 60 {
+        return "<1 min".to_owned();
+    }
+    // To the nearest minute.
+    let minutes = (seconds + 30) / 60;
+    match (minutes / 60, minutes % 60) {
+        (0, m) => format!("~{m} min"),
+        (h, 0) => format!("~{h} h"),
+        (h, m) => format!("~{h} h {m} min"),
+    }
+}
+
+/// `sdX1` for `/dev/sdX1`: the device's name without the folder.
+#[must_use]
+pub fn device_name(device: &str) -> &str {
+    device.rsplit('/').next().unwrap_or(device)
+}
+
 /// The last `n` non-blank lines of `text`, trimmed on the right.
 #[must_use]
 pub fn tail(text: &str, n: usize) -> Vec<String> {
@@ -146,6 +246,76 @@ mod tests {
         assert_eq!(size(512 * 1024 * 1024), "512M");
         assert_eq!(size(1_000_203_837_440), "931.5G");
         assert_eq!(size(2 * 1024_u64.pow(4)), "2T");
+    }
+
+    #[test]
+    fn short_sizes_drop_the_decimal_from_ten_up() {
+        assert_eq!(size_short(0), "0B");
+        assert_eq!(size_short(4_831_838_208), "4.5G");
+        assert_eq!(size_short(481_036_337_152), "448G");
+        assert_eq!(size_short(1_000_203_837_440), "932G");
+        assert_eq!(size_short(2 * 1024_u64.pow(4)), "2T");
+    }
+
+    #[test]
+    fn disk_text_says_only_what_is_known() {
+        let usage = DiskUsage {
+            total: 1_000_203_837_440,
+            used: 481_036_337_152,
+            free: 518_617_202_688,
+        };
+        assert_eq!(
+            disk_text(Some(usage), Some(1), 9).as_deref(),
+            Some("448G used · 483G free · 9 snapshots")
+        );
+        assert_eq!(
+            disk_text(None, Some(123_400_000_000), 1).as_deref(),
+            Some("115G free · 1 snapshot")
+        );
+        assert_eq!(disk_text(None, None, 3), None);
+    }
+
+    #[test]
+    fn bar_cells_add_up_and_never_hide_a_little_use_or_space() {
+        assert_eq!(bar_cells(0.0, 10), (0, 10));
+        assert_eq!(bar_cells(1.0, 10), (10, 0));
+        assert_eq!(bar_cells(0.58, 10), (6, 4));
+        assert_eq!(bar_cells(0.001, 10), (1, 9));
+        assert_eq!(bar_cells(0.999, 10), (9, 1));
+        assert_eq!(bar_cells(0.5, 0), (0, 0));
+        assert_eq!(bar_cells(0.7, 1), (1, 0));
+        assert_eq!(bar_cells(f64::NAN, 4), (0, 4));
+        assert_eq!(bar_cells(7.0, 4), (4, 0));
+        for cells in 0..50 {
+            let (filled, empty) = bar_cells(0.37, cells);
+            assert_eq!(filled + empty, cells);
+        }
+    }
+
+    #[test]
+    fn percents_round_down() {
+        assert_eq!(percent(58.23), "58%");
+        assert_eq!(percent(99.91), "99%");
+        assert_eq!(percent(100.0), "100%");
+        assert_eq!(percent(-3.0), "0%");
+    }
+
+    #[test]
+    fn eta_is_rough() {
+        assert_eq!(eta(0), "<1 min");
+        assert_eq!(eta(59), "<1 min");
+        assert_eq!(eta(60), "~1 min");
+        assert_eq!(eta(192), "~3 min");
+        assert_eq!(eta(3569), "~59 min");
+        assert_eq!(eta(3590), "~1 h");
+        assert_eq!(eta(2 * 3600 + 5 * 60), "~2 h 5 min");
+    }
+
+    #[test]
+    fn device_names_lose_their_folder() {
+        assert_eq!(device_name("/dev/sdX1"), "sdX1");
+        assert_eq!(device_name("/dev/mapper/luks-1"), "luks-1");
+        assert_eq!(device_name("sdb"), "sdb");
     }
 
     #[test]

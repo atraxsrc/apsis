@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use apsis_core::{Backend, Error, Result, Runner, SnapshotList, TimeshiftCli, parse_snapshot_name};
+use apsis_core::{
+    Backend, Error, Progress, Result, Runner, SnapshotList, TimeshiftCli, parse_snapshot_name,
+};
 use tokio::sync::Notify;
 
 pub struct State<R> {
@@ -98,10 +100,11 @@ impl<R: Runner> Running<R> {
     }
 
     /// Lists first, so `--snapshot-device` is the device Timeshift reports right now, then
-    /// creates. Refuses (like the CLI backend) when no device is selected.
-    pub fn create(&self, comment: &str) -> Result<()> {
+    /// creates, handing Timeshift's progress to `on_progress`. Refuses (like the CLI backend)
+    /// when no device is selected.
+    pub fn create(&self, comment: &str, on_progress: &mut dyn FnMut(Progress)) -> Result<()> {
         self.0.cli.list()?;
-        self.0.cli.create(comment)
+        self.0.cli.create_with_progress(comment, on_progress)
     }
 
     /// Timeshift's settings changed: the next list targets the device they name.
@@ -212,7 +215,11 @@ mod tests {
     #[test]
     fn create_lists_first_and_targets_the_listed_uuid() {
         let (state, fake) = fake_state(&[DEVICE_LIST, ""]);
-        state.begin().unwrap().create("before update").unwrap();
+        state
+            .begin()
+            .unwrap()
+            .create("before update", &mut |_| {})
+            .unwrap();
         let calls = fake.calls.lock().unwrap().clone();
         assert_eq!(actions(&fake), ["--list", "--create"]);
         let create = &calls[1];
@@ -235,7 +242,7 @@ mod tests {
     #[test]
     fn create_without_a_device_is_refused_after_the_list() {
         let (state, fake) = fake_state(&[UNCONFIGURED_LIST]);
-        let result = state.begin().unwrap().create("");
+        let result = state.begin().unwrap().create("", &mut |_| {});
         assert!(matches!(result, Err(Error::NoSnapshotDevice)), "{result:?}");
         assert_eq!(actions(&fake), ["--list"]);
     }

@@ -9,17 +9,23 @@
 A panel applet with a small terminal-style popup to list, create and delete system snapshots.
 It works with keyboard or mouse and follows your COSMIC theme.
 
-> **Status:** 0.1.1. Listing, creating and deleting snapshots through Timeshift is the stable
+> **Status:** 0.1.2. Listing, creating and deleting snapshots through Timeshift is the stable
 > core. The native rsync backend and restoring files are **experimental**; see below.
 
 <p align="center"><img src="docs/screenshot.png" width="560" alt="Apsis popup: snapshot list, details pane and activity pane"></p>
 <p align="center"><img src="docs/screenshot1.png" width="560" alt="Apsis popup: snapshot list, details pane and activity pane"></p>
 
+<p align="center"><sub>The screenshots predate the disk usage line under the panes.</sub></p>
+
 ## Features
 
 - **Snapshot list** in the panel popup: date, tags (O/B/H/D/W/M) and comment, with a details
   pane, and the age of the last snapshot in the panel button's tooltip.
+- **Disk usage line** under the list: a bar of the backup disk's used and free space, in the
+  theme's warning colour under 10% free and its destructive colour under 5% (free space only,
+  no bar, when Apsis can't read the disk's size).
 - **Create and delete** snapshots through Timeshift, with a comment, and `[y/N]` before a delete.
+  Creates and restores show a progress bar with the time left.
 - **Settings**: backup device, rsync or btrfs mode, schedules and how many to keep, home
   folders per user, and filters, written to Timeshift's own settings file.
 - **Keyboard first**: vim-style keys (`j`/`k`, `c`reate, `d`elete, `s`ettings, `?` help) and a

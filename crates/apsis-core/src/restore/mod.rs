@@ -32,6 +32,7 @@ pub use plan::{Action, Destination, Item, Plan};
 pub use runner::RsyncRunner;
 
 use crate::error::{Error, Result};
+use crate::progress::{Progress, parse_rsync};
 use crate::timeshift::{RunOutput, Runner};
 
 /// Most paths one restore takes.
@@ -150,6 +151,10 @@ pub fn warning_in_original(path: &SnapPath) -> Option<String> {
         .then(|| format!("{path}: /{top} is live system files; check the plan"))
 }
 
+/// A real run's progress (whole-transfer percent and time left) on stdout, between the
+/// itemized lines; [`Restore::run_with_progress`] takes it out before the plan is read.
+const PROGRESS: &str = "--info=progress2";
+
 /// rsync, common to both modes: archive with hard links, ACLs and xattrs, numeric owners, no
 /// `--delete`, and the itemized output the plan is read from.
 fn rsync_base() -> Vec<OsString> {
@@ -182,9 +187,7 @@ pub fn folder_argv(
         .map(OsString::from),
     );
     argv.push(format!("--chown={uid}:{gid}").into());
-    if dry_run {
-        argv.push("--dry-run".into());
-    }
+    argv.push(if dry_run { "--dry-run" } else { PROGRESS }.into());
     argv.extend(sources.iter().map(|s| s.clone().into_os_string()));
     argv.push(destination.into());
     argv
@@ -202,9 +205,7 @@ pub fn original_argv(
     let mut argv = rsync_base();
     argv.push("--backup".into());
     argv.push(format!("--suffix={BACKUP_INFIX}{snapshot}").into());
-    if dry_run {
-        argv.push("--dry-run".into());
-    }
+    argv.push(if dry_run { "--dry-run" } else { PROGRESS }.into());
     argv.push(source.as_os_str().to_owned());
     let mut parent = live_parent.as_os_str().to_owned();
     parent.push("/");
@@ -220,14 +221,32 @@ impl<R: Runner> Restore<'_, R> {
     /// [`Error::InvalidInput`] for anything refused before rsync runs; [`Error::Restore`] when
     /// rsync fails.
     pub fn run(&self, request: &Request, caller: &Caller) -> Result<Plan> {
+        self.run_with_progress(request, caller, &|_| {})
+    }
+
+    /// [`Restore::run`], handing rsync's progress to `on_progress` while a real run copies
+    /// (only with a runner that streams, like [`RsyncRunner`]). Original mode runs rsync once
+    /// per path; its progress is spread over them ([`Progress::part_of`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Restore::run`].
+    pub fn run_with_progress(
+        &self,
+        request: &Request,
+        caller: &Caller,
+        on_progress: &dyn Fn(Progress),
+    ) -> Result<Plan> {
         let paths = check_paths(&request.paths)?;
         let snapshot = open_snapshot(self.repo, &request.snapshot)?;
         for path in &paths {
             path::resolve(&snapshot, path)?;
         }
         match request.destination {
-            Destination::Folder => self.folder(&snapshot, &paths, caller, request.dry_run),
-            Destination::Original => self.original(&snapshot, &paths, request.dry_run),
+            Destination::Folder => {
+                self.folder(&snapshot, &paths, caller, request.dry_run, on_progress)
+            }
+            Destination::Original => self.original(&snapshot, &paths, request.dry_run, on_progress),
         }
     }
 
@@ -237,6 +256,7 @@ impl<R: Runner> Restore<'_, R> {
         paths: &[SnapPath],
         caller: &Caller,
         dry_run: bool,
+        on_progress: &dyn Fn(Progress),
     ) -> Result<Plan> {
         // `localhost/./etc/hosts`: `--relative` keeps what's after the `/./`.
         let sources: Vec<PathBuf> = paths
@@ -277,7 +297,7 @@ impl<R: Runner> Restore<'_, R> {
             plan.commands.push(shown(&argv));
             let output = {
                 let _inherited = pinned.inherited()?;
-                self.runner.run(&argv)
+                self.run_real(&argv, &|p| on_progress(p))
             };
             // Handed over even if rsync failed, so the caller can look at or remove what's there.
             let handed = pinned.hand_over(caller.uid, caller.gid);
@@ -290,7 +310,20 @@ impl<R: Runner> Restore<'_, R> {
         Ok(plan)
     }
 
-    fn original(&self, snapshot: &SnapshotRoot, paths: &[SnapPath], dry_run: bool) -> Result<Plan> {
+    /// Runs a real (not dry) rsync, taking its progress lines out of stdout.
+    fn run_real(&self, argv: &[OsString], on_progress: &dyn Fn(Progress)) -> io::Result<RunOutput> {
+        self.runner.run_streaming(argv, &mut |segment| {
+            parse_rsync(segment).map(on_progress).is_some()
+        })
+    }
+
+    fn original(
+        &self,
+        snapshot: &SnapshotRoot,
+        paths: &[SnapPath],
+        dry_run: bool,
+        on_progress: &dyn Fn(Progress),
+    ) -> Result<Plan> {
         let suffix = format!("{BACKUP_INFIX}{}", snapshot.name);
         let mut plan = Plan {
             snapshot: snapshot.name.clone(),
@@ -364,7 +397,8 @@ impl<R: Runner> Restore<'_, R> {
         for (index, (source, parent, prefix)) in jobs.iter().enumerate() {
             let argv = original_argv(source, parent, &snapshot.name, false);
             plan.commands.push(shown(&argv));
-            let output = self.runner.run(&argv)?;
+            let count = jobs.len();
+            let output = self.run_real(&argv, &|p| on_progress(p.part_of(index, count)))?;
             let (items, notes) = plan::parse_itemized(&output.stdout, prefix, Some(&suffix));
             plan.items.extend(items);
             plan.notes.extend(notes);
@@ -449,6 +483,7 @@ mod tests {
                 "--chmod=ug-s",
                 "--filter=-x security.*",
                 "--chown=1000:1000",
+                "--info=progress2",
                 "/run/apsis/backup/timeshift/snapshots/S/localhost/./etc/hosts",
                 "/proc/self/fd/7/",
             ]

@@ -353,6 +353,22 @@ original, and the journal shows each call.
   window, with a line per home option; the popup keeps one height in the settings view
   (sized to the tallest row's details). The layout test runs only with `APSIS_LAYOUT_TEST=1`.
 
+- Disk usage line (superfile "Processes"-style) under the panes: `disk  sdX1  ████░░░░  448G
+  used · 483G free · 9 snapshots`, accent / warning (< 10% free) / destructive (< 5%) from the
+  theme, bar width from the space left. The helper's new `ListWithUsage` and
+  `NativeListWithUsage` add `statvfs` numbers (`List`/`NativeList` unchanged); Timeshift's
+  `X GB free` line is the free-only fallback, also for pkexec. Unknown: no line. Tooltip adds
+  `· 483G free`. Refreshed after create, delete, bulk delete and restore. - done 2026-09-28,
+  tested by the user. Then (same round): when no mount of the disk exists, a brief read-only
+  mount for the `statvfs`; the free line only if that fails.
+- Progress and time left for create (Timeshift and native) and real restores:
+  `creating ██████░░░░ 58% ~3 min left` in the activity pane, from the helper's new
+  `Progress` signal (Timeshift's `% complete` line, rsync `--info=progress2`); `estimating…`
+  until there's a number; a bare spinner through pkexec or an older helper. - done 2026-09-28,
+  not committed, waiting for the user's test.
+- `just deb-install` for testing on the user's machine (builds the .deb, reinstalls it with
+  apt, stops the helper). - done 2026-09-28.
+
 ## Phase 7 — Release
 
 - README screenshots, metainfo, `just vendor` tarball, tag `v0.1.0` (user pushes).

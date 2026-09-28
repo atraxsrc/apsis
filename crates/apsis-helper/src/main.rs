@@ -4,8 +4,9 @@
 //!
 //! A system D-Bus service, started as root by D-Bus activation (through
 //! `apsis-helper.service`) when the applet calls it, and gone again after a minute idle. It
-//! offers exactly `List`, `Create(comment)`, `Delete(name)`, `ReadSettings`,
-//! `WriteSettings`, the native backend's `NativeList`, `NativeDryRun(comment)` and
+//! offers exactly `List` (and `ListWithUsage`), `Create(comment)`, `Delete(name)`,
+//! `ReadSettings`, `WriteSettings`, the native backend's `NativeList` (and
+//! `NativeListWithUsage`), `NativeDryRun(comment)` and
 //! `NativeCreate(comment)`, and file-level restore's `Browse` and `Restore`; each checks its own
 //! polkit action for the caller, checks its input again, and runs `timeshift` (or `lsblk`,
 //! `findmnt`, `mount`, `rsync`) with a fixed argv, no shell. `WriteSettings` edits
@@ -18,6 +19,7 @@ mod runner;
 mod service;
 mod settings;
 mod state;
+mod usage;
 
 use std::process::ExitCode;
 use std::sync::Arc;

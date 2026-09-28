@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -11,13 +12,15 @@ use apsis_core::restore::{
 };
 use apsis_core::settings::{HomeState, Level, Settings, SettingsInfo};
 use apsis_core::{
-    Backend, MAX_COMMENT_CHARS, PkexecRunner, Snapshot, SnapshotList, TimeshiftCli,
-    validate_comment,
+    Backend, DiskUsage, MAX_COMMENT_CHARS, PkexecRunner, Progress, Snapshot, SnapshotList,
+    TimeshiftCli, validate_comment,
 };
 use cosmic::applet::{menu_button, padded_control};
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::advanced::text::EllipsizeHeightLimit;
 use cosmic::iced::border::Radius;
+use cosmic::iced::futures::channel::mpsc;
+use cosmic::iced::futures::{StreamExt, stream};
 use cosmic::iced::keyboard::{self, Key, key::Named};
 use cosmic::iced::platform_specific::shell::wayland::commands::popup::{destroy_popup, get_popup};
 use cosmic::iced::widget::scrollable::{Direction, RelativeOffset, Scrollbar, snap_to};
@@ -92,6 +95,17 @@ const CONFIRM_CHARS: usize = 3;
 /// Width of the `>` line's input when a long label (the names of a bulk delete) takes the rest
 /// of the row and wraps.
 const SHORT_INPUT_WIDTH: f32 = 48.0;
+/// Advance of one monotext cell (14 px text; monospace fonts are about 0.6 em wide), for how
+/// many block characters fit in the disk bar. A slightly wider font only clips the bar's end.
+const MONO_CELL_WIDTH: f32 = 14.0 * 0.6;
+/// Cells in the activity pane's progress bar.
+const PROGRESS_CELLS: usize = 20;
+/// Height of one monotext line.
+const LINE_HEIGHT: f32 = 20.0;
+/// Below this share of free space the disk bar turns the warning colour, and below
+/// [`DISK_CRITICAL`] the destructive one.
+const DISK_LOW: f64 = 0.10;
+const DISK_CRITICAL: f64 = 0.05;
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Themed name of the panel icon; installed by `just install`.
@@ -174,6 +188,9 @@ pub struct AppModel {
     prompt: Prompt,
     /// How the last create or delete went, or why a comment was refused.
     status: Option<Status>,
+    /// The running create's or restore's last `Progress` from the helper. `None` until the
+    /// first one (never, through pkexec or an older helper: a bare spinner then).
+    progress: Option<Progress>,
     spinner: usize,
     /// Index into the displayed (newest first) snapshots.
     selected: usize,
@@ -190,6 +207,11 @@ pub struct AppModel {
     browser: Option<Browser>,
     /// A restore whose dry run was shown: Enter runs it for real.
     pending_restore: Option<Request>,
+    /// A restore ran in the browser: list again once it's left, for the disk line (see
+    /// [`AppModel::list_if_restored`]).
+    list_after_browser: bool,
+    /// `Browse` calls not answered yet. They hold the helper's lock, so a list waits for them.
+    browse_calls: usize,
     /// The last restore's plan or result, shown by [`Overlay::RestorePlan`].
     restore_text: Option<String>,
     /// Window mode: the window is on screen and its size limits are relaxed (see
@@ -342,12 +364,50 @@ impl Edge {
     }
 }
 
+/// The activity pane's first line while a create or restore reports progress.
+#[derive(Debug, Clone, PartialEq)]
+enum ProgressLine {
+    /// Progress will come, but there's no number yet: `creating ⠋ estimating…`.
+    Estimating(String),
+    /// `creating ██████░░░░ 58% ~3 min left`: the label, filled and empty cells, the rest.
+    Bar {
+        label: String,
+        filled: usize,
+        empty: usize,
+        tail: String,
+    },
+}
+
 /// How a line in the activity pane looks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tone {
     Normal,
     Dim,
     Error,
+}
+
+/// How full the backup disk is, for the disk bar's colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Space {
+    /// Accent.
+    Plenty,
+    /// Under [`DISK_LOW`] free: the theme's warning colour.
+    Low,
+    /// Under [`DISK_CRITICAL`] free: the destructive colour.
+    Critical,
+}
+
+impl Space {
+    fn of(usage: &DiskUsage) -> Self {
+        let free = usage.free_fraction();
+        if free < DISK_CRITICAL {
+            Self::Critical
+        } else if free < DISK_LOW {
+            Self::Low
+        } else {
+            Self::Plenty
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -438,6 +498,8 @@ pub enum Message {
     Listed(Result<SnapshotList, CliError>),
     /// A create or delete finished.
     Finished(Operation, Result<(), CliError>),
+    /// The running create or restore got this far.
+    Progress(Progress),
     /// A native dry run finished: the plan's text.
     DryRunDone(Result<String, CliError>),
     Tick,
@@ -502,6 +564,7 @@ impl cosmic::Application for AppModel {
             known_uuid: None,
             loading: false,
             running: None,
+            progress: None,
             prompt: Prompt::Command,
             status: None,
             spinner: 0,
@@ -513,6 +576,8 @@ impl cosmic::Application for AppModel {
             dry_run_plan: None,
             browser: None,
             pending_restore: None,
+            list_after_browser: false,
+            browse_calls: 0,
             restore_text: None,
             window_resizable: false,
             icon: symbolic_icon(),
@@ -682,6 +747,12 @@ impl cosmic::Application for AppModel {
             Message::StartCreate => return self.on_key(KeyAction::Create),
             Message::StartDelete => return self.on_key(KeyAction::Delete),
             Message::Finished(operation, result) => return self.on_finished(&operation, result),
+            // A late one, after its operation ended, is dropped.
+            Message::Progress(progress) => {
+                if self.running.is_some() {
+                    self.progress = Some(progress);
+                }
+            }
             Message::DryRunDone(result) => return self.on_dry_run(result),
             Message::Listed(result) => {
                 self.on_listed(result);
@@ -839,6 +910,8 @@ impl AppModel {
             .min_height(1.0)
             .max_height(1080.0);
         let open = close.chain(Task::batch([get_popup(settings), focus_input()]));
+        // A restore ran in the browser the popup was closed on.
+        let open = Task::batch([open, self.list_if_restored()]);
         if matches!(self.listing, Listing::NotLoaded) {
             Task::batch([open, self.start_list()])
         } else {
@@ -1302,6 +1375,7 @@ impl AppModel {
         }
         self.running = Some(operation.clone());
         self.status = None;
+        self.progress = None;
         self.spinner = 0;
         if let Operation::DryRun(comment) = operation {
             return cosmic::task::future(async move {
@@ -1309,15 +1383,15 @@ impl AppModel {
             });
         }
         if let Operation::Restore(request) = operation {
-            return cosmic::task::future(async move {
-                let result = restore(&request).await;
+            return with_progress(move |mut progress| async move {
+                let result = restore(&request, &mut progress).await;
                 Message::RestoreDone(request, result)
             });
         }
         let pkexec = Arc::clone(&self.pkexec);
         let native = self.config.native_backend;
-        cosmic::task::future(async move {
-            let result = operate(pkexec, operation.clone(), native).await;
+        with_progress(move |mut progress| async move {
+            let result = operate(pkexec, operation.clone(), native, &mut progress).await;
             Message::Finished(operation, result)
         })
     }
@@ -1331,6 +1405,7 @@ impl AppModel {
         result: Result<(), CliError>,
     ) -> Task<cosmic::Action<Message>> {
         self.running = None;
+        self.progress = None;
         if let Operation::DeleteMany { names, done } = operation
             && result.is_ok()
             && done + 1 < names.len()
@@ -1440,6 +1515,7 @@ impl AppModel {
         };
         let snapshot = browser.snapshot.clone();
         self.spinner = 0;
+        self.browse_calls += 1;
         cosmic::task::future(async move {
             let result = browse(&snapshot, &path.to_string()).await;
             Message::Browsed(snapshot, path, result)
@@ -1452,17 +1528,30 @@ impl AppModel {
         path: &SnapPath,
         result: Result<FolderListing, CliError>,
     ) -> Task<cosmic::Action<Message>> {
+        self.browse_calls = self.browse_calls.saturating_sub(1);
         let result = result.map_err(|e| error_summary(&e, self.known_uuid.as_deref()));
         if let Some(browser) = &mut self.browser
             && browser.snapshot == snapshot
         {
             browser.loaded(path, result);
         }
+        // The browser may have been closed while this call ran.
+        let list = self.list_if_restored();
         // The polkit dialog took keyboard focus; hand it back to the `>` line.
         if self.popup.is_some() {
-            return focus_input();
+            return Task::batch([list, focus_input()]);
         }
-        Task::none()
+        list
+    }
+
+    /// Lists again after a restore (for the disk line) once the browser is closed and no
+    /// `Browse` call holds the helper's lock; until then the flag waits.
+    fn list_if_restored(&mut self) -> Task<cosmic::Action<Message>> {
+        if !self.list_after_browser || self.browser.is_some() || self.browse_calls > 0 {
+            return Task::none();
+        }
+        self.list_after_browser = false;
+        self.start_list()
     }
 
     /// Keys in the browser.
@@ -1562,6 +1651,7 @@ impl AppModel {
         result: Result<String, CliError>,
     ) -> Task<cosmic::Action<Message>> {
         self.running = None;
+        self.progress = None;
         let mut tasks = Vec::new();
         match (request.dry_run, result) {
             (true, Ok(plan)) => {
@@ -1596,9 +1686,16 @@ impl AppModel {
                         self.overlay = Overlay::Browse;
                     }
                 }
+                // A restore can write to the backup disk (a home on it), so the disk line is
+                // refreshed: at once if the browser is gone, else when it's left. Its folder
+                // reload holds the helper's lock, and a list beside it would be refused as busy.
                 if let Some(browser) = &mut self.browser {
                     let path = browser.reload();
                     tasks.push(self.fetch_browse(path));
+                    self.list_after_browser = true;
+                } else {
+                    self.list_after_browser = true;
+                    tasks.push(self.list_if_restored());
                 }
             }
         }
@@ -1649,7 +1746,7 @@ impl AppModel {
                 self.overlay = Overlay::None;
                 self.browser = None;
                 self.pending_restore = None;
-                return focus_input();
+                return Task::batch([self.list_if_restored(), focus_input()]);
             }
             _ => {}
         }
@@ -1730,13 +1827,19 @@ impl AppModel {
 
     fn tooltip(&self) -> String {
         match &self.listing {
-            Listing::Loaded(list) => match list.snapshots.first() {
-                Some(newest) => fl!(
-                    "tooltip-last",
-                    ago = fmt::ago(newest.created, jiff::Zoned::now().datetime())
-                ),
-                None => fl!("tooltip-none"),
-            },
+            Listing::Loaded(list) => {
+                let text = match list.snapshots.first() {
+                    Some(newest) => fl!(
+                        "tooltip-last",
+                        ago = fmt::ago(newest.created, jiff::Zoned::now().datetime())
+                    ),
+                    None => fl!("tooltip-none"),
+                };
+                match list.usage.map(|u| u.free).or(list.reported_free) {
+                    Some(free) => fl!("tooltip-free", text = text, free = fmt::size_short(free)),
+                    None => text,
+                }
+            }
             Listing::NotLoaded | Listing::Failed(_) => fl!("app-title"),
         }
     }
@@ -1776,16 +1879,13 @@ impl AppModel {
             Mode::Applet => Length::Shrink,
             Mode::Window => Length::Fill,
         });
-        widget::column::with_children(vec![
-            self.header(),
-            panes.into(),
-            self.activity(),
-            self.prompt(),
-            self.hints(),
-        ])
-        .spacing(6)
-        .padding([10.0, POPUP_PADDING])
-        .into()
+        let mut children = vec![self.header(), panes.into()];
+        children.extend(self.disk_line());
+        children.extend([self.activity(), self.prompt(), self.hints()]);
+        widget::column::with_children(children)
+            .spacing(6)
+            .padding([10.0, POPUP_PADDING])
+            .into()
     }
 
     /// ` ~/apsis $ ls --snapshots                 rsync · 3 snapshots`
@@ -1813,6 +1913,45 @@ impl AppModel {
         .spacing(8)
         .align_y(Alignment::Center)
         .into()
+    }
+
+    /// `disk  sdX1  ████████░░░░  448G used · 483G free · 9 snapshots` under the panes, from
+    /// the last list. Without `statvfs` numbers there's no bar, only Timeshift's free space;
+    /// with neither, no line at all. Not in the settings view: its notes are sized to fit the
+    /// smallest window without it (`settings_details_fit...` test).
+    fn disk_line(&self) -> Option<Element<'_, Message>> {
+        let Listing::Loaded(list) = &self.listing else {
+            return None;
+        };
+        if self.overlay == Overlay::Settings {
+            return None;
+        }
+        let text = fmt::disk_text(list.usage, list.reported_free, list.snapshots.len())?;
+        let mut children = vec![
+            monotext(fl!("disk-label"))
+                .class(theme::Text::Custom(dim_text))
+                .into(),
+        ];
+        if let Some(device) = &list.device {
+            children.push(monotext(fmt::device_name(device).to_owned()).into());
+        }
+        match list.usage {
+            Some(usage) => children.push(disk_bar(usage)),
+            None => children.push(widget::space::horizontal().into()),
+        }
+        children.push(
+            monotext(text)
+                .wrapping(Wrapping::None)
+                .class(theme::Text::Custom(dim_text))
+                .into(),
+        );
+        Some(
+            widget::row::with_children(children)
+                .spacing(16)
+                .padding([0.0, TITLE_INSET])
+                .align_y(Alignment::Center)
+                .into(),
+        )
     }
 
     /// The left pane's title: what it shows.
@@ -2010,6 +2149,39 @@ impl AppModel {
         }
     }
 
+    /// The progress line for a running create or real restore, once the helper has sent a
+    /// `Progress` (see [`AppModel::progress`]). `None` otherwise: the spinner line.
+    fn progress_line(&self) -> Option<ProgressLine> {
+        let label = match &self.running {
+            Some(Operation::Create(_)) => fl!("progress-creating"),
+            Some(Operation::Restore(request)) if !request.dry_run => fl!("progress-restoring"),
+            _ => return None,
+        };
+        let progress = self.progress.as_ref()?;
+        let percent = match progress.percent {
+            Some(percent) if progress.has_estimate() => percent,
+            _ => {
+                let spinner = SPINNER[self.spinner];
+                return Some(ProgressLine::Estimating(format!(
+                    "{label} {spinner} {}",
+                    fl!("progress-estimating")
+                )));
+            }
+        };
+        let (filled, empty) = fmt::bar_cells(percent / 100.0, PROGRESS_CELLS);
+        let mut tail = fmt::percent(percent);
+        if let Some(eta) = progress.eta_seconds {
+            tail.push_str("  ");
+            tail.push_str(&fl!("progress-left", time = fmt::eta(eta)));
+        }
+        Some(ProgressLine::Bar {
+            label,
+            filled,
+            empty,
+            tail,
+        })
+    }
+
     /// What Timeshift complained about in the last good list (e.g. a stale mount), for the
     /// activity pane.
     fn list_warnings(&self) -> &[String] {
@@ -2022,14 +2194,36 @@ impl AppModel {
     /// The activity pane, active (accent border) while a create or delete runs: the current or
     /// last create/delete, then the last list's warnings.
     fn activity(&self) -> Element<'_, Message> {
-        let (text, tone) = self.activity_line();
-        let line = monotext(text).wrapping(Wrapping::WordOrGlyph);
-        let line = match tone {
-            Tone::Normal => line,
-            Tone::Dim => line.class(theme::Text::Custom(dim_text)),
-            Tone::Error => line.class(theme::Text::Custom(error_text)),
+        let first: Element<'_, Message> = match self.progress_line() {
+            Some(ProgressLine::Estimating(text)) => monotext(text).into(),
+            Some(ProgressLine::Bar {
+                label,
+                filled,
+                empty,
+                tail,
+            }) => widget::row::with_children(vec![
+                monotext(format!("{label} ")).into(),
+                monotext("█".repeat(filled))
+                    .class(theme::Text::Custom(accent_text))
+                    .into(),
+                monotext("░".repeat(empty))
+                    .class(theme::Text::Custom(dim_text))
+                    .into(),
+                monotext(format!(" {tail}")).into(),
+            ])
+            .into(),
+            None => {
+                let (text, tone) = self.activity_line();
+                let line = monotext(text).wrapping(Wrapping::WordOrGlyph);
+                match tone {
+                    Tone::Normal => line,
+                    Tone::Dim => line.class(theme::Text::Custom(dim_text)),
+                    Tone::Error => line.class(theme::Text::Custom(error_text)),
+                }
+                .into()
+            }
         };
-        let mut lines = vec![line.into()];
+        let mut lines = vec![first];
         lines.extend(self.list_warnings().iter().map(|warning| {
             monotext(fl!("activity-list-warning", warning = warning.clone()))
                 .wrapping(Wrapping::WordOrGlyph)
@@ -2676,6 +2870,42 @@ fn home_state_name(state: HomeState) -> String {
     }
 }
 
+/// The disk bar: as many monospace cells as fit the space left in the line, filled (`█`) in
+/// the accent, warning or destructive colour by [`Space`], the rest `░`, dimmed.
+fn disk_bar(usage: DiskUsage) -> Element<'static, Message> {
+    let fraction = usage.used_fraction();
+    let class = match Space::of(&usage) {
+        Space::Plenty => theme::Text::Custom(accent_text),
+        Space::Low => theme::Text::Custom(warning_text),
+        Space::Critical => theme::Text::Custom(error_text),
+    };
+    let bar = widget::responsive(move |size| {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a cell count from a width in pixels"
+        )]
+        let cells = (size.width / MONO_CELL_WIDTH).floor().max(0.0) as usize;
+        let (filled, empty) = fmt::bar_cells(fraction, cells);
+        widget::row::with_children(vec![
+            monotext("█".repeat(filled))
+                .wrapping(Wrapping::None)
+                .class(class)
+                .into(),
+            monotext("░".repeat(empty))
+                .wrapping(Wrapping::None)
+                .class(theme::Text::Custom(dim_text))
+                .into(),
+        ])
+        .into()
+    });
+    container(bar)
+        .width(Length::Fill)
+        .height(Length::Fixed(LINE_HEIGHT))
+        .clip(true)
+        .into()
+}
+
 fn hint(label: &'static str, on_press: Option<Message>) -> Element<'static, Message> {
     widget::button::custom(monotext(label))
         .class(theme::Button::Text)
@@ -2852,24 +3082,29 @@ async fn native_dry_run(comment: &str) -> Result<String, CliError> {
 ///
 /// A bulk delete runs one step per call: the snapshot at `done`. Through the helper the
 /// password is asked once (`auth_admin_keep`); through pkexec, for each snapshot.
-async fn operate(pkexec: Arc<Cli>, operation: Operation, native: bool) -> Result<(), CliError> {
+async fn operate(
+    pkexec: Arc<Cli>,
+    operation: Operation,
+    native: bool,
+    progress: &mut (dyn FnMut(Progress) + Send),
+) -> Result<(), CliError> {
     if native && let Operation::Create(comment) = &operation {
         return native_helper()
             .await?
-            .native_create(comment)
+            .native_create_with_progress(comment, progress)
             .await
             .map_err(CliError::from);
     }
     if let Some(helper) = HelperClient::connect().await {
         let done = match &operation {
-            Operation::Create(comment) => helper.create(comment).await,
+            Operation::Create(comment) => helper.create_with_progress(comment, progress).await,
             Operation::Delete(name) => helper.delete(name).await,
             Operation::DeleteMany { names, done } => match names.get(*done) {
                 Some(name) => helper.delete(name).await,
                 None => Ok(()),
             },
             Operation::DryRun(comment) => return native_dry_run(comment).await.map(drop),
-            Operation::Restore(request) => return restore(request).await.map(drop),
+            Operation::Restore(request) => return restore(request, progress).await.map(drop),
         };
         return done.map_err(CliError::from);
     }
@@ -3044,12 +3279,31 @@ async fn browse(snapshot: &str, path: &str) -> Result<FolderListing, CliError> {
 }
 
 /// Runs `request` (dry run or for real); the plan's or result's text.
-async fn restore(request: &Request) -> Result<String, CliError> {
+async fn restore(
+    request: &Request,
+    progress: &mut (dyn FnMut(Progress) + Send),
+) -> Result<String, CliError> {
     restore_helper()
         .await?
-        .restore(request)
+        .restore_with_progress(request, progress)
         .await
         .map_err(CliError::from)
+}
+
+/// Runs the operation `start` builds, as a task that also yields a [`Message::Progress`] for
+/// each update it's handed, then its own message. The updates end when the operation does.
+fn with_progress<F, Fut>(start: F) -> Task<cosmic::Action<Message>>
+where
+    F: FnOnce(Box<dyn FnMut(Progress) + Send>) -> Fut,
+    Fut: Future<Output = Message> + Send + 'static,
+{
+    let (sender, updates) = mpsc::unbounded();
+    let report: Box<dyn FnMut(Progress) + Send> = Box::new(move |progress| {
+        // The receiver only goes away with the task.
+        let _ = sender.unbounded_send(progress);
+    });
+    let done = stream::once(start(report));
+    cosmic::task::stream(stream::select(updates.map(Message::Progress), done))
 }
 
 /// Timeshift's settings, the devices and the users, through `apsis-helper` (there's no pkexec
@@ -3475,6 +3729,11 @@ fn accent_svg(theme: &Theme) -> iced_svg::Style {
     }
 }
 
+/// The disk bar's filled cells while there's plenty of space.
+fn accent_text(theme: &Theme) -> iced_text::Style {
+    text_style(theme, theme.cosmic().accent_text_color().into())
+}
+
 /// Secondary text: the normal text colour, faded.
 fn dim_text(theme: &Theme) -> iced_text::Style {
     let on = theme.cosmic().background(theme.transparent).on;
@@ -3612,6 +3871,7 @@ mod tests {
             known_uuid: None,
             loading: false,
             running: None,
+            progress: None,
             prompt: Prompt::Command,
             status: None,
             spinner: 0,
@@ -3623,6 +3883,8 @@ mod tests {
             dry_run_plan: None,
             browser: None,
             pending_restore: None,
+            list_after_browser: false,
+            browse_calls: 0,
             restore_text: None,
             window_resizable: false,
             icon: symbolic_icon(),
@@ -4465,6 +4727,139 @@ mod tests {
         send(&mut app, Message::Escape);
         assert_eq!(app.overlay, Overlay::Browse);
         assert!(app.browser.as_ref().unwrap().is_loading());
+        // No list beside the browser: its calls hold the helper's lock.
+        assert!(!app.loading);
+        // Leaving the browser while its reload runs still waits for the reload...
+        let snapshot = app.browser.as_ref().unwrap().snapshot.clone();
+        send(&mut app, Message::Escape);
+        assert!(app.browser.is_none() && !app.loading);
+        send(
+            &mut app,
+            Message::Browsed(snapshot, SnapPath::root(), folder(&[("etc", Kind::Dir)])),
+        );
+        // ...then lists, for the disk line.
+        assert!(app.loading);
+    }
+
+    #[test]
+    fn leaving_the_browser_after_a_restore_lists_once() {
+        let mut app = browsing();
+        let request = Request {
+            snapshot: app.browser.as_ref().unwrap().snapshot.clone(),
+            paths: vec!["/etc".to_owned()],
+            destination: Destination::Folder,
+            dry_run: false,
+        };
+        app.running = Some(Operation::Restore(request.clone()));
+        send(
+            &mut app,
+            Message::RestoreDone(request, Ok("restored".to_owned())),
+        );
+        browsed(&mut app, "/", &[("etc", Kind::Dir)]);
+        assert!(!app.loading, "the browser is still open");
+        send(&mut app, Message::Escape);
+        send(&mut app, Message::Escape);
+        assert!(app.browser.is_none() && app.loading);
+        app.on_listed(Ok(SnapshotList::default()));
+        // Browsing again and leaving without a restore doesn't list.
+        assert!(!app.list_after_browser);
+    }
+
+    #[test]
+    fn create_progress_goes_from_spinner_to_estimating_to_a_bar() {
+        let mut app = listed(DEVICE_LIST);
+        typed(&mut app, "c");
+        send(&mut app, Message::Submit);
+        assert!(matches!(app.running, Some(Operation::Create(_))));
+        // Nothing from the helper yet (or ever, through pkexec): the plain spinner line.
+        assert_eq!(app.progress_line(), None);
+        let at = |percent: Option<f64>, eta: Option<u64>| Progress {
+            percent,
+            eta_seconds: eta,
+            text: String::new(),
+        };
+        send(&mut app, Message::Progress(at(None, None)));
+        assert!(
+            matches!(app.progress_line(), Some(ProgressLine::Estimating(ref t)) if t.ends_with("estimating…"))
+        );
+        // Timeshift's `0.00% complete (??? remaining)` is no number yet either.
+        send(&mut app, Message::Progress(at(Some(0.0), None)));
+        assert!(matches!(
+            app.progress_line(),
+            Some(ProgressLine::Estimating(_))
+        ));
+        send(&mut app, Message::Progress(at(Some(58.23), Some(192))));
+        assert_eq!(
+            app.progress_line(),
+            Some(ProgressLine::Bar {
+                label: "creating".to_owned(),
+                filled: 12,
+                empty: 8,
+                tail: "58%  ~3 min left".to_owned(),
+            })
+        );
+        // Done: back to the status line; a late update is dropped.
+        send(
+            &mut app,
+            Message::Finished(Operation::Create(String::new()), Ok(())),
+        );
+        assert_eq!(app.progress_line(), None);
+        send(&mut app, Message::Progress(at(Some(99.0), Some(1))));
+        assert!(app.progress.is_none());
+    }
+
+    #[test]
+    fn deletes_and_dry_runs_have_no_progress_line() {
+        let mut app = listed(DEVICE_LIST);
+        app.running = Some(Operation::Delete(app.snapshots()[0].name.clone()));
+        app.progress = Some(Progress {
+            percent: Some(50.0),
+            eta_seconds: None,
+            text: String::new(),
+        });
+        assert_eq!(app.progress_line(), None);
+        app.running = Some(Operation::DryRun(String::new()));
+        assert_eq!(app.progress_line(), None);
+    }
+
+    #[test]
+    fn free_space_levels_follow_the_share_left() {
+        let usage = |used: u64, free: u64| DiskUsage {
+            total: used + free,
+            used,
+            free,
+        };
+        assert_eq!(Space::of(&usage(50, 50)), Space::Plenty);
+        assert_eq!(Space::of(&usage(900, 100)), Space::Plenty);
+        assert_eq!(Space::of(&usage(901, 99)), Space::Low);
+        assert_eq!(Space::of(&usage(950, 50)), Space::Low);
+        assert_eq!(Space::of(&usage(951, 49)), Space::Critical);
+        assert_eq!(Space::of(&usage(1, 0)), Space::Critical);
+        // Blocks kept back for root count as neither used nor free, as in df.
+        let reserved = DiskUsage {
+            total: 1000,
+            used: 850,
+            free: 100,
+        };
+        assert_eq!(Space::of(&reserved), Space::Plenty);
+    }
+
+    #[test]
+    fn disk_line_needs_a_list_and_some_numbers() {
+        let mut app = model();
+        assert!(app.disk_line().is_none());
+        app.on_listed(Ok(SnapshotList::default()));
+        assert!(app.disk_line().is_none(), "unknown usage: no line");
+        // Timeshift's free line alone: a line without a bar, and the tooltip says it.
+        let mut app = listed(DEVICE_LIST);
+        assert!(app.disk_line().is_some());
+        assert!(app.tooltip().ends_with("115G free"), "{}", app.tooltip());
+        let Listing::Loaded(list) = &mut app.listing else {
+            panic!()
+        };
+        list.usage = DiskUsage::from_statvfs(1000, 400, 350, 1024 * 1024);
+        assert!(app.disk_line().is_some());
+        assert!(app.tooltip().ends_with("350M free"), "{}", app.tooltip());
     }
 
     #[test]
@@ -4701,6 +5096,87 @@ mod tests {
             assert!(
                 heights.iter().all(|h| (h - heights[0]).abs() < 0.5),
                 "{mode:?}: pane heights {heights:?}"
+            );
+        }
+    }
+
+    /// Like the settings layout test: real fonts, only with `APSIS_LAYOUT_TEST=1`. The disk
+    /// bar's cells fit the space left for them (so [`MONO_CELL_WIDTH`] isn't too small for the
+    /// mono font here), and the line fits the popup and the smallest window.
+    #[test]
+    fn disk_line_fits_its_row_in_the_popup_and_a_small_window() {
+        use cosmic::iced::core::layout::Limits as LayoutLimits;
+        use cosmic::iced::core::renderer::Headless;
+        use cosmic::iced::core::widget::Tree;
+
+        if std::env::var_os("APSIS_LAYOUT_TEST").is_none_or(|v| v != "1") {
+            eprintln!("layout test skipped; set APSIS_LAYOUT_TEST=1 to run it");
+            return;
+        }
+        let Some(renderer) =
+            cosmic::iced::futures::executor::block_on(<cosmic::Renderer as Headless>::new(
+                cosmic::font::default(),
+                14.0.into(),
+                Some("tiny-skia"),
+            ))
+        else {
+            eprintln!("no headless renderer here; skipped");
+            return;
+        };
+        for (mode, size) in [
+            (Mode::Applet, Size::new(POPUP_WIDTH, 1000.0)),
+            (Mode::Window, WINDOW_MIN_SIZE),
+        ] {
+            let mut app = listed(DEVICE_LIST);
+            app.mode = mode;
+            let Listing::Loaded(list) = &mut app.listing else {
+                panic!()
+            };
+            // 1 TB disk, 448G used: the longest text the line usually has.
+            list.usage = Some(DiskUsage {
+                total: 1_000_203_837_440,
+                used: 481_036_337_152,
+                free: 518_617_202_688,
+            });
+            let mut surface = app.surface();
+            let mut tree = Tree::new(&surface);
+            let limits = LayoutLimits::new(Size::ZERO, size);
+            let node = surface
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits);
+            // Header, panes, then the disk line: label, device, bar, text.
+            let line = &node.children()[2];
+            let parts = line.children();
+            assert_eq!(parts.len(), 4, "{mode:?}");
+            let text = &parts[3];
+            let right = text.bounds().x + text.bounds().width;
+            assert!(
+                right <= line.bounds().width + 0.5,
+                "{mode:?}: text ends at {right}"
+            );
+            // The bar's container, the `responsive` in it, and the row of cells in that.
+            let bar = &parts[2];
+            let responsive = &bar.children()[0];
+            let cells = &responsive.children()[0];
+            let used = cells.bounds().width;
+            eprintln!(
+                "{mode:?}: bar {:.1} px, cells {used:.1} px",
+                bar.bounds().width
+            );
+            assert!(
+                bar.bounds().width > 10.0 * MONO_CELL_WIDTH,
+                "{mode:?}: bar too short"
+            );
+            assert!(
+                used <= bar.bounds().width + 0.5,
+                "{mode:?}: {used} px of cells in {} px",
+                bar.bounds().width
+            );
+            // And not much shorter either: at most two cells to spare.
+            assert!(
+                used >= bar.bounds().width - 2.0 * MONO_CELL_WIDTH - 0.5,
+                "{mode:?}: only {used} px of cells in {} px",
+                bar.bounds().width
             );
         }
     }

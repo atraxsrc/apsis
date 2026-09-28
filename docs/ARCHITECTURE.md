@@ -90,16 +90,19 @@ constants in `apsis_core::helper::names`; the helper's tests check its interface
 |---|---|
 | bus name | `io.github.atraxsrc.Apsis.Helper` (system bus, owned by root only) |
 | object / interface | `/io/github/atraxsrc/Apsis/Helper`, `io.github.atraxsrc.Apsis.Helper1` |
-| `List() -> (sssa(sss)as)` | `(device, uuid, mode, [(name, tags, comment)], warnings)`; polkit `list`, not interactive |
+| `List() -> (sssa(sss)as)` | `(device, uuid, mode, [(name, tags, comment)], warnings)`; polkit `list`, not interactive. Unchanged for older applets |
+| `ListWithUsage() -> ((sssa(sss)as)a{st})` | `List`'s reply plus the backup device's usage in bytes: `total`, `used`, `free` (all or none, from `statvfs`) and `reported-free` (Timeshift's `X GB free` line); missing keys mean unknown, unknown keys are ignored. Same polkit `list`. The applet calls this and falls back to `List` on `UnknownMethod` |
 | `Create(s comment)` | polkit `create`, interactive; returns once started |
 | `Delete(s name)` | polkit `delete`, interactive; returns once started |
 | `ReadSettings() -> (ssa(ssb)b)` | `(timeshift.json text, lsblk JSON, [(user, home, encrypted)], timeshift-gtk open)`; polkit `list`, not interactive |
 | `WriteSettings(s expected, (sbbabauas) settings) -> s` | polkit `configure`, interactive; writes `/etc/timeshift/timeshift.json`, returns once done (see below) |
 | `NativeList() -> (sssa(sss)as)` | native backend list, same shape as `List`; polkit `list`, not interactive |
+| `NativeListWithUsage() -> ((sssa(sss)as)a{st})` | `NativeList` plus usage, as `ListWithUsage`; `statvfs` on `/run/apsis/backup` while mounted |
 | `NativeDryRun(s comment) -> s` | the native create's plan as text, also logged; nothing written; polkit `list`, not interactive |
 | `NativeCreate(s comment)` | native rsync snapshot; polkit `create`, interactive; returns once started, `Finished("create", ..)` follows |
 | `Browse(s snapshot, s path) -> (a(sstxuuussstx)b)` | one folder of a snapshot, see below; polkit `browse`, interactive |
 | `Restore(s snapshot, as paths, s destination, b dry_run)` | polkit `browse` (dry run), `restore` (folder) or `restore-original` (original), interactive; returns once started, `Finished("restore", ..)` follows with the plan or result |
+| `Progress(s op, d percent, x eta_seconds, s text)` | signal, only to the caller, while a create or real restore runs: at most one per 500 ms (the `100%` one always), all sent before `Finished`; `-1` = unknown. The first has no numbers (progress will come). From Timeshift's `% complete` line or rsync's `--info=progress2` |
 | `Finished(s op, b ok, s message)` | signal, sent only to the caller that started the operation; `message` is the error, or for a restore the plan/result text |
 | errors | `...Helper1.Error.{NotAuthorized,Busy,InvalidInput,NotInstalled,DeviceNotFound,Failed,Changed}` |
 
@@ -127,6 +130,13 @@ Each call, in order:
 Long operations don't depend on any D-Bus call timeout: the only long wait inside a method
 call is the password dialog, and zbus sets no call timeout by default. The applet waits for
 `Finished`, or for the helper to leave the bus without sending one, which it reports as an error.
+
+Progress: the runners read the child's stdout as it comes, in pieces split on `\r` and `\n`
+(`Runner::run_streaming`, `progress::read_segments`); progress lines go to the operation's
+`ProgressSink` and are left out of the stdout kept for error messages and restore plans. The
+sink throttles and hands updates to a separate task that sends `Progress`, so a slow bus never
+holds up Timeshift or rsync; that task is awaited before `Finished` goes out. pkexec's runner
+doesn't stream.
 
 The helper exits after 60 s with no call open and nothing running. It never exits while
 Timeshift runs or a call (including one waiting for the password dialog) is open, and it waits

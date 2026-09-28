@@ -16,6 +16,7 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
  │                                              │ │ tags     D daily             │
  │                                              │ │ comment  boot                │
  ╰──────────────────────────────────────────────╯ ╰──────────────────────────────╯
+   disk  sdX1  ███████████████░░░░░░░░░░░░░░░░  448G used · 483G free · 3 snapshots
  ╭─ activity ───────────────────────────────────────────────────────────────────╮
  │ snapshot created                                                             │
  ╰──────────────────────────────────────────────────────────────────────────────╯
@@ -38,6 +39,66 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
   warnings from the last list (`list: E: Failed to remove directory`) in the theme's warning colour.
 - The `>` line stays the input line (comment, `[y/N]`, and the `timeshift --list` spinner). The
   key hints are the footer, the last row.
+- Disk line, between the panes and the activity pane: see "Disk usage" below.
+- Progress of a create or a (real) restore replaces the spinner line: see "Progress" below.
+
+## Progress
+
+```
+ ╭─ activity ───────────────────────────────────────────────────────────────────╮
+ │ creating ████████████░░░░░░░░ 58%  ~3 min left                               │
+ ╰──────────────────────────────────────────────────────────────────────────────╯
+```
+
+- For creates (Timeshift and native) and real restores, through `apsis-helper`: its
+  `Progress` signal, at most about twice a second.
+- Before the first `Progress`: the usual `creating snapshot… ⠋`. That's all there ever is
+  through pkexec, or with an older helper still running (it has no such signal): a spinner,
+  no error.
+- After the helper's first (number-less) `Progress`, until there's a real number:
+  `creating ⠋ estimating…`. Timeshift estimates the system's size first and prints nothing,
+  then `0.00% complete (??? remaining)`; neither counts as a number. `0%` never does.
+- With a number: label, a 20-cell `█`/`░` bar in the theme's accent colour (the empty part
+  dimmed), the whole percent rounded down, and the time left, rough: `<1 min`, `~3 min`,
+  `~2 h 5 min`. No time while it's unknown (Timeshift's `???`), and for all but the last path
+  of an original-mode restore (one rsync per path, the percent spread over them).
+- Where the numbers come from: Timeshift's own `NN.NN% complete (hh:mm:ss remaining)` line
+  (see TIMESHIFT-CLI.md), and rsync's `--info=progress2` for the native create and restores.
+- Deletes, bulk deletes and dry runs keep the spinner.
+
+## Disk usage
+
+```
+  disk  sdX1  ███████████████░░░░░░░░░░░░░░░░  448G used · 483G free · 9 snapshots
+```
+
+- One line under the panes, from the last list, in the popup and in `--window` alike. `disk`
+  and the text are dimmed; the device is the listed `/dev` name without `/dev/`.
+- The bar is monospace `█` (used) and `░` (free, dimmed) cells, as many as fit the space left
+  in the line (a `responsive` widget, 8.4 px per cell: 14 px mono text at 0.6 em). Used share
+  is `used / (used + free)`, as `df`'s `Use%`; anything used or free gets at least one cell.
+- Filled cells use the accent colour, the theme's warning colour when less than 10% is free,
+  and its destructive colour under 5%. All from the theme.
+- Sizes are binary, like lsblk's (`448G`, `4.5G`), whole numbers from 10 up.
+- Where the numbers come from (`apsis-helper`, `ListWithUsage` / `NativeListWithUsage`):
+  - Native backend: `statvfs` on `/run/apsis/backup` while the list has the device mounted.
+  - Timeshift backend: `statvfs` on a mount of the backup device if one exists after the list
+    (looked up by device number or source in `/proc/self/mountinfo`: an automount, or `/` in
+    btrfs mode). Timeshift unmounts its own `/run/timeshift/<pid>/backup` when it exits, so a
+    dedicated backup disk usually has no mount left: then the helper mounts it
+    `ro,nosuid,nodev,noexec` at `/run/apsis/backup` by UUID for the `statvfs` and unmounts it
+    (as for browsing; only a device lsblk shows with a Linux filesystem). Only if that fails
+    (e.g. an encrypted disk) is Timeshift's own `N snapshots, X GB free` line all there is:
+    the line shows `115G free · 9 snapshots` with no bar. The journal says which it was
+    (`disk usage: statvfs of ...`).
+  - pkexec fallback (no helper): the same free-only line, parsed from `timeshift --list`.
+- Unknown usage (no numbers at all, e.g. no device selected or no snapshots yet): no line. No
+  bar is ever drawn from a guess.
+- Hidden in the settings view (its notes are sized to fit the smallest window without it).
+- Refreshed by every list: after create, delete and bulk delete (they list anyway), and after
+  a real restore once the browser is left (Esc) or the popup is opened again. Not while the
+  browser is open: its `Browse` calls hold the helper's lock, and a list beside them would be
+  refused as busy.
 
 ## Rules
 
@@ -163,7 +224,8 @@ password (polkit `browse`, cached a few minutes).
 
 - Symbolic icon `io.github.atraxsrc.Apsis-symbolic` (an orbit with its two apsides), tinted by
   the theme. The popup header shows it in the accent colour before `~/apsis`.
-- Tooltip: `Apsis — last snapshot 3h ago` or `Apsis — no snapshots`.
+- Tooltip: `Apsis - last snapshot 3h ago` or `Apsis - no snapshots`, plus ` · 483G free` when
+  the last list knew the free space (statvfs, else Timeshift's own line).
 - Left click: the popup. Right click: a small menu (a standard COSMIC applet menu, not the
   terminal look):
 

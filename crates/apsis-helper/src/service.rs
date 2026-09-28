@@ -1,24 +1,29 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The D-Bus interface: `List`, `Create`, `Delete`, `ReadSettings`, `WriteSettings`, the
-//! native backend's `NativeList`, `NativeDryRun` and `NativeCreate`, file-level restore's
-//! `Browse` and `Restore`, and the `Finished` signal. Nothing else.
+//! The D-Bus interface: `List` and `ListWithUsage`, `Create`, `Delete`, `ReadSettings`,
+//! `WriteSettings`, the native backend's `NativeList`, `NativeListWithUsage`, `NativeDryRun`
+//! and `NativeCreate`, file-level restore's `Browse` and `Restore`, and the `Finished` signal.
+//! Nothing else.
 //!
 //! Every call is logged with its result on stderr, which systemd puts in the journal
 //! (`journalctl -u apsis-helper`). Comments are cut to [`LOGGED_COMMENT_CHARS`].
 
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use apsis_core::helper::names::{
     ACTION_BROWSE, ACTION_CONFIGURE, ACTION_CREATE, ACTION_DELETE, ACTION_LIST, ACTION_RESTORE,
     ACTION_RESTORE_ORIGINAL, OBJECT_PATH, OP_CREATE, OP_DELETE, OP_RESTORE,
 };
 use apsis_core::helper::{
-    WireList, WireListing, WireSettings, WireSettingsInfo, encode_error, listing_to_wire,
-    settings_from_wire, to_wire,
+    WireList, WireListWithUsage, WireListing, WireSettings, WireSettingsInfo, encode_error,
+    listing_to_wire, settings_from_wire, to_wire, to_wire_with_usage,
 };
+use apsis_core::progress::Throttle;
 use apsis_core::restore::{Destination, Request, SnapPath, check_paths};
-use apsis_core::{Backend, Error, SnapshotList, parse_snapshot_name, validate_comment};
+use apsis_core::{Backend, Error, Progress, SnapshotList, parse_snapshot_name, validate_comment};
+use tokio::sync::mpsc;
 use zbus::fdo::DBusProxy;
 use zbus::message::Header;
 use zbus::names::{BusName, UniqueName};
@@ -31,6 +36,7 @@ use crate::restore::{self, logged_path, logged_paths};
 use crate::runner::DirectRunner;
 use crate::settings::{self, Files};
 use crate::state::{Running, State};
+use crate::usage;
 
 /// Longest part of a comment that goes into the journal.
 const LOGGED_COMMENT_CHARS: usize = 40;
@@ -84,30 +90,28 @@ impl From<Error> for HelperError {
 
 #[interface(name = "io.github.atraxsrc.Apsis.Helper1")]
 impl Helper {
-    /// Lists snapshots (polkit: `list`, no password for the active session).
+    /// Lists snapshots (polkit: `list`, no password for the active session). Kept for older
+    /// applets; see `ListWithUsage`.
     async fn list(
         &self,
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &Connection,
     ) -> Result<WireList, HelperError> {
-        let _call = self.state.call();
-        let caller = caller(&header)?;
-        let device = self.state.snapshot_device();
-        let label = format!(
-            "list for {caller} (device {})",
-            device.as_deref().unwrap_or("from Timeshift's config")
-        );
-        let result = async {
-            authorize(connection, &caller, ACTION_LIST, false).await?;
-            let running = self.state.begin()?;
-            blocking(move || running.list()).await
-        }
-        .await;
-        match &result {
-            Ok(list) => log(&format!("{label}: {}", describe_list(list))),
-            Err(error) => log(&format!("{label}: {}", describe_error(error))),
-        }
-        Ok(to_wire(&result?))
+        Ok(to_wire(
+            &self.timeshift_list(&header, connection, false).await?,
+        ))
+    }
+
+    /// `List`, plus the backup device's disk usage: `statvfs` if the device is mounted
+    /// somewhere, and the free space Timeshift printed (polkit: `list`).
+    async fn list_with_usage(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+    ) -> Result<WireListWithUsage, HelperError> {
+        Ok(to_wire_with_usage(
+            &self.timeshift_list(&header, connection, true).await?,
+        ))
     }
 
     /// Starts an on-demand snapshot (polkit: `create`) and returns; `Finished("create", ..)`
@@ -135,7 +139,12 @@ impl Helper {
             OP_CREATE,
             label,
             started,
-            move |running| running.create(&comment).map(|()| String::new()),
+            move |running, progress| {
+                progress.started();
+                running
+                    .create(&comment, &mut |p| progress.report(p))
+                    .map(|()| String::new())
+            },
         )
     }
 
@@ -166,7 +175,7 @@ impl Helper {
             OP_DELETE,
             label,
             started,
-            move |running| running.delete(&name).map(|()| String::new()),
+            move |running, _| running.delete(&name).map(|()| String::new()),
         )
     }
 
@@ -177,26 +186,21 @@ impl Helper {
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &Connection,
     ) -> Result<WireList, HelperError> {
-        let _call = self.state.call();
-        let caller = caller(&header)?;
-        let label = format!("native list for {caller}");
-        let result = async {
-            authorize(connection, &caller, ACTION_LIST, false).await?;
-            let running = self.state.begin()?;
-            blocking(move || {
-                let _running = running;
-                let (backend, _mounted) =
-                    native::open(&DirectRunner, Access::ReadOnly, false, log_lines)?;
-                backend.list()
-            })
-            .await
-        }
-        .await;
-        match &result {
-            Ok(list) => log(&format!("{label}: {}", describe_list(list))),
-            Err(error) => log(&format!("{label}: {}", describe_error(error))),
-        }
-        Ok(to_wire(&result?))
+        Ok(to_wire(
+            &self.native_snapshot_list(&header, connection).await?,
+        ))
+    }
+
+    /// `NativeList`, plus `statvfs` of the backup device while it's mounted for the list
+    /// (polkit: `list`).
+    async fn native_list_with_usage(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+    ) -> Result<WireListWithUsage, HelperError> {
+        Ok(to_wire_with_usage(
+            &self.native_snapshot_list(&header, connection).await?,
+        ))
     }
 
     /// What a native create would do, as text, also logged (polkit: `list`: the backup device
@@ -258,11 +262,14 @@ impl Helper {
             OP_CREATE,
             label,
             started,
-            move |_running| {
+            move |_running, progress| {
                 // Checked again: the password dialog may have taken a while.
                 refuse_if_timeshift_runs()?;
+                progress.started();
                 let (backend, _mounted) =
                     native::open(&DirectRunner, Access::ReadWrite, false, log_lines)?;
+                let progress = progress.clone();
+                let backend = backend.with_progress(move |p| progress.report(p));
                 backend.create(&comment).map(|()| String::new())
             },
         )
@@ -449,18 +456,33 @@ impl Helper {
             OP_RESTORE,
             label,
             started,
-            move |_running| {
+            move |_running, progress| {
                 let (request, uid) = job.ok_or_else(|| Error::Helper("not started".to_owned()))?;
                 if !request.dry_run {
                     // Checked again: the password dialog may have taken a while.
                     refuse_if_timeshift_runs()?;
                 }
-                let plan = restore::run(&request, uid)?;
+                if !request.dry_run {
+                    progress.started();
+                }
+                let plan = restore::run(&request, uid, &|p| progress.report(p))?;
                 log(&format!("{summary_label}: uid {uid}: {}", plan.summary()));
                 Ok(plan.to_string())
             },
         )
     }
+
+    /// How far a create or restore is, at most about twice a second (see [`Progress`]); sent
+    /// only to the caller that started it, never after its `Finished`. `percent` and
+    /// `eta_seconds` are `-1` while unknown.
+    #[zbus(signal)]
+    async fn progress(
+        emitter: &SignalEmitter<'_>,
+        op: &str,
+        percent: f64,
+        eta_seconds: i64,
+        text: &str,
+    ) -> zbus::Result<()>;
 
     /// An operation ended. Sent only to the caller that started it.
     #[zbus(signal)]
@@ -473,6 +495,75 @@ impl Helper {
 }
 
 impl Helper {
+    /// `timeshift --list`, then (`with_usage`) the device's disk usage: from a mount of it
+    /// if there is one (Timeshift has unmounted its own by then), else from a brief read-only
+    /// mount, else only Timeshift's free line. Logged, with where the usage came from.
+    async fn timeshift_list(
+        &self,
+        header: &Header<'_>,
+        connection: &Connection,
+        with_usage: bool,
+    ) -> Result<SnapshotList, HelperError> {
+        let _call = self.state.call();
+        let caller = caller(header)?;
+        let device = self.state.snapshot_device();
+        let label = format!(
+            "list for {caller} (device {})",
+            device.as_deref().unwrap_or("from Timeshift's config")
+        );
+        let result = async {
+            authorize(connection, &caller, ACTION_LIST, false).await?;
+            let running = self.state.begin()?;
+            let usage_label = label.clone();
+            blocking(move || {
+                let mut list = running.list()?;
+                if with_usage {
+                    let (usage, source) = usage::of_timeshift_list(&DirectRunner, &list);
+                    list.usage = usage;
+                    log(&format!("{usage_label}: disk usage: {source}"));
+                }
+                Ok(list)
+            })
+            .await
+        }
+        .await;
+        match &result {
+            Ok(list) => log(&format!("{label}: {}", describe_list(list))),
+            Err(error) => log(&format!("{label}: {}", describe_error(error))),
+        }
+        Ok(result?)
+    }
+
+    /// The native list, with `statvfs` of [`native::MOUNT_POINT`] while it's mounted, logged.
+    async fn native_snapshot_list(
+        &self,
+        header: &Header<'_>,
+        connection: &Connection,
+    ) -> Result<SnapshotList, HelperError> {
+        let _call = self.state.call();
+        let caller = caller(header)?;
+        let label = format!("native list for {caller}");
+        let result = async {
+            authorize(connection, &caller, ACTION_LIST, false).await?;
+            let running = self.state.begin()?;
+            blocking(move || {
+                let _running = running;
+                let (backend, _mounted) =
+                    native::open(&DirectRunner, Access::ReadOnly, false, log_lines)?;
+                let mut list = backend.list()?;
+                list.usage = usage::of_mount_point(Path::new(native::MOUNT_POINT));
+                Ok(list)
+            })
+            .await
+        }
+        .await;
+        match &result {
+            Ok(list) => log(&format!("{label}: {}", describe_list(list))),
+            Err(error) => log(&format!("{label}: {}", describe_error(error))),
+        }
+        Ok(result?)
+    }
+
     /// Refuses before the password dialog, so nobody types a password for a call that can't
     /// run. [`State::begin`] still decides, after polkit, if two calls race.
     fn refuse_if_running(&self) -> apsis_core::Result<()> {
@@ -492,7 +583,9 @@ impl Helper {
         op: &'static str,
         label: String,
         started: apsis_core::Result<Running<DirectRunner>>,
-        work: impl FnOnce(&Running<DirectRunner>) -> apsis_core::Result<String> + Send + 'static,
+        work: impl FnOnce(&Running<DirectRunner>, &ProgressSink) -> apsis_core::Result<String>
+        + Send
+        + 'static,
     ) -> Result<(), HelperError> {
         let running = match started {
             Ok(running) => running,
@@ -505,11 +598,32 @@ impl Helper {
         // Keeps the helper alive until the signal is out.
         let call = self.state.call();
         let connection = connection.clone();
+        let (sink, mut updates) = ProgressSink::new();
+        let progress_to = (connection.clone(), caller.clone());
+        // Progress goes out from its own task, so a slow bus never holds up the work.
+        let forward = tokio::spawn(async move {
+            let (connection, caller) = progress_to;
+            let Ok(emitter) = SignalEmitter::new(&connection, OBJECT_PATH) else {
+                return;
+            };
+            let emitter = emitter.set_destination(caller.into());
+            while let Some(p) = updates.recv().await {
+                let percent = p.percent.unwrap_or(-1.0);
+                let eta = p
+                    .eta_seconds
+                    .and_then(|s| i64::try_from(s).ok())
+                    .unwrap_or(-1);
+                // A lost update is fine; the next one or `Finished` follows.
+                let _ = Helper::progress(&emitter, op, percent, eta, &p.text).await;
+            }
+        });
         tokio::spawn(async move {
             let _call = call;
             // `running` drops when `work` returns, so the lock is free before `Finished`
-            // arrives and the caller's refresh isn't refused as busy.
-            let result = blocking(move || work(&running)).await;
+            // arrives and the caller's refresh isn't refused as busy. The sink drops with the
+            // closure, which ends `forward`; it's awaited so no progress follows `Finished`.
+            let result = blocking(move || work(&running, &sink)).await;
+            let _ = forward.await;
             let (ok, message) = match result {
                 Ok(text) => {
                     log(&format!("{label}: done"));
@@ -532,6 +646,49 @@ impl Helper {
             }
         });
         Ok(())
+    }
+}
+
+/// Where an operation's work reports its progress: at most one update per
+/// [`PROGRESS_INTERVAL`] (the last, `100%`, always) goes to the task that sends the
+/// `Progress` signal. Never blocks.
+#[derive(Clone)]
+pub struct ProgressSink {
+    updates: mpsc::UnboundedSender<Progress>,
+    throttle: Arc<Mutex<Throttle>>,
+}
+
+/// About two updates a second.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
+
+impl ProgressSink {
+    fn new() -> (Self, mpsc::UnboundedReceiver<Progress>) {
+        let (updates, receiver) = mpsc::unbounded_channel();
+        let throttle = Arc::new(Mutex::new(Throttle::new(PROGRESS_INTERVAL)));
+        (Self { updates, throttle }, receiver)
+    }
+
+    /// A first update with no numbers: tells the caller progress will come (the applet shows
+    /// "estimating…" instead of a bare spinner). Timeshift prints nothing while it estimates
+    /// the system's size.
+    pub fn started(&self) {
+        self.report(Progress {
+            percent: None,
+            eta_seconds: None,
+            text: "started".to_owned(),
+        });
+    }
+
+    pub fn report(&self, progress: Progress) {
+        let done = progress.percent.is_some_and(|p| p >= 100.0);
+        let ready = self
+            .throttle
+            .lock()
+            .map_or(true, |mut throttle| throttle.ready(Instant::now()));
+        if ready || done {
+            // The receiver is gone only once the operation is over.
+            let _ = self.updates.send(progress);
+        }
     }
 }
 
@@ -565,9 +722,17 @@ fn refuse_if_timeshift_runs() -> apsis_core::Result<()> {
     }
 }
 
-/// `ok, 5 snapshots` (plus the warnings, if Timeshift had any).
+/// `ok, 5 snapshots` (plus the free space and the warnings, when known).
 fn describe_list(list: &SnapshotList) -> String {
     let mut text = format!("ok, {} snapshots", list.snapshots.len());
+    match (list.usage, list.reported_free) {
+        (Some(usage), _) => text.push_str(&format!(
+            ", {} of {} bytes free (statvfs)",
+            usage.free, usage.total
+        )),
+        (None, Some(free)) => text.push_str(&format!(", {free} bytes free (timeshift)")),
+        (None, None) => {}
+    }
     if !list.warnings.is_empty() {
         text.push_str(&format!("; warnings: {}", list.warnings.join(" | ")));
     }
@@ -659,9 +824,10 @@ mod tests {
     use apsis_core::helper::names::{
         ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
         ERROR_NOT_AUTHORIZED, ERROR_NOT_INSTALLED, INTERFACE, METHOD_BROWSE, METHOD_CREATE,
-        METHOD_DELETE, METHOD_LIST, METHOD_NATIVE_CREATE, METHOD_NATIVE_DRY_RUN,
-        METHOD_NATIVE_LIST, METHOD_READ_SETTINGS, METHOD_RESTORE, METHOD_WRITE_SETTINGS,
-        SIGNAL_FINISHED,
+        METHOD_DELETE, METHOD_LIST, METHOD_LIST_WITH_USAGE, METHOD_NATIVE_CREATE,
+        METHOD_NATIVE_DRY_RUN, METHOD_NATIVE_LIST, METHOD_NATIVE_LIST_WITH_USAGE,
+        METHOD_READ_SETTINGS, METHOD_RESTORE, METHOD_WRITE_SETTINGS, SIGNAL_FINISHED,
+        SIGNAL_PROGRESS,
     };
     use zbus::object_server::Interface;
 
@@ -674,11 +840,13 @@ mod tests {
         Helper::new(State::new(DirectRunner)).introspect_to_writer(&mut xml, 0);
         for method in [
             METHOD_LIST,
+            METHOD_LIST_WITH_USAGE,
             METHOD_CREATE,
             METHOD_DELETE,
             METHOD_READ_SETTINGS,
             METHOD_WRITE_SETTINGS,
             METHOD_NATIVE_LIST,
+            METHOD_NATIVE_LIST_WITH_USAGE,
             METHOD_NATIVE_DRY_RUN,
             METHOD_NATIVE_CREATE,
             METHOD_BROWSE,
@@ -689,21 +857,56 @@ mod tests {
                 "{method}\n{xml}"
             );
         }
-        assert!(
-            xml.contains(&format!("<signal name=\"{SIGNAL_FINISHED}\">")),
+        for signal in [SIGNAL_FINISHED, SIGNAL_PROGRESS] {
+            assert!(
+                xml.contains(&format!("<signal name=\"{signal}\">")),
+                "{signal}\n{xml}"
+            );
+        }
+        // Progress(s op, d percent, x eta_seconds, s text).
+        for arg in [
+            "<arg name=\"percent\" type=\"d\"/>",
+            "<arg name=\"eta_seconds\" type=\"x\"/>",
+        ] {
+            assert!(xml.contains(arg), "{arg}\n{xml}");
+        }
+        // Nothing else: exactly twelve methods and two signals.
+        assert_eq!(xml.matches("<method ").count(), 12, "{xml}");
+        assert_eq!(xml.matches("<signal ").count(), 2, "{xml}");
+        // List returns the list with its warnings, unchanged for older applets; the
+        // `WithUsage` forms add the disk usage.
+        assert!(xml.contains("type=\"(sssa(sss)as)\""), "{xml}");
+        assert_eq!(
+            xml.matches("type=\"((sssa(sss)as)a{st})\"").count(),
+            2,
             "{xml}"
         );
-        // Nothing else: exactly ten methods and one signal.
-        assert_eq!(xml.matches("<method ").count(), 10, "{xml}");
-        assert_eq!(xml.matches("<signal ").count(), 1, "{xml}");
-        // List returns the list with its warnings.
-        assert!(xml.contains("type=\"(sssa(sss)as)\""), "{xml}");
         // The settings types.
         assert!(xml.contains("type=\"(ssa(ssb)b)\""), "{xml}");
         assert!(xml.contains("type=\"(sbbabauas)\""), "{xml}");
         // Browse's listing, and Restore's paths.
         assert!(xml.contains("type=\"(a(sstxuuussstx)b)\""), "{xml}");
         assert!(xml.contains("type=\"as\""), "{xml}");
+    }
+
+    #[tokio::test]
+    async fn progress_is_throttled_but_the_end_always_gets_through() {
+        let (sink, mut updates) = ProgressSink::new();
+        let at = |percent: f64| Progress {
+            percent: Some(percent),
+            eta_seconds: None,
+            text: String::new(),
+        };
+        for percent in [1.0, 2.0, 3.0, 100.0] {
+            sink.report(at(percent));
+        }
+        drop(sink);
+        let mut got = Vec::new();
+        while let Some(p) = updates.recv().await {
+            got.extend(p.percent);
+        }
+        // The first, then nothing within 500 ms, except the end.
+        assert_eq!(got, [1.0, 100.0]);
     }
 
     #[test]
@@ -804,6 +1007,17 @@ mod tests {
         assert_eq!(
             describe_list(&list),
             "ok, 0 snapshots; warnings: E: Failed to remove directory"
+        );
+        list.warnings.clear();
+        list.reported_free = Some(123_400_000_000);
+        assert_eq!(
+            describe_list(&list),
+            "ok, 0 snapshots, 123400000000 bytes free (timeshift)"
+        );
+        list.usage = apsis_core::DiskUsage::from_statvfs(1000, 400, 350, 1000);
+        assert_eq!(
+            describe_list(&list),
+            "ok, 0 snapshots, 350000 of 1000000 bytes free (statvfs)"
         );
     }
 }

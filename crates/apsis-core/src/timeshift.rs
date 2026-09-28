@@ -8,6 +8,7 @@ use crate::backend::Backend;
 use crate::error::{Error, Result};
 use crate::model::{SnapshotList, parse_snapshot_name};
 use crate::parse::{device_not_found, failure_output, parse_list};
+use crate::progress::{Progress, parse_timeshift};
 
 const PROGRAM: &str = "timeshift";
 
@@ -34,6 +35,25 @@ pub trait Runner {
     ///
     /// When the program can't be started.
     fn run(&self, argv: &[OsString]) -> io::Result<RunOutput>;
+
+    /// Like [`Runner::run`], but hands stdout to `on_segment` while the command runs, in pieces
+    /// ending at `\r` or `\n` (see [`crate::progress::read_segments`]). Pieces it returns
+    /// `true` for (progress lines) are left out of [`RunOutput::stdout`].
+    ///
+    /// The default doesn't stream: it runs the command and hands over nothing. Runners that
+    /// can't show progress (pkexec, test fakes) keep it.
+    ///
+    /// # Errors
+    ///
+    /// When the program can't be started.
+    fn run_streaming(
+        &self,
+        argv: &[OsString],
+        on_segment: &mut dyn FnMut(&str) -> bool,
+    ) -> io::Result<RunOutput> {
+        let _ = on_segment;
+        self.run(argv)
+    }
 }
 
 /// [`Backend`] that drives the `timeshift` command line.
@@ -86,7 +106,36 @@ impl<R: Runner> TimeshiftCli<R> {
 
     /// Runs `argv` and returns stdout, or an error if it couldn't start or reported failure.
     fn run(&self, argv: &[OsString]) -> Result<String> {
-        let output = self.runner.run(argv).map_err(|e| match e.kind() {
+        Self::checked(self.runner.run(argv))
+    }
+
+    /// Creates an on-demand snapshot like [`Backend::create`], handing Timeshift's progress
+    /// lines to `on_progress` as they come (only runners that stream give any).
+    ///
+    /// # Errors
+    ///
+    /// As [`Backend::create`].
+    pub fn create_with_progress(
+        &self,
+        comment: &str,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> Result<()> {
+        // No `--tags`: v24.01.1 rejects `--tags O`, and O is the default (see TIMESHIFT-CLI.md).
+        let comment = validate_comment(comment)?;
+        let argv = if comment.is_empty() {
+            self.targeted_command(&["--create"])?
+        } else {
+            self.targeted_command(&["--create", "--comments", comment])?
+        };
+        let output = self.runner.run_streaming(&argv, &mut |segment| {
+            parse_timeshift(segment).map(&mut *on_progress).is_some()
+        });
+        Self::checked(output).map(drop)
+    }
+
+    /// stdout of a finished run, or the error for one that couldn't start or failed.
+    fn checked(output: io::Result<RunOutput>) -> Result<String> {
+        let output = output.map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => Error::NotInstalled,
             _ => Error::Io(e),
         })?;
@@ -176,14 +225,7 @@ impl<R: Runner> Backend for TimeshiftCli<R> {
     }
 
     fn create(&self, comment: &str) -> Result<()> {
-        // No `--tags`: v24.01.1 rejects `--tags O`, and O is the default (see TIMESHIFT-CLI.md).
-        let comment = validate_comment(comment)?;
-        let argv = if comment.is_empty() {
-            self.targeted_command(&["--create"])?
-        } else {
-            self.targeted_command(&["--create", "--comments", comment])?
-        };
-        self.run(&argv).map(drop)
+        self.create_with_progress(comment, &mut |_| {})
     }
 
     fn delete(&self, name: &str) -> Result<()> {

@@ -3,9 +3,11 @@
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, BufReader};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStderr, Command, Stdio};
+use std::thread;
 
 use crate::pkexec::find_in_path;
+use crate::progress::read_segments;
 use crate::timeshift::{RunOutput, Runner};
 
 /// Lines of stderr kept.
@@ -28,8 +30,9 @@ impl QuietRunner {
     }
 }
 
-impl Runner for QuietRunner {
-    fn run(&self, argv: &[OsString]) -> io::Result<RunOutput> {
+impl QuietRunner {
+    /// rsync as `argv` says, found on the fixed `PATH`, with stdout going to `stdout`.
+    fn spawn(&self, argv: &[OsString], stdout: Stdio) -> io::Result<Child> {
         let (program, rest) = argv
             .split_first()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty argv"))?;
@@ -39,30 +42,65 @@ impl Runner for QuietRunner {
                 format!("{} not found", program.to_string_lossy()),
             )
         })?;
-        let mut child = Command::new(program)
+        Command::new(program)
             .args(rest)
             .env_clear()
             .env("PATH", &self.path)
             .env("LC_ALL", "C.UTF-8")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(stdout)
             .stderr(Stdio::piped())
-            .spawn()?;
-        let mut tail = VecDeque::new();
-        if let Some(stderr) = child.stderr.take() {
-            for line in BufReader::new(stderr).split(b'\n') {
-                if tail.len() == STDERR_LINES {
-                    tail.pop_front();
-                }
-                tail.push_back(String::from_utf8_lossy(&line?).into_owned());
-            }
-        }
+            .spawn()
+    }
+}
+
+impl Runner for QuietRunner {
+    fn run(&self, argv: &[OsString]) -> io::Result<RunOutput> {
+        let mut child = self.spawn(argv, Stdio::null())?;
+        let stderr = stderr_tail(child.stderr.take());
         let status = child.wait()?;
         Ok(RunOutput {
             success: status.success(),
             code: status.code(),
             stdout: String::new(),
-            stderr: Vec::from(tail).join("\n"),
+            stderr,
         })
     }
+
+    /// stdout is read (for `--info=progress2`) and handed over, but still not kept.
+    fn run_streaming(
+        &self,
+        argv: &[OsString],
+        on_segment: &mut dyn FnMut(&str) -> bool,
+    ) -> io::Result<RunOutput> {
+        let mut child = self.spawn(argv, Stdio::piped())?;
+        // stderr on its own thread, so neither pipe fills up while the other is read.
+        let stderr = child.stderr.take();
+        let tail = thread::spawn(move || stderr_tail(stderr));
+        let read = child.stdout.take().map_or(Ok(String::new()), |out| {
+            read_segments(out, false, on_segment)
+        });
+        let status = child.wait()?;
+        read?;
+        Ok(RunOutput {
+            success: status.success(),
+            code: status.code(),
+            stdout: String::new(),
+            stderr: tail.join().unwrap_or_default(),
+        })
+    }
+}
+
+/// The last [`STDERR_LINES`] lines of `stderr`, read to its end.
+pub(crate) fn stderr_tail(stderr: Option<ChildStderr>) -> String {
+    let mut tail = VecDeque::new();
+    if let Some(stderr) = stderr {
+        for line in BufReader::new(stderr).split(b'\n').map_while(Result::ok) {
+            if tail.len() == STDERR_LINES {
+                tail.pop_front();
+            }
+            tail.push_back(String::from_utf8_lossy(&line).into_owned());
+        }
+    }
+    Vec::from(tail).join("\n")
 }

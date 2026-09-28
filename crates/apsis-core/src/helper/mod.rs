@@ -4,6 +4,7 @@
 //!
 //! - [`names`]: the shared bus, interface, error and polkit names.
 //! - [`WireList`]: what `List` returns, and conversions to and from [`SnapshotList`].
+//! - [`WireListWithUsage`]: what `ListWithUsage` returns, the same plus the disk usage.
 //! - [`WireSettingsInfo`] and [`WireSettings`]: what `ReadSettings` returns and `WriteSettings`
 //!   takes.
 //! - [`WireListing`]: what `Browse` returns.
@@ -15,10 +16,13 @@ pub mod names;
 
 pub use client::HelperClient;
 
+use std::collections::HashMap;
+
 use crate::error::{Error, Result};
 use crate::model::{Mode, Snapshot, SnapshotList, Tag, parse_snapshot_name};
 use crate::restore::{Entry, Kind, Listing, Live};
 use crate::settings::{Config, Settings, SettingsInfo, User, parse_lsblk};
+use crate::usage::DiskUsage;
 
 /// One snapshot on the bus: `(name, tags, comment)`. Tags are Timeshift's letters (`OB`); an
 /// empty comment means none.
@@ -93,7 +97,60 @@ pub fn from_wire(wire: WireList) -> Result<SnapshotList> {
         mode,
         snapshots,
         warnings,
+        reported_free: None,
+        usage: None,
     })
+}
+
+/// Space on the backup device, D-Bus type `a{st}`: bytes by name. `total`, `used` and `free`
+/// come together (`statvfs`), `reported-free` alone (Timeshift's own line); any may be
+/// missing. A dict, so later keys don't change the signature; unknown keys are ignored.
+pub type WireUsage = HashMap<String, u64>;
+
+/// What `ListWithUsage` and `NativeListWithUsage` return, D-Bus type `((sssa(sss)as)a{st})`:
+/// the list as `List` sends it, and the usage.
+pub type WireListWithUsage = (WireList, WireUsage);
+
+const USAGE_TOTAL: &str = "total";
+const USAGE_USED: &str = "used";
+const USAGE_FREE: &str = "free";
+const USAGE_REPORTED_FREE: &str = "reported-free";
+
+/// A [`SnapshotList`] with its disk usage, as the helper sends it.
+#[must_use]
+pub fn to_wire_with_usage(list: &SnapshotList) -> WireListWithUsage {
+    let mut usage = WireUsage::new();
+    if let Some(DiskUsage { total, used, free }) = list.usage {
+        usage.insert(USAGE_TOTAL.to_owned(), total);
+        usage.insert(USAGE_USED.to_owned(), used);
+        usage.insert(USAGE_FREE.to_owned(), free);
+    }
+    if let Some(free) = list.reported_free {
+        usage.insert(USAGE_REPORTED_FREE.to_owned(), free);
+    }
+    (to_wire(list), usage)
+}
+
+/// The [`SnapshotList`] and disk usage the helper sent. A `total`/`used`/`free` set that is
+/// incomplete or doesn't add up counts as unknown rather than failing the list.
+///
+/// # Errors
+///
+/// As [`from_wire`].
+pub fn from_wire_with_usage(wire: WireListWithUsage) -> Result<SnapshotList> {
+    let (list, usage) = wire;
+    let mut list = from_wire(list)?;
+    let get = |key: &str| usage.get(key).copied();
+    list.usage = match (get(USAGE_TOTAL), get(USAGE_USED), get(USAGE_FREE)) {
+        (Some(total), Some(used), Some(free))
+            if total > 0 && used <= total && free <= total - used =>
+        {
+            Some(DiskUsage { total, used, free })
+        }
+        _ => None,
+    };
+    list.reported_free = get(USAGE_REPORTED_FREE);
+    Ok(list)
 }
 
 /// A user on the bus: `(name, home, encrypted_home)`.
@@ -323,10 +380,63 @@ mod tests {
         list.snapshots[0].tags = vec![Tag::OnDemand, Tag::Boot];
         list.snapshots[1].comment = Some("with \"quotes\" and ünïcode".to_owned());
         list.warnings = vec!["E: Failed to remove directory".to_owned()];
+        // `List` carries no usage; `ListWithUsage` does (see below).
+        list.reported_free = None;
         assert_eq!(from_wire(to_wire(&list)).unwrap(), list);
 
         let empty = SnapshotList::default();
         assert_eq!(from_wire(to_wire(&empty)).unwrap(), empty);
+    }
+
+    #[test]
+    fn usage_survives_the_bus() {
+        let mut list = parse_list(DEVICE_LIST).unwrap();
+        assert_eq!(list.reported_free, Some(123_400_000_000));
+        list.usage = DiskUsage::from_statvfs(1000, 400, 350, 4096);
+        assert_eq!(
+            from_wire_with_usage(to_wire_with_usage(&list)).unwrap(),
+            list
+        );
+
+        let unknown = SnapshotList::default();
+        let wire = to_wire_with_usage(&unknown);
+        assert!(wire.1.is_empty());
+        assert_eq!(from_wire_with_usage(wire).unwrap(), unknown);
+    }
+
+    #[test]
+    fn partial_or_odd_usage_is_unknown_and_unknown_keys_are_ignored() {
+        let list = |pairs: &[(&str, u64)]| {
+            let usage = pairs.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect();
+            from_wire_with_usage((to_wire(&SnapshotList::default()), usage)).unwrap()
+        };
+        assert_eq!(list(&[("total", 10), ("free", 5)]).usage, None);
+        assert_eq!(
+            list(&[("total", 10), ("used", 11), ("free", 0)]).usage,
+            None
+        );
+        assert_eq!(list(&[("total", 10), ("used", 6), ("free", 5)]).usage, None);
+        assert_eq!(list(&[("total", 0), ("used", 0), ("free", 0)]).usage, None);
+        let later = list(&[("total", 10), ("used", 6), ("free", 3), ("inodes", 7)]);
+        assert_eq!(
+            later.usage,
+            Some(DiskUsage {
+                total: 10,
+                used: 6,
+                free: 3
+            })
+        );
+        assert_eq!(later.reported_free, None);
+        assert_eq!(list(&[("reported-free", 42)]).reported_free, Some(42));
+    }
+
+    #[test]
+    fn plain_list_drops_the_usage() {
+        // `List` keeps its old signature: an older applet still reads it.
+        let mut list = parse_list(DEVICE_LIST).unwrap();
+        list.usage = DiskUsage::from_statvfs(1000, 400, 350, 4096);
+        let back = from_wire(to_wire(&list)).unwrap();
+        assert_eq!((back.usage, back.reported_free), (None, None));
     }
 
     #[test]
