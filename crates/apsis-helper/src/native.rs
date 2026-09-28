@@ -159,7 +159,8 @@ pub fn open<R: Runner + Clone>(
     let users = exclude::home_users(&passwd, Path::new("/"));
     let (config, device) = config(&text, &devices, &root_uuid, distro, &fstab, &users, dry_run)?;
     let mounted = mount(runner, &device, access)?;
-    let backend = NativeRsync::new(config, QuietRunner::new(SAFE_PATH)).with_log(log);
+    let backend =
+        NativeRsync::new(config, QuietRunner::new(SAFE_PATH).low_priority()).with_log(log);
     Ok((backend, mounted))
 }
 

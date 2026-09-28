@@ -112,8 +112,10 @@ v1, rsync only (split from the original Phase 5 at the user's request):
 - **Done when:** the tests pass on the ext4 image, the user has reviewed a dry run on their
   machine, and a native snapshot shows up in `timeshift --list`.
 - **Status: done 2026-09-26** (see DECISIONS.md). Left over from v1:
-  - native retention (Timeshift applies it on its next run until then)
-  - idle I/O priority for the native rsync (Timeshift 24.01.1 doesn't use it either)
+  - native retention (Timeshift applies it on its next run until then) - rescoped in 5.2 to
+    "keep last N manual", 2026-09-28
+  - ~~idle I/O priority for the native rsync (Timeshift 24.01.1 doesn't use it either)~~ -
+    done in 5.2, 2026-09-28
   - Btrfs: Phase 5.1 below
   - ~~recognise Timeshift's `Ret=NNN` lines as diagnostics (they're ignored now)~~ - done
     2026-09-27, see Polish
@@ -122,9 +124,48 @@ v1, rsync only (split from the original Phase 5 at the user's request):
 
 - btrfs: read-only subvolume snapshots of `@` / `@home` directly.
 
-## Phase 5.2 - Native schedule
+## Phase 5.2 - Manual retention, reminder, low-priority native rsync (rescoped)
 
-- Scheduling via systemd timers; retention counts per tag.
+**Rescoped 2026-09-28 by the user:** no native scheduler. Scheduled snapshots stay with
+Timeshift's own cron for both backends, and the settings view keeps configuring it. Reason:
+users mostly snapshot by hand, and Timeshift already schedules (and applies retention to
+scheduled snapshots) well; a second scheduler would add a lot of machinery (timer, owner
+switching, uninstall handover) for little gain. The research for it is kept below as a
+reference.
+
+- **Keep last N manual snapshots** (Apsis setting, off by default): `apsis_core::retention::
+  manual` decides; `p` (and, after a create, by itself) shows a preview and deletes only after
+  `y`, through the bulk delete. Commented ones pinned (kept, not counted towards N; changed 2026-09-29), other-tag ones left to Timeshift, never the
+  newest. Both backends. See UI.md "Keep last N manual snapshots".
+- **Reminder**: tooltip and a warning-coloured panel icon when the newest snapshot is older than
+  N days (default 7, 0 = off), with a background list through the helper only. See UI.md
+  "Reminder".
+- **Native create at low priority**: rsync under `ionice -c 3 nice -n <to 19>`.
+- Tests: retention edge cases (unit), the priority of the child processes, applet flows; native
+  tests with low priority on temp dirs and (`just test-ext4`) the ext4 image.
+- **Status: built 2026-09-28, not committed, waiting for the user's test.**
+
+### Reference: how Timeshift 24.01.1 schedules and applies retention (not built)
+
+`.scratch/timeshift` at tag 24.01.1.
+
+- A scheduled run (`timeshift --check`, `Main.vala:972-1218`) happens only if a `schedule_*`
+  is on and it isn't a live session (`:946-953`). Levels are due, in order boot, hourly,
+  daily, weekly, monthly, when the newest snapshot of this system with that tag
+  (`SnapshotRepo.vala:390-402`) is older than system start (boot), or than `now - 1 h / 1 d /
+  1 w / 1 calendar month + 1 min`.
+- `create_snapshot_for_tag` (`Main.vala:1220-1271`): if any snapshot (any tag, any system) is
+  newer than system start (boot) or `now - 1 h + 59 s`, it only gets the tag; else a new
+  snapshot is taken. That's how one snapshot gets several tags.
+- `auto_remove` (`SnapshotRepo.vala:615-713`) runs after every console `--check` and
+  `--create` (`Main.vala:1201-1204`), over valid snapshots of all systems, oldest first: boot
+  trimmed by count only (comments don't protect it, `:625-634`); hourly..monthly untag an
+  uncommented snapshot older than N periods while more than N have the tag (`:638-688`); then
+  every tagless snapshot is deleted (`remove_untagged`, `:753-772`). No "keep newest" rule.
+- Every Timeshift run, even `--list`, rewrites `/etc/cron.d/timeshift-hourly` and
+  `timeshift-boot` from `timeshift.json`'s flags on exit (`Main.vala:4323`,
+  `cron_job_update` `:4208-4259`), so a second scheduler would have to switch those flags, not
+  delete the files.
 
 ## Phase 6a - File-level restore
 

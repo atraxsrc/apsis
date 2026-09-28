@@ -22,11 +22,40 @@ const STDERR_LINES: usize = 20;
 #[derive(Debug, Clone)]
 pub struct QuietRunner {
     path: OsString,
+    low_priority: bool,
 }
+
+/// `ionice -c 3 nice -n <to 19>`: idle I/O class and the lowest CPU priority, set before rsync
+/// starts, so the processes rsync forks have them too. Both tools are in essential packages
+/// (util-linux, coreutils) and are found on the same fixed `PATH`.
+const IONICE_IDLE: [&str; 3] = ["ionice", "-c", "3"];
+/// The niceness rsync runs at. `nice -n` adds to the current one, so the step is worked out.
+const NICENESS: i32 = 19;
 
 impl QuietRunner {
     pub fn new(path: impl Into<OsString>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            low_priority: false,
+        }
+    }
+
+    /// Runs everything at idle I/O priority and niceness 19 (see [`IONICE_IDLE`]), so a
+    /// snapshot doesn't slow the desktop down.
+    #[must_use]
+    pub fn low_priority(mut self) -> Self {
+        self.low_priority = true;
+        self
+    }
+
+    /// `name` on the fixed `PATH`, or a not-found error naming it.
+    fn find(&self, name: &OsStr) -> io::Result<std::path::PathBuf> {
+        find_in_path(name, OsStr::new(&self.path)).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{} not found", name.to_string_lossy()),
+            )
+        })
     }
 }
 
@@ -36,13 +65,23 @@ impl QuietRunner {
         let (program, rest) = argv
             .split_first()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty argv"))?;
-        let program = find_in_path(program, OsStr::new(&self.path)).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("{} not found", program.to_string_lossy()),
-            )
-        })?;
-        Command::new(program)
+        let program = self.find(program)?;
+        let mut command = if self.low_priority {
+            // `nice` gets rsync's full path, so nothing is looked up twice.
+            let [ionice, ionice_args @ ..] = IONICE_IDLE;
+            let current = rustix::process::getpriority_process(None).unwrap_or(0);
+            let mut command = Command::new(self.find(OsStr::new(ionice))?);
+            command
+                .args(ionice_args)
+                .arg(self.find(OsStr::new("nice"))?)
+                .arg("-n")
+                .arg((NICENESS - current).max(0).to_string())
+                .arg(program);
+            command
+        } else {
+            Command::new(program)
+        };
+        command
             .args(rest)
             .env_clear()
             .env("PATH", &self.path)
@@ -103,4 +142,48 @@ pub(crate) fn stderr_tail(stderr: Option<ChildStderr>) -> String {
         }
     }
     Vec::from(tail).join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path() -> OsString {
+        std::env::var_os("PATH").unwrap_or_default()
+    }
+
+    /// What a child started by `runner` reports about its own priority.
+    fn priorities(runner: &QuietRunner) -> Vec<String> {
+        let mut lines = Vec::new();
+        let argv = ["sh", "-c", "nice; ionice -p $$"].map(OsString::from);
+        let output = runner
+            .run_streaming(&argv, &mut |segment| {
+                lines.push(segment.trim().to_owned());
+                true
+            })
+            .unwrap();
+        assert!(output.success, "{}", output.stderr);
+        lines
+    }
+
+    #[test]
+    fn low_priority_runs_at_nice_19_and_idle_io() {
+        let lines = priorities(&QuietRunner::new(path()).low_priority());
+        assert_eq!(lines, ["19", "idle"]);
+    }
+
+    #[test]
+    fn normal_priority_is_left_alone() {
+        let lines = priorities(&QuietRunner::new(path()));
+        assert_ne!(lines[0], "19");
+        assert_ne!(lines[1], "idle");
+    }
+
+    #[test]
+    fn a_missing_program_is_named() {
+        let runner = QuietRunner::new("/nonexistent").low_priority();
+        let error = runner.run(&["rsync".into()]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(error.to_string().contains("rsync"), "{error}");
+    }
 }

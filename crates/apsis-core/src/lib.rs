@@ -13,6 +13,7 @@ mod parse;
 mod pkexec;
 pub mod progress;
 pub mod restore;
+pub mod retention;
 pub mod settings;
 mod timeshift;
 pub mod usage;

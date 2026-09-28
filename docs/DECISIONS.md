@@ -981,6 +981,70 @@ Append-only. Newest at the bottom. Format: date — decision — why.
     after the operation ended is dropped. The bar is 20 cells, fixed (the activity pane is
     always wide enough; the disk bar is the one that adapts).
 
+- 2026-09-28 - **Phase 5.2 design (native schedule and retention): written, not built.** The
+  design is in PLAN.md, Phase 5.2, with the Timeshift 24.01.1 file/line references. Decided
+  there (pending the user's OK):
+  - The switch between schedulers is `timeshift.json`'s `schedule_*` flags, not the cron
+    files: every Timeshift run, even `--list`, rewrites `/etc/cron.d/timeshift-hourly` and
+    `-boot` from them on exit (`Main.vala:4323` -> `cron_job_update`, `:4208-4259`).
+  - Apsis owns the schedule only while its own record says so *and* those flags are all off;
+    the job checks both each run, so Timeshift turning its schedule back on pauses Apsis
+    instead of doubling up. Switch steps are ordered so a crash between any two leaves one
+    scheduler.
+  - Timer + oneshot service run `apsis-helper --scheduled` directly (not over D-Bus), with a
+    new `flock` shared with the D-Bus helper for the single-operation lock.
+  - Not enabled by the .deb; `prerm remove` gives the schedule back to Timeshift first.
+  - No new polkit action (`configure` covers moving the schedule).
+  - Scheduled snapshots copy Timeshift's "tag a snapshot from the last hour instead of taking
+    a new one" step, which is how multi-tag snapshots arise.
+
+- 2026-09-28 - **Phase 5.2 rescoped: no native scheduler.** The user dropped the design above
+  (timer, Timeshift-flag switching): users mostly snapshot by hand, and Timeshift already
+  schedules and applies retention to scheduled snapshots. Scheduled snapshots stay with
+  Timeshift's cron for both backends. Built instead:
+  - **Keep last N manual** (`retention::manual`, pure). Counted like one Timeshift level: the
+    newest N `O` snapshots stay; commented ones count and stay. Differences from Timeshift,
+    on purpose: only snapshots whose *only* tag is `O` are deleted (the `timeshift` CLI has no
+    way to take one tag off, and scheduled tags are Timeshift's retention's business, so both
+    backends behave the same); tagless snapshots aren't touched (they aren't "manual"); the
+    newest snapshot is never deleted (a guard; with N >= 1 it can't be reached anyway). It
+    uses the list as shown, which covers every system's snapshots on the device (the
+    Timeshift list has no system field).
+  - Never automatic: `p`, or by itself after a successful create once the new list is in,
+    and then only when something is past N. The question is its own prompt so Esc closes the
+    preview too; `y` runs the existing bulk delete (helper `Delete` per snapshot, which checks
+    each name against a fresh list).
+  - **Reminder**: due when a list showed a device and the newest snapshot is more than N days
+    old or there is none. The icon is the same symbolic icon drawn with the theme's
+    `warning_text_color` through `applet.button_from_element` (what `icon_button_from_handle`
+    does, with another colour). To know without opening the popup, the applet lists at
+    start and every 6 h while the popup is closed, **only through the helper**
+    (`background_list`: no helper, nothing runs; pkexec is never started without the user).
+    The startup list marks `loading`, so opening the popup meanwhile doesn't start a second
+    list that the helper's lock would refuse.
+  - Settings: `BackendChoice` became `ApsisChoice` (it now holds all of Apsis's own settings:
+    backend, dry run, keep manual, remind days); cosmic-config fields `keep_manual` and
+    `remind_days` (missing ones read as the defaults, no version bump). The count prompt now
+    takes a `Counted` (a schedule level, keep manual or remind) instead of a level.
+  - **Low priority**: `QuietRunner::low_priority` runs rsync under `ionice -c 3 nice -n K`,
+    both found on the fixed PATH, rsync by full path. `nice -n` adds to the current niceness,
+    so K = 19 minus the current one (the test process here starts at -3 and first got 16).
+    Set before exec, so the processes rsync forks inherit it; setting it on the child after
+    spawn would miss those. rustix has no `ioprio_set`, hence `ionice`. Tested by running
+    `sh -c 'nice; ionice -p $$'` through the runner (`19`, `idle`).
+  - The ext4 image wasn't mounted in this session (mounting needs root): the native and
+    restore suites ran on plain temp dirs only; `just test-ext4` is for the user.
+
+- 2026-09-29 - **Keep last N manual: commented snapshots are pinned and not counted.** The
+  user's change: N now counts only uncommented on-demand snapshots; a commented one always
+  stays and no longer takes one of the N slots (before, it counted like Timeshift counts
+  commented ones in a level). An uncommented `O` snapshot that also has another tag still
+  counts (it's uncommented on-demand) but is still left to Timeshift if past N.
+  - Sandbox note: cargo inside Claude's sandbox failed to open the libcosmic git cache
+    ("failed to remove ... Read-only file system"), because libgit2 couldn't read the denied
+    `~/.gitconfig`. Running cargo with a temporary `HOME` (and `CARGO_HOME`/`RUSTUP_HOME`
+    pointing at the real ones, read-only) works offline.
+
 ## Open
 
 - ~~App ID~~ - resolved 2026-09-25, see above.
@@ -1003,3 +1067,12 @@ Append-only. Newest at the bottom. Format: date — decision — why.
 - Phase 2: confirm on a real panel that the popup gets keyboard focus (keys were only reasoned
   about, not run, by Claude). ~~Check that `document-open-recent-symbolic` exists~~ - replaced by
   the Apsis symbolic icon, 2026-09-25.
+- ~~Phase 5.2 (waiting for the user)~~ - moot, the scheduler was dropped 2026-09-28: (1) Timeshift's boot retention ignores comments
+  (`SnapshotRepo.vala:625-634`), so a commented boot-only snapshot past `count_boot` is
+  deleted; the user's rule was "commented snapshots kept". Proposed: Apsis keeps them (a
+  manual `timeshift --create` would still delete them). (2) "Never delete the newest": not a
+  Timeshift rule; its rules only reach the newest if it has no tags. Proposed: Apsis adds the
+  guard. (3) Timeshift's "tag a recent snapshot" and its retention consider every system's
+  snapshots on the device, not just this one's. Proposed: copy that exactly (it's what
+  Timeshift itself will do on its next run anyway). (4) Retention after a native on-demand
+  create, as Timeshift's `--create` does: proposed yes, once the schedule is Apsis's.

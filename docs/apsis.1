@@ -64,6 +64,13 @@ Mark or unmark the selected snapshot for deletion.
 .B J
 Mark or unmark, then move down.
 .TP
+.B p
+Prune: show which old manual snapshots
+.B keep manual
+would delete, and delete them after
+.B y
+and Enter.
+.TP
 .B r
 Refresh the list.
 .TP
@@ -184,6 +191,20 @@ Saved at once, not by
 With the native backend,
 .B c
 only shows the plan and writes nothing.
+.TP
+.B apsis keep manual
+Off by default.
+Keeps the newest N on-demand snapshots without a comment
+(commented ones are pinned: kept, and not counted);
+.B p
+previews and, after
+.BR y ,
+deletes older ones that have no comment and no other tag.
+The newest snapshot is never deleted.
+.TP
+.B apsis remind
+The panel icon turns the warning colour when the newest snapshot is older than this many
+days (default 7; 0 turns it off).
 .SH FILES
 .TP
 .I /etc/timeshift/timeshift.json

@@ -10,7 +10,8 @@ use apsis_core::helper::HelperClient;
 use apsis_core::restore::{
     Destination, Entry, Kind, Listing as FolderListing, Live, Request, SnapPath,
 };
-use apsis_core::settings::{HomeState, Level, Settings, SettingsInfo};
+use apsis_core::retention::{self, Kept, ManualPlan};
+use apsis_core::settings::{HomeState, Settings, SettingsInfo};
 use apsis_core::{
     Backend, DiskUsage, MAX_COMMENT_CHARS, PkexecRunner, Progress, Snapshot, SnapshotList,
     TimeshiftCli, validate_comment,
@@ -37,7 +38,7 @@ use crate::browser::{self, Browser, Load};
 use crate::config::Config;
 use crate::fl;
 use crate::fmt;
-use crate::settings_view::{BackendChoice, Row, Section, SettingsView};
+use crate::settings_view::{ApsisChoice, Counted, Row, Section, SettingsView};
 use crate::tallest::Tallest;
 
 /// Popup width in logical pixels (UI.md: ~720, room for the list and details side by side).
@@ -106,6 +107,8 @@ const LINE_HEIGHT: f32 = 20.0;
 /// [`DISK_CRITICAL`] the destructive one.
 const DISK_LOW: f64 = 0.10;
 const DISK_CRITICAL: f64 = 0.05;
+/// How often the panel lists in the background (through the helper only) for the reminder.
+const BACKGROUND_LIST_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Themed name of the panel icon; installed by `just install`.
@@ -207,6 +210,8 @@ pub struct AppModel {
     browser: Option<Browser>,
     /// A restore whose dry run was shown: Enter runs it for real.
     pending_restore: Option<Request>,
+    /// A create finished: when its list arrives, offer to prune old manual snapshots.
+    prune_after_list: bool,
     /// A restore ran in the browser: list again once it's left, for the disk line (see
     /// [`AppModel::list_if_restored`]).
     list_after_browser: bool,
@@ -219,6 +224,8 @@ pub struct AppModel {
     window_resizable: bool,
     /// The symbolic Apsis icon, from the icon theme or embedded.
     icon: icon::Handle,
+    /// A background list went through `apsis-helper` (so more can, without a password).
+    helper_found: bool,
 }
 
 /// Where the settings view's data is.
@@ -293,10 +300,13 @@ enum Prompt {
     /// `> delete 3 snapshots: <name>, <name>, <name>? [y/N] _`, for the marked ones, in list
     /// order. Enter with `y` deletes them one by one, anything else cancels.
     ConfirmDeleteMany { names: Vec<String>, typed: String },
+    /// `> remove 3 old manual snapshots? [y/N] _` under the prune preview. Enter with `y`
+    /// deletes them one by one (as a bulk delete), anything else cancels.
+    ConfirmPrune { names: Vec<String>, typed: String },
     /// Settings: `> add filter: _`. Enter adds it.
     Filter(String),
-    /// Settings: `> keep daily: 5_`. Enter sets the count.
-    Count { level: Level, typed: String },
+    /// Settings: `> keep daily: 5_` (or keep manual, remind after). Enter sets the number.
+    Count { counted: Counted, typed: String },
     /// Browser: `> restore 3 items to [f]older (~/Apsis-restored) or [o]riginal? _`. Enter
     /// with nothing or `f` is folder mode, `o` original; anything else cancels.
     RestoreWhere { count: usize, typed: String },
@@ -423,6 +433,8 @@ enum Overlay {
     Browse,
     /// A restore's plan (Enter runs it) or result, in the left pane.
     RestorePlan,
+    /// What "keep last N manual" would delete and keep, while `y` is asked.
+    Prune,
 }
 
 /// Keys the popup reacts to (see UI.md).
@@ -459,6 +471,8 @@ pub enum KeyAction {
     MarkDown,
     /// Browser: `R` restores the marked entries.
     Restore,
+    /// `p`: preview pruning old manual snapshots, then `y`.
+    Prune,
     /// Tab: the details pane of the selected snapshot.
     FocusDetails,
 }
@@ -529,6 +543,10 @@ pub enum Message {
     SettingsKey(KeyAction),
     /// Window mode: the window is on screen (first focus, or the fallback timer).
     WindowShown,
+    /// Every [`BACKGROUND_LIST_EVERY`] while the popup is closed: list again for the reminder.
+    BackgroundRefresh,
+    /// A background list ended: `None` when there's no helper (nothing was run).
+    BackgroundListed(Option<Result<SnapshotList, CliError>>),
 }
 
 impl cosmic::Application for AppModel {
@@ -577,13 +595,20 @@ impl cosmic::Application for AppModel {
             browser: None,
             pending_restore: None,
             list_after_browser: false,
+            prune_after_list: false,
             browse_calls: 0,
             restore_text: None,
             window_resizable: false,
             icon: symbolic_icon(),
+            helper_found: false,
         };
         let task = match mode {
-            Mode::Applet => Task::none(),
+            // Lists at once for the reminder, but only through the helper (no password).
+            // `loading` keeps the popup from starting a second list meanwhile.
+            Mode::Applet => {
+                app.loading = true;
+                background_list(app.config.native_backend)
+            }
             Mode::Window => app.open_window(),
         };
         (app, task)
@@ -601,11 +626,21 @@ impl cosmic::Application for AppModel {
         if self.mode == Mode::Window {
             return self.surface();
         }
-        let button = self
-            .core
-            .applet
-            .icon_button_from_handle(self.icon.clone())
-            .on_press(Message::TogglePopup);
+        let button = if self
+            .remind_days_over(jiff::Zoned::now().datetime())
+            .is_some()
+        {
+            // The reminder: the same icon in the theme's warning colour.
+            let (width, height) = self.core.applet.suggested_size(true);
+            let icon = icon::icon(self.icon.clone())
+                .class(theme::Svg::Custom(Rc::new(warning_svg)))
+                .width(Length::Fixed(f32::from(width)))
+                .height(Length::Fixed(f32::from(height)));
+            self.core.applet.button_from_element(icon, true)
+        } else {
+            self.core.applet.icon_button_from_handle(self.icon.clone())
+        }
+        .on_press(Message::TogglePopup);
         let button = widget::mouse_area(button).on_right_release(Message::ToggleMenu);
         self.core
             .applet
@@ -646,6 +681,11 @@ impl cosmic::Application for AppModel {
         if self.popup.is_some() || self.menu.is_some() {
             subscriptions.push(event::listen_with(key_action));
         }
+        // The reminder's list, while the popup is closed; only with the helper.
+        if self.mode == Mode::Applet && self.helper_found && self.popup.is_none() {
+            subscriptions
+                .push(time::every(BACKGROUND_LIST_EVERY).map(|_| Message::BackgroundRefresh));
+        }
         if self.mode == Mode::Window && !self.window_resizable {
             subscriptions.push(event::listen_with(window_focused));
             subscriptions.push(time::every(WINDOW_SHOWN_FALLBACK).map(|_| Message::WindowShown));
@@ -681,6 +721,29 @@ impl cosmic::Application for AppModel {
             Message::SettingsActivate(index) => return self.select_setting(index, true),
             Message::SettingsKey(action) => return self.on_key(action),
             Message::WindowShown => return self.make_window_resizable(),
+            Message::BackgroundRefresh => {
+                if self.popup.is_none() && !self.loading && self.running.is_none() {
+                    self.loading = true;
+                    return background_list(self.config.native_backend);
+                }
+            }
+            Message::BackgroundListed(result) => {
+                self.loading = false;
+                match result {
+                    Some(result) => {
+                        self.helper_found = true;
+                        // A failure (disk unplugged) clears the reminder: nothing to judge by.
+                        self.on_listed(result);
+                    }
+                    None => {
+                        self.helper_found = false;
+                        // The popup opened meanwhile and waits for a list: the usual one.
+                        if self.popup.is_some() && matches!(self.listing, Listing::NotLoaded) {
+                            return self.start_list();
+                        }
+                    }
+                }
+            }
             Message::MenuClose => return self.close_menu(),
             Message::MenuPanelSettings => {
                 let close = self.close_menu();
@@ -735,6 +798,7 @@ impl cosmic::Application for AppModel {
                 }
                 Prompt::ConfirmDelete { typed, .. }
                 | Prompt::ConfirmDeleteMany { typed, .. }
+                | Prompt::ConfirmPrune { typed, .. }
                 | Prompt::RestoreWhere { typed, .. }
                 | Prompt::ConfirmRestore { typed, .. } => {
                     *typed = text.chars().take(CONFIRM_CHARS).collect();
@@ -756,6 +820,11 @@ impl cosmic::Application for AppModel {
             Message::DryRunDone(result) => return self.on_dry_run(result),
             Message::Listed(result) => {
                 self.on_listed(result);
+                // After a create: offer to prune, quietly (only if there's something to do).
+                if std::mem::take(&mut self.prune_after_list) {
+                    let prune = self.open_prune(true);
+                    return Task::batch([prune, focus_input()]);
+                }
                 // The polkit dialog took keyboard focus; hand it back to the `>` line.
                 if self.popup.is_some() {
                     return focus_input();
@@ -1016,6 +1085,7 @@ impl AppModel {
                 None
             }
             KeyAction::Refresh => return self.start_list(),
+            KeyAction::Prune => return self.open_prune(false),
             KeyAction::Create => {
                 if self.can_create() {
                     self.overlay = Overlay::None;
@@ -1128,14 +1198,14 @@ impl AppModel {
                 self.status = None;
                 return focus_input();
             }
-            KeyAction::Edit => match view.current() {
-                Row::Schedule(level) => {
-                    let typed = view.edited.count(level).to_string();
-                    self.prompt = Prompt::Count { level, typed };
+            KeyAction::Edit => match view.counted() {
+                Some(counted) => {
+                    let typed = view.count_of(counted).to_string();
+                    self.prompt = Prompt::Count { counted, typed };
                     self.status = None;
                     return focus_input();
                 }
-                _ => Err(fl!("settings-edit-hint")),
+                None => Err(fl!("settings-edit-hint")),
             },
             KeyAction::Details | KeyAction::Toggle => view.change(),
             KeyAction::More => view.adjust_count(true),
@@ -1292,15 +1362,20 @@ impl AppModel {
                 }
                 Task::none()
             }
-            Prompt::Count { level, typed } => {
-                if let SettingsLoad::Ready(view) = &mut self.settings {
-                    match view.set_count(level, &typed) {
-                        Ok(()) => self.status = None,
-                        Err(reason) => {
-                            self.status = Some(Status::Error(reason));
-                            self.prompt = Prompt::Count { level, typed };
-                        }
+            Prompt::Count { counted, typed } => {
+                let SettingsLoad::Ready(view) = &mut self.settings else {
+                    return Task::none();
+                };
+                match view.set_count(counted, &typed) {
+                    Ok(()) => self.status = None,
+                    Err(reason) => {
+                        self.status = Some(Status::Error(reason));
+                        self.prompt = Prompt::Count { counted, typed };
                     }
+                }
+                let choice = view.backend;
+                if choice != self.config.backend() {
+                    return self.set_backend(choice);
                 }
                 Task::none()
             }
@@ -1358,6 +1433,15 @@ impl AppModel {
                 }
             }
             Prompt::ConfirmDeleteMany { names, typed } => {
+                if typed.trim().eq_ignore_ascii_case("y") {
+                    self.run(Operation::DeleteMany { names, done: 0 })
+                } else {
+                    self.status = Some(Status::Info(fl!("delete-cancelled")));
+                    Task::none()
+                }
+            }
+            Prompt::ConfirmPrune { names, typed } => {
+                self.overlay = Overlay::None;
                 if typed.trim().eq_ignore_ascii_case("y") {
                     self.run(Operation::DeleteMany { names, done: 0 })
                 } else {
@@ -1429,6 +1513,9 @@ impl AppModel {
         };
         // A bulk delete that got past its first snapshot changed the list either way.
         let ran = ran || matches!(operation, Operation::DeleteMany { done, .. } if *done > 0);
+        if matches!((operation, &result), (Operation::Create(_), Ok(()))) {
+            self.prune_after_list = self.config.keep_manual > 0;
+        }
         self.status = Some(match (operation, result) {
             (Operation::Create(_), Ok(())) => Status::Info(fl!("created")),
             (Operation::Delete(name), Ok(())) => {
@@ -1708,15 +1795,20 @@ impl AppModel {
 
     /// Saves Apsis's backend choice (changed in the settings view) to cosmic-config, and lists
     /// again when the backend itself changed.
-    fn set_backend(&mut self, choice: BackendChoice) -> Task<cosmic::Action<Message>> {
+    fn set_backend(&mut self, choice: ApsisChoice) -> Task<cosmic::Action<Message>> {
         let switched = choice.native != self.config.native_backend;
         let saved =
             cosmic_config::Config::new(<Self as cosmic::Application>::APP_ID, Config::VERSION)
                 .and_then(|context| {
                     self.config.set_native_backend(&context, choice.native)?;
-                    self.config.set_native_dry_run(&context, choice.dry_run)
+                    self.config.set_native_dry_run(&context, choice.dry_run)?;
+                    self.config.set_keep_manual(&context, choice.keep_manual)?;
+                    self.config.set_remind_days(&context, choice.remind_days)
                 });
+        let backend_changed = (choice.native, choice.dry_run)
+            != (self.config.native_backend, self.config.native_dry_run);
         self.status = Some(match saved {
+            Ok(_) if !backend_changed => Status::Info(fl!("settings-apsis-saved")),
             Ok(_) => Status::Info(backend_name(choice)),
             Err(error) => Status::Error(fl!("backend-save-failed", reason = error.to_string())),
         });
@@ -1733,6 +1825,10 @@ impl AppModel {
         if self.prompt != Prompt::Command {
             self.prompt = Prompt::Command;
             self.status = None;
+            // The prune preview only goes with its question.
+            if self.overlay == Overlay::Prune {
+                self.overlay = Overlay::None;
+            }
             // Esc also unfocused the `>` line.
             return focus_input();
         }
@@ -1798,6 +1894,83 @@ impl AppModel {
         }
     }
 
+    /// "Keep last N manual" for the current list: what goes and what stays. `None` when it's
+    /// off or nothing is listed.
+    fn prune_plan(&self) -> Option<ManualPlan> {
+        let keep = self.config.keep_manual;
+        match &self.listing {
+            Listing::Loaded(list) if keep > 0 => Some(retention::manual(&list.snapshots, keep)),
+            _ => None,
+        }
+    }
+
+    /// Shows the prune preview and asks `y` before anything is deleted. `quiet` (after a
+    /// create): says nothing when it's off or there's nothing to prune.
+    fn open_prune(&mut self, quiet: bool) -> Task<cosmic::Action<Message>> {
+        // The popup (or window) must be open: the question is asked there.
+        if self.loading || self.running.is_some() || self.popup.is_none() {
+            return Task::none();
+        }
+        let status = match self.prune_plan() {
+            None => Some(fl!("prune-off")),
+            Some(plan) if plan.is_empty() => Some(fl!(
+                "prune-nothing",
+                keep = self.config.keep_manual.to_string()
+            )),
+            Some(plan) => {
+                self.overlay = Overlay::Prune;
+                self.status = None;
+                self.prompt = Prompt::ConfirmPrune {
+                    names: plan.delete,
+                    typed: String::new(),
+                };
+                return focus_input();
+            }
+        };
+        if !quiet {
+            self.status = status.map(Status::Info);
+        }
+        Task::none()
+    }
+
+    /// The prune preview's lines: what goes (oldest first), then what stays and why.
+    fn prune_lines(&self) -> Vec<String> {
+        let Some(plan) = self.prune_plan() else {
+            return Vec::new();
+        };
+        let keep = self.config.keep_manual.to_string();
+        let find = |name: &str| self.snapshots().iter().find(|s| s.name == name);
+        let mut lines: Vec<String> = plan
+            .delete
+            .iter()
+            .map(|name| fl!("prune-delete", name = self.snapshot_label(name)))
+            .collect();
+        lines.extend(plan.kept.iter().map(|(name, why)| {
+            let label = self.snapshot_label(name);
+            match why {
+                Kept::Recent => fl!("prune-keep-recent", name = label, count = keep.clone()),
+                Kept::Comment => fl!("prune-keep-comment", name = label),
+                Kept::OtherTags => {
+                    // The tags besides on-demand: why Timeshift's retention decides.
+                    let tags = find(name)
+                        .map(|s| {
+                            let others: Vec<&str> = s
+                                .tags
+                                .iter()
+                                .filter(|&&t| t != apsis_core::Tag::OnDemand)
+                                .map(|t| t.name())
+                                .collect();
+                            others.join(", ")
+                        })
+                        .unwrap_or_default();
+                    fl!("prune-keep-tags", name = label, tags = tags)
+                }
+                Kept::Newest => fl!("prune-keep-newest", name = label),
+            }
+        }));
+        lines
+    }
+
     /// `09-27 09:12 "bulk 1"` for snapshot `name` in the last list (see [`fmt::label`]), or
     /// `name` itself if it isn't there.
     fn snapshot_label(&self, name: &str) -> String {
@@ -1825,6 +1998,23 @@ impl AppModel {
             .collect()
     }
 
+    /// The reminder's days when it's due at `now`: it's on, a list showed a backup device,
+    /// and the newest snapshot is older than that (or there's none). `None` otherwise.
+    fn remind_days_over(&self, now: jiff::civil::DateTime) -> Option<u32> {
+        let days = self.config.remind_days;
+        let Listing::Loaded(list) = &self.listing else {
+            return None;
+        };
+        if days == 0 || list.device.is_none() {
+            return None;
+        }
+        let limit = now
+            .checked_sub(jiff::Span::new().days(i64::from(days)))
+            .ok()?;
+        let newest = list.snapshots.iter().map(|s| s.created).max();
+        newest.is_none_or(|created| created < limit).then_some(days)
+    }
+
     fn tooltip(&self) -> String {
         match &self.listing {
             Listing::Loaded(list) => {
@@ -1834,6 +2024,10 @@ impl AppModel {
                         ago = fmt::ago(newest.created, jiff::Zoned::now().datetime())
                     ),
                     None => fl!("tooltip-none"),
+                };
+                let text = match self.remind_days_over(jiff::Zoned::now().datetime()) {
+                    Some(days) => fl!("tooltip-stale", text = text, days = days.to_string()),
+                    None => text,
                 };
                 match list.usage.map(|u| u.free).or(list.reported_free) {
                     Some(free) => fl!("tooltip-free", text = text, free = fmt::size_short(free)),
@@ -1960,6 +2154,7 @@ impl AppModel {
             Overlay::Help => fl!("pane-help"),
             Overlay::About => fl!("pane-about"),
             Overlay::DryRun => fl!("pane-dry-run"),
+            Overlay::Prune => fl!("pane-prune"),
             Overlay::Browse => self.browse_title(),
             Overlay::RestorePlan if self.pending_restore.is_some() => fl!("pane-restore-plan"),
             Overlay::RestorePlan => fl!("pane-restore-result"),
@@ -1983,6 +2178,7 @@ impl AppModel {
                 Overlay::Help
                 | Overlay::Settings
                 | Overlay::DryRun
+                | Overlay::Prune
                 | Overlay::Browse
                 | Overlay::RestorePlan,
                 _,
@@ -2027,6 +2223,7 @@ impl AppModel {
             (Overlay::Help, _) => scroll(help()),
             (Overlay::About, _) => scroll(about()),
             (Overlay::DryRun, _) => scroll(dry_run_view(self.dry_run_plan.as_deref())),
+            (Overlay::Prune, _) => scroll(lines(self.prune_lines())),
             (Overlay::Browse, _) => self.browse_body(),
             (Overlay::RestorePlan, _) => scroll(dry_run_view(self.restore_text.as_deref())),
             (_, Listing::Loaded(list)) if list.snapshots.is_empty() => {
@@ -2580,11 +2777,20 @@ impl AppModel {
                 typed.as_str(),
                 String::new(),
             ),
+            Prompt::ConfirmPrune { names, typed } => (
+                Some(fl!("prompt-prune", count = names.len().to_string())),
+                typed.as_str(),
+                String::new(),
+            ),
             Prompt::Filter(pattern) => {
                 (Some(fl!("prompt-filter")), pattern.as_str(), String::new())
             }
-            Prompt::Count { level, typed } => (
-                Some(fl!("prompt-count", level = level.name())),
+            Prompt::Count { counted, typed } => (
+                Some(match counted {
+                    Counted::Level(level) => fl!("prompt-count", level = level.name()),
+                    Counted::KeepManual => fl!("prompt-keep-manual"),
+                    Counted::Remind => fl!("prompt-remind"),
+                }),
                 typed.as_str(),
                 String::new(),
             ),
@@ -2761,6 +2967,14 @@ fn settings_row_text(view: &SettingsView, row: Row) -> (String, bool) {
             ),
             false,
         ),
+        Row::KeepManual => match view.backend.keep_manual {
+            0 => (fl!("settings-keep-manual-off"), true),
+            keep => (fl!("settings-keep-manual", count = keep.to_string()), false),
+        },
+        Row::Remind => match view.backend.remind_days {
+            0 => (fl!("settings-remind-off"), true),
+            days => (fl!("settings-remind", days = days.to_string()), false),
+        },
     }
 }
 
@@ -2831,6 +3045,8 @@ fn settings_row_details(view: &SettingsView, row: Row) -> Element<'static, Messa
         Row::AddFilter => fl!("settings-add-note"),
         Row::Backend => fl!("settings-backend-note"),
         Row::DryRun => fl!("settings-dry-run-note"),
+        Row::KeepManual => fl!("settings-keep-manual-note"),
+        Row::Remind => fl!("settings-remind-note"),
     };
     let mut rows: Vec<Element<'_, Message>> = pairs
         .into_iter()
@@ -3055,6 +3271,22 @@ async fn list_snapshots(pkexec: Arc<Cli>, native: bool) -> Result<SnapshotList, 
     blocking(move || pkexec.list()).await
 }
 
+/// Lists through `apsis-helper` for the reminder; `None` without a helper, so nothing ever
+/// falls back to pkexec (a password dialog out of nowhere).
+fn background_list(native: bool) -> Task<cosmic::Action<Message>> {
+    cosmic::task::future(async move {
+        let Some(helper) = HelperClient::connect().await else {
+            return Message::BackgroundListed(None);
+        };
+        let listed = if native {
+            helper.native_list().await
+        } else {
+            helper.list().await
+        };
+        Message::BackgroundListed(Some(listed.map_err(CliError::from)))
+    })
+}
+
 /// `apsis-helper`, which the native backend always runs in (it needs root).
 async fn native_helper() -> Result<HelperClient, CliError> {
     HelperClient::connect()
@@ -3121,7 +3353,7 @@ async fn operate(
 }
 
 /// `backend: native rsync, dry run` and the like, for the activity pane.
-fn backend_name(choice: BackendChoice) -> String {
+fn backend_name(choice: ApsisChoice) -> String {
     match (choice.native, choice.dry_run) {
         (false, _) => fl!("backend-now-timeshift"),
         (true, true) => fl!("backend-now-native-dry-run"),
@@ -3451,6 +3683,7 @@ fn help() -> Element<'static, Message> {
         ("space", fl!("help-mark")),
         ("J", fl!("help-mark-down")),
         ("d", fl!("help-delete")),
+        ("p", fl!("help-prune")),
         ("r", fl!("help-refresh")),
         ("s", fl!("help-settings")),
         ("?", fl!("help-help")),
@@ -3585,6 +3818,7 @@ fn char_action(c: char) -> Option<KeyAction> {
         'l' => Some(KeyAction::Into),
         'R' => Some(KeyAction::Restore),
         'J' => Some(KeyAction::MarkDown),
+        'p' => Some(KeyAction::Prune),
         _ => None,
     }
 }
@@ -3734,6 +3968,13 @@ fn accent_text(theme: &Theme) -> iced_text::Style {
     text_style(theme, theme.cosmic().accent_text_color().into())
 }
 
+/// The panel icon while the reminder is due.
+fn warning_svg(theme: &Theme) -> iced_svg::Style {
+    iced_svg::Style {
+        color: Some(theme.cosmic().warning_text_color().into()),
+    }
+}
+
 /// Secondary text: the normal text colour, faded.
 fn dim_text(theme: &Theme) -> iced_text::Style {
     let on = theme.cosmic().background(theme.transparent).on;
@@ -3762,6 +4003,7 @@ fn text_style(theme: &Theme, color: Color) -> iced_text::Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use apsis_core::settings::Level;
     use cosmic::iced::keyboard::key::{NativeCode, Physical};
     use cosmic::iced::keyboard::{Location, Modifiers};
 
@@ -3884,10 +4126,12 @@ mod tests {
             browser: None,
             pending_restore: None,
             list_after_browser: false,
+            prune_after_list: false,
             browse_calls: 0,
             restore_text: None,
             window_resizable: false,
             icon: symbolic_icon(),
+            helper_found: false,
         }
     }
 
@@ -4822,6 +5066,188 @@ mod tests {
         assert_eq!(app.progress_line(), None);
     }
 
+    /// Six on-demand snapshots a day apart, the oldest commented, the newest last.
+    fn manual_list() -> SnapshotList {
+        let mut list = apsis_core::parse_list(DEVICE_LIST).unwrap();
+        list.snapshots = (20..26)
+            .map(|day| {
+                let name = format!("2026-09-{day}_10-00-00");
+                Snapshot {
+                    created: apsis_core::parse_snapshot_name(&name).unwrap(),
+                    name,
+                    tags: vec![apsis_core::Tag::OnDemand],
+                    comment: None,
+                }
+            })
+            .collect();
+        list.snapshots[0].comment = Some("before upgrade".to_owned());
+        list
+    }
+
+    fn with_list(list: SnapshotList, keep_manual: u32) -> AppModel {
+        let mut app = model();
+        app.config.keep_manual = keep_manual;
+        app.on_listed(Ok(list));
+        send(&mut app, Message::TogglePopup);
+        app
+    }
+
+    #[test]
+    fn p_previews_the_prune_and_y_deletes_oldest_first() {
+        let mut app = with_list(manual_list(), 2);
+        typed(&mut app, "p");
+        assert_eq!(app.overlay, Overlay::Prune);
+        assert_eq!(app.body_title(), fl!("pane-prune"));
+        let Prompt::ConfirmPrune { names, .. } = app.prompt.clone() else {
+            panic!("{:?}", app.prompt)
+        };
+        // 20 is commented (pinned, not counted); 24 and 25 are the newest two uncommented.
+        assert_eq!(
+            names,
+            [
+                "2026-09-21_10-00-00",
+                "2026-09-22_10-00-00",
+                "2026-09-23_10-00-00"
+            ]
+        );
+        let lines = app.prune_lines();
+        assert_eq!(lines.len(), 6);
+        // A multi-tag one says which other tags keep it.
+        let Listing::Loaded(list) = &mut app.listing else {
+            panic!()
+        };
+        // The list is newest first: the oldest (commented) one is last.
+        let oldest = list.snapshots.last_mut().unwrap();
+        oldest.tags = vec![apsis_core::Tag::OnDemand, apsis_core::Tag::Hourly];
+        oldest.comment = None;
+        assert!(
+            app.prune_lines().iter().any(|l| l.ends_with("also hourly")),
+            "{:?}",
+            app.prune_lines()
+        );
+        assert!(lines[0].starts_with("delete"), "{lines:?}");
+        assert!(lines.iter().any(|l| l.ends_with("comment")), "{lines:?}");
+        typed(&mut app, "y");
+        send(&mut app, Message::Submit);
+        assert_eq!(app.overlay, Overlay::None);
+        assert_eq!(app.running, Some(Operation::DeleteMany { names, done: 0 }));
+    }
+
+    #[test]
+    fn anything_but_y_or_esc_deletes_nothing_and_closes_the_preview() {
+        for answer in ["", "n", "yes please"] {
+            let mut app = with_list(manual_list(), 2);
+            typed(&mut app, "p");
+            typed(&mut app, answer);
+            send(&mut app, Message::Submit);
+            assert!(app.running.is_none(), "{answer:?}");
+            assert_eq!(app.overlay, Overlay::None);
+        }
+        let mut app = with_list(manual_list(), 2);
+        typed(&mut app, "p");
+        send(&mut app, Message::Escape);
+        assert_eq!(
+            (app.overlay, app.prompt.clone()),
+            (Overlay::None, Prompt::Command)
+        );
+    }
+
+    #[test]
+    fn p_says_why_there_is_nothing_to_prune() {
+        let mut app = with_list(manual_list(), 0);
+        typed(&mut app, "p");
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(matches!(&app.status, Some(Status::Info(t)) if *t == fl!("prune-off")));
+        let mut app = with_list(manual_list(), 6);
+        typed(&mut app, "p");
+        assert_eq!(app.prompt, Prompt::Command);
+        assert!(matches!(&app.status, Some(Status::Info(t)) if t.starts_with("nothing")));
+    }
+
+    #[test]
+    fn a_create_offers_the_prune_only_when_there_is_something() {
+        for (keep, offered) in [(0, false), (6, false), (3, true)] {
+            let mut app = with_list(manual_list(), keep);
+            app.running = Some(Operation::Create(String::new()));
+            send(
+                &mut app,
+                Message::Finished(Operation::Create(String::new()), Ok(())),
+            );
+            assert!(app.loading, "a create lists again");
+            send(&mut app, Message::Listed(Ok(manual_list())));
+            assert_eq!(app.overlay == Overlay::Prune, offered, "keep {keep}");
+            // Quiet when there's nothing: the "created" status stays.
+            if !offered {
+                assert!(matches!(&app.status, Some(Status::Info(t)) if *t == fl!("created")));
+            }
+        }
+        // A failed create offers nothing.
+        let mut app = with_list(manual_list(), 3);
+        app.running = Some(Operation::Create(String::new()));
+        send(
+            &mut app,
+            Message::Finished(Operation::Create(String::new()), failed(1)),
+        );
+        send(&mut app, Message::Listed(Ok(manual_list())));
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn the_reminder_needs_a_device_and_an_old_newest_snapshot() {
+        let now = jiff::civil::date(2026, 10, 3).at(10, 0, 0, 0);
+        let mut app = with_list(manual_list(), 0);
+        // Newest 09-25 10:00: 8 days.
+        app.config.remind_days = 7;
+        assert_eq!(app.remind_days_over(now), Some(7));
+        app.config.remind_days = 8;
+        assert_eq!(
+            app.remind_days_over(now),
+            None,
+            "exactly 8 days isn't over 8"
+        );
+        app.config.remind_days = 0;
+        assert_eq!(app.remind_days_over(now), None, "off");
+        // No snapshots yet, but a device: remind.
+        app.config.remind_days = 7;
+        let mut empty = manual_list();
+        empty.snapshots.clear();
+        app.on_listed(Ok(empty.clone()));
+        assert_eq!(app.remind_days_over(now), Some(7));
+        // No device selected, or nothing listed: nothing to remind about.
+        empty.device = None;
+        app.on_listed(Ok(empty));
+        assert_eq!(app.remind_days_over(now), None);
+        app.on_listed(Err(CliError::NotAuthorized));
+        assert_eq!(app.remind_days_over(now), None);
+    }
+
+    #[test]
+    fn background_lists_never_start_pkexec() {
+        let mut app = model();
+        app.listing = Listing::NotLoaded;
+        app.loading = true;
+        // No helper: nothing listed, and no second list while the popup is closed.
+        send(&mut app, Message::BackgroundListed(None));
+        assert!(!app.loading && !app.helper_found);
+        assert!(matches!(app.listing, Listing::NotLoaded));
+        // The popup opened while it ran: then the usual list (which may ask for a password,
+        // because the user asked for it).
+        app.loading = true;
+        send(&mut app, Message::TogglePopup);
+        send(&mut app, Message::BackgroundListed(None));
+        assert!(app.loading);
+        send(&mut app, Message::TogglePopup);
+        app.loading = false;
+        // With the helper, the list lands like any other.
+        send(&mut app, Message::BackgroundListed(Some(Ok(manual_list()))));
+        assert!(app.helper_found);
+        assert_eq!(app.snapshots().len(), 6);
+        // A refresh while the popup is open waits for the popup to close.
+        send(&mut app, Message::TogglePopup);
+        send(&mut app, Message::BackgroundRefresh);
+        assert!(!app.loading);
+    }
+
     #[test]
     fn free_space_levels_follow_the_share_left() {
         let usage = |used: u64, free: u64| DiskUsage {
@@ -5234,7 +5660,7 @@ mod tests {
         assert_eq!(
             app.prompt,
             Prompt::Count {
-                level: Level::Daily,
+                counted: Counted::Level(Level::Daily),
                 typed: "5".to_owned()
             }
         );

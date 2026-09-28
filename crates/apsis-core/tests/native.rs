@@ -126,7 +126,7 @@ fn backend(lab: &Lab, dry_run: bool) -> (NativeRsync<QuietRunner>, Log) {
     let log: Log = Arc::default();
     let sink = Arc::clone(&log);
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let backend = NativeRsync::new(config(lab, dry_run), QuietRunner::new(path))
+    let backend = NativeRsync::new(config(lab, dry_run), QuietRunner::new(path).low_priority())
         .with_clock(clock())
         .with_log(move |line| sink.lock().unwrap().push(line.to_owned()));
     (backend, log)

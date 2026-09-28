@@ -28,7 +28,28 @@ pub enum Row {
     Backend,
     /// Apsis's own, with the native backend: a create only shows what it would do.
     DryRun,
+    /// Apsis's own: keep the last N manual snapshots (`p` prunes the rest, after `y`).
+    KeepManual,
+    /// Apsis's own: remind (tooltip, panel icon) when the last snapshot is older than N days.
+    Remind,
 }
+
+/// What `+`, `-` and `e` change: a schedule level's count, or one of Apsis's own numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Counted {
+    Level(Level),
+    KeepManual,
+    Remind,
+}
+
+/// Most manual snapshots "keep" can be set to, as for Timeshift's counts.
+pub const MAX_KEEP_MANUAL: u32 = MAX_COUNT;
+/// What space turns "keep manual" on with.
+pub const DEFAULT_KEEP_MANUAL: u32 = 10;
+/// Longest reminder, in days.
+pub const MAX_REMIND_DAYS: u32 = 365;
+/// What space turns the reminder on with, and its default.
+pub const DEFAULT_REMIND_DAYS: u32 = 7;
 
 impl Row {
     /// The section it belongs to, shown on the first row of each.
@@ -39,7 +60,7 @@ impl Row {
             Self::Schedule(_) => Section::Schedule,
             Self::Home(_) => Section::Home,
             Self::Filter(_) | Self::AddFilter => Section::Filters,
-            Self::Backend | Self::DryRun => Section::Apsis,
+            Self::Backend | Self::DryRun | Self::KeepManual | Self::Remind => Section::Apsis,
         }
     }
 }
@@ -54,14 +75,18 @@ pub enum Section {
     Apsis,
 }
 
-/// Apsis's own backend setting, as the settings view shows and changes it. The app saves it
-/// to cosmic-config whenever it changes.
+/// Apsis's own settings, as the settings view shows and changes them. The app saves them to
+/// cosmic-config whenever they change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BackendChoice {
+pub struct ApsisChoice {
     /// The native rsync backend instead of `timeshift`.
     pub native: bool,
     /// With the native backend: a create only shows what it would do.
     pub dry_run: bool,
+    /// Keep the last N manual snapshots; 0 = off.
+    pub keep_manual: u32,
+    /// Remind when the last snapshot is older than N days; 0 = off.
+    pub remind_days: u32,
 }
 
 /// The settings as read, and as edited.
@@ -70,7 +95,7 @@ pub struct SettingsView {
     pub info: SettingsInfo,
     pub edited: Settings,
     /// Apsis's own setting. Not part of [`SettingsView::dirty`]: it's saved as it changes.
-    pub backend: BackendChoice,
+    pub backend: ApsisChoice,
     /// Index into [`SettingsView::rows`].
     pub cursor: usize,
     /// Esc was pressed once with unsaved changes; the next Esc discards them.
@@ -78,7 +103,7 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
-    pub fn new(info: SettingsInfo, backend: BackendChoice) -> Self {
+    pub fn new(info: SettingsInfo, backend: ApsisChoice) -> Self {
         let edited = info.config.settings();
         Self {
             info,
@@ -116,6 +141,7 @@ impl SettingsView {
         if self.backend.native {
             rows.push(Row::DryRun);
         }
+        rows.extend([Row::KeepManual, Row::Remind]);
         rows
     }
 
@@ -225,41 +251,84 @@ impl SettingsView {
                 self.backend.dry_run = !self.backend.dry_run;
                 Ok(())
             }
+            Row::KeepManual => {
+                let keep = &mut self.backend.keep_manual;
+                *keep = if *keep == 0 { DEFAULT_KEEP_MANUAL } else { 0 };
+                Ok(())
+            }
+            Row::Remind => {
+                let days = &mut self.backend.remind_days;
+                *days = if *days == 0 { DEFAULT_REMIND_DAYS } else { 0 };
+                Ok(())
+            }
         }
     }
 
-    /// `+` / `-` on a schedule row.
+    /// What `+`, `-` and `e` change on the current row, if anything.
+    pub fn counted(&self) -> Option<Counted> {
+        match self.current() {
+            Row::Schedule(level) => Some(Counted::Level(level)),
+            Row::KeepManual => Some(Counted::KeepManual),
+            Row::Remind => Some(Counted::Remind),
+            _ => None,
+        }
+    }
+
+    /// The number `counted` stands for now.
+    pub fn count_of(&self, counted: Counted) -> u32 {
+        match counted {
+            Counted::Level(level) => self.edited.count(level),
+            Counted::KeepManual => self.backend.keep_manual,
+            Counted::Remind => self.backend.remind_days,
+        }
+    }
+
+    /// Where `counted` lives, and its range.
+    fn count_mut(&mut self, counted: Counted) -> (&mut u32, u32, u32) {
+        match counted {
+            Counted::Level(level) => (&mut self.edited.counts[level.index()], MIN_COUNT, MAX_COUNT),
+            Counted::KeepManual => (&mut self.backend.keep_manual, 0, MAX_KEEP_MANUAL),
+            Counted::Remind => (&mut self.backend.remind_days, 0, MAX_REMIND_DAYS),
+        }
+    }
+
+    /// `+` / `-` on a schedule row, or on keep manual / remind.
     ///
     /// # Errors
     ///
-    /// Not a schedule row.
+    /// Not a row with a number.
     pub fn adjust_count(&mut self, up: bool) -> Result<(), String> {
-        let Row::Schedule(level) = self.current() else {
-            return Err("+ and - change a schedule's count".to_owned());
+        let Some(counted) = self.counted() else {
+            return Err("+ and - change a count".to_owned());
         };
         self.discard_armed = false;
-        let count = &mut self.edited.counts[level.index()];
+        let (count, min, max) = self.count_mut(counted);
         *count = if up {
             count.saturating_add(1)
         } else {
             count.saturating_sub(1)
         }
-        .clamp(MIN_COUNT, MAX_COUNT);
+        .clamp(min, max);
         Ok(())
     }
 
-    /// A count typed at the prompt.
+    /// A number typed at the prompt.
     ///
     /// # Errors
     ///
-    /// Not a whole number from [`MIN_COUNT`] to [`MAX_COUNT`].
-    pub fn set_count(&mut self, level: Level, typed: &str) -> Result<(), String> {
+    /// Not a whole number in the range (`0` turns keep manual and remind off).
+    pub fn set_count(&mut self, counted: Counted, typed: &str) -> Result<(), String> {
+        let (count, min, max) = self.count_mut(counted);
         match typed.trim().parse::<u32>() {
-            Ok(count) if (MIN_COUNT..=MAX_COUNT).contains(&count) => {
-                self.edited.counts[level.index()] = count;
+            Ok(value) if (min..=max).contains(&value) => {
+                *count = value;
                 Ok(())
             }
-            _ => Err(format!("keep {MIN_COUNT} to {MAX_COUNT} snapshots")),
+            _ => Err(match counted {
+                Counted::Level(_) => format!("keep {MIN_COUNT} to {MAX_COUNT} snapshots"),
+                Counted::KeepManual => format!("keep 1 to {MAX_KEEP_MANUAL}, or 0 for off"),
+                Counted::Remind => format!("1 to {MAX_REMIND_DAYS} days, or 0 for off"),
+            }),
         }
     }
 
@@ -325,10 +394,12 @@ mod tests {
         }
     }
 
-    /// The defaults: Timeshift's backend, dry run on.
-    const DEFAULT_BACKEND: BackendChoice = BackendChoice {
+    /// The defaults: Timeshift's backend, dry run on, keep manual off, remind after 7 days.
+    const DEFAULT_BACKEND: ApsisChoice = ApsisChoice {
         native: false,
         dry_run: true,
+        keep_manual: 0,
+        remind_days: DEFAULT_REMIND_DAYS,
     };
 
     fn view() -> SettingsView {
@@ -359,7 +430,10 @@ mod tests {
             rows.iter().filter(|r| matches!(r, Row::Filter(_))).count(),
             4
         );
-        assert_eq!(rows[rows.len() - 2..], [Row::AddFilter, Row::Backend]);
+        assert_eq!(
+            rows[rows.len() - 4..],
+            [Row::AddFilter, Row::Backend, Row::KeepManual, Row::Remind]
+        );
 
         select(&mut view, Row::Mode);
         view.change().unwrap();
@@ -407,10 +481,14 @@ mod tests {
         view.edited.counts[Level::Daily.index()] = 1;
         view.adjust_count(false).unwrap();
         assert_eq!(view.edited.count(Level::Daily), 1);
-        assert!(view.set_count(Level::Daily, "0").is_err());
-        assert!(view.set_count(Level::Daily, "1000").is_err());
-        assert!(view.set_count(Level::Daily, "-3").is_err());
-        view.set_count(Level::Daily, " 12 ").unwrap();
+        assert!(view.set_count(Counted::Level(Level::Daily), "0").is_err());
+        assert!(
+            view.set_count(Counted::Level(Level::Daily), "1000")
+                .is_err()
+        );
+        assert!(view.set_count(Counted::Level(Level::Daily), "-3").is_err());
+        view.set_count(Counted::Level(Level::Daily), " 12 ")
+            .unwrap();
         assert_eq!(view.edited.count(Level::Daily), 12);
         select(&mut view, Row::Device);
         assert!(view.adjust_count(true).is_err());
@@ -456,6 +534,39 @@ mod tests {
     }
 
     #[test]
+    fn keep_manual_and_remind_are_numbers_with_off() {
+        let mut view = view();
+        select(&mut view, Row::KeepManual);
+        view.change().unwrap();
+        assert_eq!(view.backend.keep_manual, DEFAULT_KEEP_MANUAL);
+        view.adjust_count(false).unwrap();
+        assert_eq!(view.backend.keep_manual, DEFAULT_KEEP_MANUAL - 1);
+        view.set_count(Counted::KeepManual, "1").unwrap();
+        // `-` from 1 is off; not below.
+        view.adjust_count(false).unwrap();
+        view.adjust_count(false).unwrap();
+        assert_eq!(view.backend.keep_manual, 0);
+        assert!(view.set_count(Counted::KeepManual, "1000").is_err());
+        view.set_count(Counted::KeepManual, "999").unwrap();
+        view.change().unwrap();
+        assert_eq!(view.backend.keep_manual, 0);
+
+        select(&mut view, Row::Remind);
+        assert_eq!(view.counted(), Some(Counted::Remind));
+        view.change().unwrap();
+        assert_eq!(view.backend.remind_days, 0);
+        view.change().unwrap();
+        assert_eq!(view.backend.remind_days, DEFAULT_REMIND_DAYS);
+        assert!(view.set_count(Counted::Remind, "366").is_err());
+        view.set_count(Counted::Remind, "0").unwrap();
+        assert_eq!(view.backend.remind_days, 0);
+        // Apsis's own: Timeshift's file isn't touched.
+        assert!(!view.dirty());
+        // Schedule counts still refuse 0.
+        assert!(view.set_count(Counted::Level(Level::Daily), "0").is_err());
+    }
+
+    #[test]
     fn backend_rows_are_apsis_own_and_not_unsaved_timeshift_changes() {
         let mut view = view();
         assert!(!view.rows().contains(&Row::DryRun));
@@ -463,13 +574,17 @@ mod tests {
         view.change().unwrap();
         assert_eq!(
             view.backend,
-            BackendChoice {
+            ApsisChoice {
                 native: true,
-                dry_run: true
+                ..DEFAULT_BACKEND
             }
         );
-        // Dry run shows up once the native backend is on.
-        assert_eq!(view.rows().last(), Some(&Row::DryRun));
+        // Dry run shows up once the native backend is on, before keep manual and remind.
+        let rows = view.rows();
+        assert_eq!(
+            rows[rows.len() - 3..],
+            [Row::DryRun, Row::KeepManual, Row::Remind]
+        );
         select(&mut view, Row::DryRun);
         view.change().unwrap();
         assert!(!view.backend.dry_run);

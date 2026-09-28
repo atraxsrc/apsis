@@ -26,6 +26,10 @@ It works with keyboard or mouse and follows your COSMIC theme.
   no bar, when Apsis can't read the disk's size).
 - **Create and delete** snapshots through Timeshift, with a comment, and `[y/N]` before a delete.
   Creates and restores show a progress bar with the time left.
+- **Keep the last N manual snapshots** (optional): `p` shows which older on-demand snapshots
+  would go, and deletes them only after `y`. Commented ones always stay and don't count.
+- **Reminder**: the panel icon turns the theme's warning colour, and the tooltip says so, when
+  the last snapshot is older than 7 days (configurable).
 - **Settings**: backup device, rsync or btrfs mode, schedules and how many to keep, home
   folders per user, and filters, written to Timeshift's own settings file.
 - **Keyboard first**: vim-style keys (`j`/`k`, `c`reate, `d`elete, `s`ettings, `?` help) and a
@@ -153,6 +157,7 @@ Every `[key]` hint at the bottom of the popup is also a button, every row can be
 |---|---|---|---|
 | list | `↑` `↓` / `j` `k`, `Home` `End` | move | click a row |
 | list | `c` / `d` / `r` | create / delete / refresh | `[c]reate` / `[d]elete` / `[r]efresh` |
+| list | `p` | prune old manual snapshots (preview, then `y`) | |
 | list | `Enter` | browse the snapshot's files | double-click |
 | list | `Tab` | details pane, and back | |
 | list | `space` / `J` | mark or unmark for deletion / mark and move down | |
@@ -261,6 +266,19 @@ them; deleting always goes through Timeshift. Needs `apsis-helper`; rsync mode o
 **`apsis` → `dry run`** (with the native backend; on by default). `c` then only shows what a
 snapshot would do (the rsync command, the exclude list, `info.json`) and writes nothing. Turn it
 off to make real native snapshots.
+
+**`apsis` → `keep manual`** (Apsis's own, saved at once; off by default). Keeps the newest N
+on-demand snapshots without a comment (the ones made with `c`). `p` shows which older ones would go and why the
+others stay, and deletes only after `y`; after each create it offers this by itself when
+something is past N. A snapshot with a comment is pinned: it always stays and doesn't count towards N, and
+so does one Timeshift's schedule also tagged (hourly, daily...): Timeshift's own retention
+decides about those. The newest snapshot is never deleted. `space` turns it on (N = 10) or off,
+`+`/`-`/`e` change N.
+
+**`apsis` → `remind`** (Apsis's own, saved at once; 7 days by default). When the newest
+snapshot is older than this, the panel icon turns the theme's warning colour and the tooltip
+says `none for over 7 days`. With the helper installed, the panel lists in the background at
+login and every 6 hours for this (never with a password prompt). `0` turns it off.
 
 > **Close Timeshift's own window first.** If it's open while you save here, it writes its own
 > settings over yours when it closes. Apsis warns you in the activity pane when it's open.

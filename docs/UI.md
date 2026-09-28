@@ -42,6 +42,44 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
 - Disk line, between the panes and the activity pane: see "Disk usage" below.
 - Progress of a create or a (real) restore replaces the spinner line: see "Progress" below.
 
+## Keep last N manual snapshots
+
+```
+ ╭─ prune preview ─────────────────────────────────╮
+ │ delete  09-21 10:00                             │
+ │ delete  09-22 10:00                             │
+ │ keep    09-25 10:00  newest 2                   │
+ │ keep    09-24 10:00  newest 2                   │
+ │ keep    09-20 10:00 "before upgrade"  comment   │
+ │ keep    09-23 10:00  also hourly                │
+ ╰─────────────────────────────────────────────────╯
+ > remove 2 old manual snapshots? [y/N] _
+```
+
+- Settings view, `apsis` section: `keep last 10 manual` / `keep manual: all` (off, default).
+  Apsis's own (cosmic-config), saved at once. `space` on/off (10), `+`/`-`/`e` 1 to 999.
+- Rules (`apsis_core::retention::manual`): a snapshot tagged `O` with a comment is pinned: it
+  always stays and doesn't count towards N. The newest N uncommented `O` snapshots stay; of the
+  older ones, one with any other tag stays (Timeshift's retention decides about it; the `timeshift`
+  CLI can't remove one tag), and the newest snapshot of all never goes. The rest are listed
+  oldest first.
+- Never automatic: `p` any time, and after a successful create (when its list is in) the same
+  preview and question appear by themselves if something is past N. Deleting is the bulk
+  delete: through the helper one at a time (one password), or pkexec.
+- It sees what the list shows, which is every system's snapshots on the device.
+
+## Reminder
+
+- Settings view, `apsis` section: `remind after 7 days` (default) / `remind: off`. `space`
+  on/off, `+`/`-`/`e` 1 to 365 days.
+- Due when a list showed a backup device and its newest snapshot (any tag) is more than N days
+  old, or there is none.
+- Then the panel icon is drawn in the theme's warning colour (same icon, `warning_text_color`)
+  and the tooltip adds `· none for over 7 days`.
+- So that it works without opening the popup: in applet mode Apsis lists at start and every
+  6 hours while the popup is closed, **through the helper only** (no helper: nothing, never a
+  pkexec password dialog). A failed background list (disk unplugged) clears the reminder.
+
 ## Progress
 
 ```
@@ -126,6 +164,7 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
 | r | refresh list |
 | Enter | browse the selected snapshot's files (Phase 6a) |
 | Tab | make the details pane active, or go back to the list |
+| p | prune: preview which old manual snapshots "keep manual" would delete (left pane), then `> remove 3 old manual snapshots? [y/N]`; `y` deletes them one by one (as a bulk delete), anything else or Esc closes the preview |
 | s | settings view (see below) |
 | ? | help overlay |
 | Esc | cancel input, then go back from details/help/about/settings, then clear the marks, then close the popup |

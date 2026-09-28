@@ -210,3 +210,25 @@ progress-creating = creating
 progress-restoring = restoring
 progress-estimating = estimating…
 progress-left = { $time } left
+
+# Keep last N manual snapshots (settings, prune preview) and the reminder
+settings-apsis-saved = saved
+prompt-keep-manual = keep manual (0 = off):
+prompt-remind = remind after days (0 = off):
+settings-keep-manual = keep last { $count } manual
+settings-keep-manual-off = keep manual: all
+settings-keep-manual-note = Saved at once. Keeps the newest N on-demand snapshots without a comment; [p] previews which older ones go and deletes them after y (also offered after a create). Commented ones are pinned: they stay and don't count. So do ones Timeshift's schedule tagged too.
+settings-remind = remind after { $days } days
+settings-remind-off = remind: off
+settings-remind-note = Saved at once. When the newest snapshot is older than this, the panel icon turns the warning colour and the tooltip says so.
+pane-prune = prune preview
+prune-delete = delete  { $name }
+prune-keep-recent = keep    { $name }  newest { $count }
+prune-keep-comment = keep    { $name }  comment
+prune-keep-tags = keep    { $name }  also { $tags }
+prune-keep-newest = keep    { $name }  newest snapshot
+prompt-prune = remove { $count } old manual snapshots? [y/N]
+prune-off = keep manual is off: set it in settings [s]
+prune-nothing = nothing to prune: keeping the last { $keep } manual
+help-prune = old manual snapshots past "keep manual": preview, then y
+tooltip-stale = { $text } · none for over { $days } days
