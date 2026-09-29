@@ -9,21 +9,19 @@ use std::future::Future;
 
 use super::names::{
     BUS_NAME, ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
-    ERROR_NOT_AUTHORIZED, ERROR_NOT_INSTALLED, INTERFACE, METHOD_BROWSE, METHOD_CREATE,
-    METHOD_DELETE, METHOD_LIST, METHOD_LIST_WITH_USAGE, METHOD_NATIVE_CREATE,
-    METHOD_NATIVE_DRY_RUN, METHOD_NATIVE_LIST, METHOD_NATIVE_LIST_WITH_USAGE, METHOD_READ_SETTINGS,
-    METHOD_RESTORE, METHOD_WRITE_SETTINGS, OBJECT_PATH, OP_CREATE, OP_DELETE, OP_RESTORE,
-    SIGNAL_FINISHED, SIGNAL_PROGRESS,
+    ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_BROWSE, METHOD_DELETE, METHOD_NATIVE_CREATE,
+    METHOD_NATIVE_LIST_WITH_USAGE, METHOD_READ_CONFIG, METHOD_RESTORE, METHOD_WRITE_CONFIG,
+    OBJECT_PATH, OP_CREATE, OP_DELETE, OP_RESTORE, SIGNAL_FINISHED, SIGNAL_PROGRESS,
 };
 use super::{
-    WireList, WireListWithUsage, WireListing, WireSettingsInfo, decode_error, from_wire,
-    from_wire_with_usage, info_from_wire, listing_from_wire, settings_to_wire,
+    WireConfigInfo, WireListWithUsage, WireListing, config_info_from_wire, config_to_wire,
+    decode_error, from_wire_with_usage, listing_from_wire,
 };
+use crate::config::{Config, ConfigInfo};
 use crate::error::{Error, Result};
 use crate::model::SnapshotList;
 use crate::progress::Progress;
 use crate::restore::{Listing, Request};
-use crate::settings::{Settings, SettingsInfo};
 
 /// The applet's side of `apsis-helper`, on the system bus.
 ///
@@ -35,7 +33,7 @@ pub struct HelperClient {
 
 impl HelperClient {
     /// Connects if the helper is installed (D-Bus can start it) or already running. `None`
-    /// when it isn't, or the system bus can't be reached: use the pkexec path instead.
+    /// when it isn't, or the system bus can't be reached: Apsis can't do anything then.
     pub async fn connect() -> Option<Self> {
         let connection = Connection::system().await.ok()?;
         let bus = DBusProxy::new(&connection).await.ok()?;
@@ -55,23 +53,13 @@ impl HelperClient {
     ///
     /// What the helper reported (see [`Error`]), or a bad reply.
     pub async fn list(&self) -> Result<SnapshotList> {
-        self.list_with_usage(METHOD_LIST_WITH_USAGE, METHOD_LIST)
+        let wire: WireListWithUsage = self
+            .proxy()
+            .await?
+            .call(METHOD_NATIVE_LIST_WITH_USAGE, &())
             .await
-    }
-
-    /// Calls `method` (a `...WithUsage` list). A helper from before it existed (one still
-    /// running across an upgrade) doesn't know it: then `fallback`, the plain list, without
-    /// usage.
-    async fn list_with_usage(&self, method: &str, fallback: &str) -> Result<SnapshotList> {
-        let proxy = self.proxy().await?;
-        match proxy.call::<_, _, WireListWithUsage>(method, &()).await {
-            Ok(wire) => from_wire_with_usage(wire),
-            Err(error) if is_unknown_method(&error) => {
-                let wire: WireList = proxy.call(fallback, &()).await.map_err(from_zbus)?;
-                from_wire(wire)
-            }
-            Err(error) => Err(from_zbus(error)),
-        }
+            .map_err(from_zbus)?;
+        from_wire_with_usage(wire)
     }
 
     /// Creates a snapshot and waits until it's done (this can take minutes).
@@ -83,8 +71,7 @@ impl HelperClient {
         self.create_with_progress(comment, &mut |_| {}).await
     }
 
-    /// [`HelperClient::create`], handing each `Progress` signal to `on_progress`. An older
-    /// helper sends none.
+    /// [`HelperClient::create`], handing each `Progress` signal to `on_progress`.
     ///
     /// # Errors
     ///
@@ -94,7 +81,7 @@ impl HelperClient {
         comment: &str,
         on_progress: &mut (dyn FnMut(Progress) + Send),
     ) -> Result<()> {
-        self.operate_on(METHOD_CREATE, OP_CREATE, comment, on_progress)
+        self.operate_on(METHOD_NATIVE_CREATE, OP_CREATE, comment, on_progress)
             .await
     }
 
@@ -160,83 +147,32 @@ impl HelperClient {
         .await
     }
 
-    /// Lists snapshots with the native backend (reads the backup device directly). No password
-    /// for the active session.
+    /// Apsis's config (or, before there is one, what was imported from Timeshift's settings),
+    /// the devices and the users. No password for the active session.
     ///
     /// # Errors
     ///
-    /// What the helper reported (see [`Error`]), or a bad reply.
-    pub async fn native_list(&self) -> Result<SnapshotList> {
-        self.list_with_usage(METHOD_NATIVE_LIST_WITH_USAGE, METHOD_NATIVE_LIST)
-            .await
-    }
-
-    /// What a native create with `comment` would do, as text. Nothing is written. No password
-    /// for the active session.
-    ///
-    /// # Errors
-    ///
-    /// What the helper reported (see [`Error`]).
-    pub async fn native_dry_run(&self, comment: &str) -> Result<String> {
-        self.proxy()
-            .await?
-            .call(METHOD_NATIVE_DRY_RUN, &(comment,))
-            .await
-            .map_err(from_zbus)
-    }
-
-    /// Creates a native rsync snapshot and waits until it's done (this can take minutes).
-    ///
-    /// # Errors
-    ///
-    /// What the helper reported (see [`Error`]).
-    pub async fn native_create(&self, comment: &str) -> Result<()> {
-        self.native_create_with_progress(comment, &mut |_| {}).await
-    }
-
-    /// [`HelperClient::native_create`], handing each `Progress` signal to `on_progress`.
-    ///
-    /// # Errors
-    ///
-    /// What the helper reported (see [`Error`]).
-    pub async fn native_create_with_progress(
-        &self,
-        comment: &str,
-        on_progress: &mut (dyn FnMut(Progress) + Send),
-    ) -> Result<()> {
-        self.operate_on(METHOD_NATIVE_CREATE, OP_CREATE, comment, on_progress)
-            .await
-    }
-
-    /// Reads Timeshift's settings, the devices and the users. No password for the active
-    /// session.
-    ///
-    /// # Errors
-    ///
-    /// What the helper reported, or a settings file Apsis can't edit safely.
-    pub async fn read_settings(&self) -> Result<SettingsInfo> {
-        let wire: WireSettingsInfo = self
+    /// What the helper reported, or a config file that can't be read.
+    pub async fn read_config(&self) -> Result<ConfigInfo> {
+        let wire: WireConfigInfo = self
             .proxy()
             .await?
-            .call(METHOD_READ_SETTINGS, &())
+            .call(METHOD_READ_CONFIG, &())
             .await
             .map_err(from_zbus)?;
-        info_from_wire(wire)
+        config_info_from_wire(wire)
     }
 
-    /// Writes `settings` if the file still reads `expected` (asks for the password). Returns
-    /// once written; the text is a problem Timeshift reported afterwards, or empty.
+    /// Writes `config` if `config.toml` still reads `expected` (empty: there's none yet). Asks
+    /// for the password. The text is a note, or empty.
     ///
     /// # Errors
     ///
-    /// What the helper reported: [`Error::SettingsChanged`], [`Error::InvalidSettings`], ...
-    pub async fn write_settings(&self, expected: &str, settings: &Settings) -> Result<String> {
+    /// What the helper reported: [`Error::ConfigChanged`], [`Error::InvalidSettings`], ...
+    pub async fn write_config(&self, expected: &str, config: &Config) -> Result<String> {
         self.proxy()
             .await?
-            .call(
-                METHOD_WRITE_SETTINGS,
-                &(expected, settings_to_wire(settings)),
-            )
+            .call(METHOD_WRITE_CONFIG, &(expected, config_to_wire(config)))
             .await
             .map_err(from_zbus)
     }
@@ -374,12 +310,6 @@ async fn wait_for_finished(
     ))
 }
 
-/// The bus or the helper said it has no such method.
-fn is_unknown_method(error: &zbus::Error) -> bool {
-    matches!(error, zbus::Error::MethodError(name, _, _)
-        if name.as_str() == "org.freedesktop.DBus.Error.UnknownMethod")
-}
-
 /// Maps the helper's D-Bus errors to [`Error`]s; anything else becomes [`Error::Helper`].
 fn from_zbus(error: zbus::Error) -> Error {
     match error {
@@ -388,9 +318,8 @@ fn from_zbus(error: zbus::Error) -> Error {
             match name.as_str() {
                 ERROR_NOT_AUTHORIZED => Error::NotAuthorized,
                 ERROR_BUSY => Error::Busy,
-                ERROR_NOT_INSTALLED => Error::NotInstalled,
-                ERROR_CHANGED => Error::SettingsChanged,
-                // Settings or a restore request: the message says why.
+                ERROR_CHANGED => Error::ConfigChanged,
+                // A config or a restore request: the message says why.
                 ERROR_INVALID_INPUT => Error::InvalidInput(message),
                 ERROR_FAILED | ERROR_DEVICE_NOT_FOUND => decode_error(&message),
                 _ if message.is_empty() => Error::Helper(name.to_string()),
@@ -445,14 +374,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failures_carry_timeshift_stderr() {
-        let message = encode_error(&Error::Failed {
-            code: Some(1),
-            output: "E: disk full".to_owned(),
+    async fn failures_keep_their_kind() {
+        let message = encode_error(&Error::DeviceNotFound {
+            device: "00000000".to_owned(),
         });
         let result = wait(vec![finished(OP_CREATE, false, &message)], vec![]).await;
         assert!(
-            matches!(result, Err(Error::Failed { code: Some(1), ref output }) if output == "E: disk full"),
+            matches!(result, Err(Error::DeviceNotFound { ref device }) if device == "00000000"),
+            "{result:?}"
+        );
+        let result = wait(
+            vec![finished(OP_CREATE, false, "rsync exited with code 11")],
+            vec![],
+        )
+        .await;
+        assert!(
+            matches!(result, Err(Error::Helper(ref m)) if m.ends_with("11")),
             "{result:?}"
         );
     }

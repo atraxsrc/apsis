@@ -1,21 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Read};
+use std::io;
 use std::process::{Command, Stdio};
 
-use apsis_core::progress::read_segments;
 use apsis_core::{RunOutput, Runner, find_in_path};
 
-/// Where the helper looks for `timeshift`. Fixed: nothing from the caller or the environment
-/// the helper was started with decides which program runs as root.
+/// Where the helper looks for the programs it runs (`lsblk`, `findmnt`, `mount`, `umount`).
+/// Fixed: nothing from the caller or the environment the helper was started with decides which
+/// program runs as root.
 pub const SAFE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// [`Runner`] for the helper, which is already root: runs the argv directly, without a shell.
 ///
-/// The environment is cleared and rebuilt like pkexec's (fixed `PATH`, root's `HOME`, `USER`
-/// and `LOGNAME`), with `LC_ALL=C.UTF-8` so the `--list` parser sees Timeshift's untranslated
-/// English. stdin is null so nothing can wait for input.
+/// The environment is cleared and rebuilt (fixed `PATH`, root's `HOME`, `USER` and `LOGNAME`),
+/// with `LC_ALL=C.UTF-8` so messages come in untranslated English. stdin is null so nothing
+/// can wait for input.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DirectRunner;
 
@@ -32,42 +32,6 @@ impl Runner for DirectRunner {
             code: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
-    }
-
-    /// Timeshift's stdout as it comes (its progress lines end in `\r`); stderr whole.
-    fn run_streaming(
-        &self,
-        argv: &[OsString],
-        on_segment: &mut dyn FnMut(&str) -> bool,
-    ) -> io::Result<RunOutput> {
-        let (program, rest) = argv
-            .split_first()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty argv"))?;
-        let program =
-            find_in_path(program, OsStr::new(SAFE_PATH)).ok_or(io::ErrorKind::NotFound)?;
-        let mut child = command(&program, rest)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        // stderr on its own thread, so neither pipe fills up while the other is read.
-        let stderr = child.stderr.take();
-        let stderr = std::thread::spawn(move || {
-            let mut text = Vec::new();
-            if let Some(mut stderr) = stderr {
-                let _ = stderr.read_to_end(&mut text);
-            }
-            String::from_utf8_lossy(&text).into_owned()
-        });
-        let stdout = child.stdout.take().map_or(Ok(String::new()), |out| {
-            read_segments(out, true, on_segment)
-        });
-        let status = child.wait()?;
-        Ok(RunOutput {
-            success: status.success(),
-            code: status.code(),
-            stdout: stdout?,
-            stderr: stderr.join().unwrap_or_default(),
         })
     }
 }
@@ -93,11 +57,11 @@ mod tests {
     #[test]
     fn command_has_only_the_fixed_environment() {
         let command = command(
-            std::path::Path::new("/usr/bin/timeshift"),
-            &["--list".into(), "--scripted".into()],
+            std::path::Path::new("/usr/bin/lsblk"),
+            &["--json".into(), "--list".into()],
         );
         let args: Vec<_> = command.get_args().collect();
-        assert_eq!(args, ["--list", "--scripted"]);
+        assert_eq!(args, ["--json", "--list"]);
         let mut env: Vec<_> = command
             .get_envs()
             .map(|(k, v)| (k.to_str().unwrap(), v.and_then(OsStr::to_str).unwrap()))
@@ -113,26 +77,6 @@ mod tests {
                 ("USER", "root"),
             ]
         );
-    }
-
-    #[test]
-    fn streaming_hands_over_pieces_and_keeps_the_rest() {
-        let mut taken = Vec::new();
-        let output = DirectRunner
-            .run_streaming(
-                &["printf".into(), "a\\r 5%% b\\rline\\n".into()],
-                &mut |segment| {
-                    let progress = segment.contains('%');
-                    if progress {
-                        taken.push(segment.to_owned());
-                    }
-                    progress
-                },
-            )
-            .unwrap();
-        assert!(output.success);
-        assert_eq!(taken, [" 5% b"]);
-        assert_eq!(output.stdout, "a\nline\n");
     }
 
     #[test]

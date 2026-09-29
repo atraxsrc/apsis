@@ -4,6 +4,55 @@ All notable changes to Apsis are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-09-29
+
+Apsis is standalone now: it takes rsync snapshots itself and no longer needs or runs
+Timeshift. Snapshots keep Timeshift's on-disk layout, so the ones Timeshift made keep working
+(listed, browsed, restored from, deleted), and an installed Timeshift still reads Apsis's.
+Manual only: there is no schedule, and a snapshot is only deleted when you delete it.
+
+**Upgrading:** open the settings (`s`) once. They show what was taken from Timeshift's
+settings (backup disk, home folders, filters); press `w` to save them as Apsis's own
+(`/etc/apsis/config.toml`). Your snapshots stay where they are.
+
+### Added
+
+- Apsis's own settings file, `/etc/apsis/config.toml` (backup disk and filters), written only
+  by `apsis-helper`, atomically, with a `.bak` of the previous one. The first time, it's
+  imported from Timeshift's `/etc/timeshift/timeshift.json`, which is only read.
+- Keep the last N snapshots (optional): `p` previews which older snapshots would go, and
+  deletes them only after `y`; offered after each create. Commented snapshots always stay and
+  don't count.
+- Reminder: the panel icon turns the warning colour, and the tooltip says so, when the last
+  snapshot is older than 7 days (configurable, or off).
+- A disk usage line under the panes: the backup disk's used and free space as a bar.
+- Progress with the time left for creates and restores.
+- rsync runs at idle I/O priority and nice 19, so the desktop stays responsive.
+- `just deb-install` builds the .deb and installs it, for testing.
+
+### Changed
+
+- Creating, listing and deleting snapshots is done by Apsis (rsync), no longer by Timeshift.
+  Deleting as root refuses anything that isn't plainly one snapshot folder: a snapshot name,
+  no symlink on the way, an `info.json`, nothing mounted inside; it never follows a symlink or
+  leaves the filesystem, and removes only that snapshot's tag links.
+- The settings view has the backup disk, home folders and filters, plus Apsis's own keep and
+  remind.
+- `apsis-helper` is required (the .deb installs it); there's no `pkexec` fallback any more.
+- The .deb no longer recommends `timeshift`; `apt purge` also removes `/etc/apsis`.
+
+### Removed
+
+- Timeshift as the backend, and everything that ran `timeshift`.
+- Timeshift's settings in Apsis: schedules and retention counts, rsync/btrfs mode, `@home`.
+  Apsis doesn't schedule or delete snapshots by itself.
+- The native backend's dry-run setting (the native backend is the only one now).
+
+### Not supported (yet)
+
+- Encrypted (LUKS) backup disks: Timeshift unlocks them itself; Apsis doesn't.
+- btrfs snapshots and full-system restore.
+
 ## [0.1.2] - 2026-09-27
 
 ### Added
@@ -84,6 +133,7 @@ First release.
   password every time.
 - App and symbolic icons, AppStream metainfo, desktop entries, `just install` / `just uninstall`.
 
+[0.2.0]: https://github.com/atraxsrc/apsis/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/atraxsrc/apsis/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/atraxsrc/apsis/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/atraxsrc/apsis/releases/tag/v0.1.0

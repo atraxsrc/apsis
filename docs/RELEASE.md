@@ -25,6 +25,32 @@ that tag's GitHub release. If the release doesn't exist yet, the workflow makes 
 with placeholder notes; edit its notes and publish it. If it does exist, the file is added
 (or replaced) there. Check the workflow's run in the Actions tab before announcing the release.
 
+## v0.2.0 checklist
+
+Prepared (2026-09-29): version 0.2.0 (`Cargo.toml`, `Cargo.lock`), metainfo `<release>` and
+summary, `resources/deb/changelog`, the man page, `CHANGELOG.md`, README, SECURITY.md (0.2.x
+supported). Covers the standalone rework (no Timeshift) and the unreleased `90272f5` and
+`36c094f` work (keep last N, reminder, low-priority rsync, disk bar, progress).
+
+User steps, in order:
+
+1. Commit, push `main`, and check that CI passes.
+2. Tag and push:
+
+   ```sh
+   git tag -a v0.2.0 -m 'Apsis 0.2.0'
+   git push origin v0.2.0
+   ```
+
+3. Wait for the **Release** workflow (Actions tab). It creates a draft release `Apsis 0.2.0`
+   with the .deb attached.
+4. Edit the draft: paste the `0.2.0` section of `CHANGELOG.md` as its notes (it has the
+   "upgrading: open settings once and press w" note), check that `apsis_0.2.0-1_amd64.deb` is
+   attached, and publish.
+5. The listing line changed: "Simple system snapshots and file restore for the COSMIC™
+   desktop" (no Timeshift). `CLAUDE.md` still has the old one; update it, and use the drafts
+   below for the collection PR.
+
 ## v0.1.2 checklist
 
 Prepared (2026-09-27): version 0.1.2 (`Cargo.toml`, `Cargo.lock`), metainfo `<release>`,
@@ -125,7 +151,7 @@ names and order from a neighbouring entry in each file and adjust these to match
 ```ron
 (
     name: "Apsis",
-    description: "Timeshift-style system snapshots for the COSMIC™ desktop",
+    description: "Simple system snapshots and file restore for the COSMIC™ desktop",
     repository: "https://github.com/atraxsrc/apsis",
     app_id: "io.github.atraxsrc.Apsis",
     icon: "https://raw.githubusercontent.com/atraxsrc/apsis/v0.1.0/resources/icons/hicolor/scalable/apps/io.github.atraxsrc.Apsis.svg",
@@ -139,7 +165,7 @@ names and order from a neighbouring entry in each file and adjust these to match
 ```ron
 (
     name: "Apsis",
-    description: "Timeshift-style system snapshots for the COSMIC™ desktop, in a window (apsis --window)",
+    description: "Simple system snapshots and file restore for the COSMIC™ desktop, in a window (apsis --window)",
     repository: "https://github.com/atraxsrc/apsis",
     app_id: "io.github.atraxsrc.Apsis",
     icon: "https://raw.githubusercontent.com/atraxsrc/apsis/v0.1.0/resources/icons/hicolor/scalable/apps/io.github.atraxsrc.Apsis.svg",
@@ -152,7 +178,8 @@ mode in its description instead.
 
 PR text (draft):
 
-> Add Apsis, a panel applet for Timeshift-style system snapshots: list, create and delete
-> Timeshift snapshots from a terminal-style popup that follows the COSMIC theme. It also opens
-> as a window from the app launcher (`apsis --window`). A native rsync backend and file-level
-> restore are included as experimental. GPL-3.0-only.
+> Add Apsis, a panel applet for simple system snapshots: create, list and delete rsync
+> snapshots and restore single files from them, from a terminal-style popup that follows the
+> COSMIC theme. It uses Timeshift's on-disk layout, so existing Timeshift snapshots keep
+> working, but doesn't need Timeshift. It also opens as a window from the app launcher
+> (`apsis --window`). GPL-3.0-only.

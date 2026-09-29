@@ -4,13 +4,11 @@
 //!
 //! A system D-Bus service, started as root by D-Bus activation (through
 //! `apsis-helper.service`) when the applet calls it, and gone again after a minute idle. It
-//! offers exactly `List` (and `ListWithUsage`), `Create(comment)`, `Delete(name)`,
-//! `ReadSettings`, `WriteSettings`, the native backend's `NativeList` (and
-//! `NativeListWithUsage`), `NativeDryRun(comment)` and
-//! `NativeCreate(comment)`, and file-level restore's `Browse` and `Restore`; each checks its own
-//! polkit action for the caller, checks its input again, and runs `timeshift` (or `lsblk`,
-//! `findmnt`, `mount`, `rsync`) with a fixed argv, no shell. `WriteSettings` edits
-//! `/etc/timeshift/timeshift.json`, nothing else. See `docs/ARCHITECTURE.md`.
+//! offers exactly `NativeListWithUsage`, `NativeCreate(comment)`, `Delete(name)`, `ReadConfig`,
+//! `WriteConfig`, and file-level restore's `Browse` and `Restore`; each checks its own polkit
+//! action for the caller, checks its input again, and runs `rsync`, `lsblk`, `findmnt` and
+//! `mount` with a fixed argv, no shell. `WriteConfig` writes `/etc/apsis/config.toml`, nothing
+//! else. See `docs/ARCHITECTURE.md`.
 
 mod native;
 mod polkit;
@@ -27,7 +25,6 @@ use std::time::Duration;
 
 use apsis_core::helper::names::{BUS_NAME, OBJECT_PATH};
 
-use crate::runner::DirectRunner;
 use crate::service::Helper;
 use crate::state::State;
 
@@ -46,7 +43,7 @@ async fn main() -> ExitCode {
 }
 
 async fn serve() -> zbus::Result<()> {
-    let state = State::new(DirectRunner);
+    let state = State::new();
     // Only root may own the name (the bus policy says so), so this fails for anyone else.
     let _connection = zbus::connection::Builder::system()?
         .serve_at(OBJECT_PATH, Helper::new(Arc::clone(&state)))?

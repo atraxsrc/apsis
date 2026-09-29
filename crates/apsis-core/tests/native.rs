@@ -764,6 +764,256 @@ fn delete_removes_the_tree_and_its_links_only() {
     }
 }
 
+/// Two snapshots made by the backend, for the delete tests.
+fn two_snapshots(lab: &Lab) -> NativeRsync<QuietRunner> {
+    populate(&lab.source);
+    let (backend, _) = backend(lab, false);
+    backend.create("").unwrap();
+    backend.create("").unwrap();
+    backend
+}
+
+#[test]
+fn delete_refuses_names_that_arent_snapshot_names() {
+    for lab in labs("delete-names") {
+        let backend = two_snapshots(&lab);
+        for bad in [
+            "",
+            ".",
+            "..",
+            "snapshots",
+            "../snapshots",
+            "2026-09-25_11-28-53/..",
+            "*",
+        ] {
+            assert!(
+                matches!(backend.delete(bad), Err(Error::InvalidSnapshotName(_))),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(names(&backend), [FIRST, SECOND], "{}", lab.kind);
+    }
+}
+
+#[test]
+fn delete_refuses_a_symlinked_snapshot_or_snapshots_folder() {
+    for lab in labs("delete-symlinked") {
+        let kind = lab.kind;
+        let backend = two_snapshots(&lab);
+        // snapshots/<name> is a link to a real snapshot kept elsewhere.
+        let elsewhere = lab.repo.parent().unwrap().join("elsewhere");
+        fs::rename(snapshot_dir(&lab, FIRST), &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, snapshot_dir(&lab, FIRST)).unwrap();
+        let error = backend.delete(FIRST).unwrap_err();
+        assert!(
+            matches!(error, Error::InvalidInput(ref m) if m.contains("symlink")),
+            "{kind}: {error:?}"
+        );
+        assert!(elsewhere.join("info.json").exists(), "{kind}");
+
+        // snapshots/ itself is a link.
+        let moved = lab.repo.join("timeshift/moved-snapshots");
+        fs::rename(lab.repo.join("timeshift/snapshots"), &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, lab.repo.join("timeshift/snapshots")).unwrap();
+        let error = backend.delete(SECOND).unwrap_err();
+        assert!(
+            matches!(error, Error::InvalidInput(ref m) if m.contains("timeshift/snapshots/ is a symlink")),
+            "{kind}: {error:?}"
+        );
+        assert!(moved.join(SECOND).join("info.json").exists(), "{kind}");
+    }
+}
+
+#[test]
+fn delete_refuses_a_folder_without_info_json() {
+    for lab in labs("delete-no-info") {
+        let kind = lab.kind;
+        let backend = two_snapshots(&lab);
+        fs::remove_file(snapshot_dir(&lab, FIRST).join("info.json")).unwrap();
+        let error = backend.delete(FIRST).unwrap_err();
+        assert!(
+            matches!(error, Error::InvalidInput(ref m) if m.contains("no info.json")),
+            "{kind}: {error:?}"
+        );
+        assert!(
+            snapshot_dir(&lab, FIRST).join("localhost").exists(),
+            "{kind}"
+        );
+        // A symlinked info.json doesn't count either.
+        std::os::unix::fs::symlink(
+            snapshot_dir(&lab, SECOND).join("info.json"),
+            snapshot_dir(&lab, FIRST).join("info.json"),
+        )
+        .unwrap();
+        assert!(
+            matches!(backend.delete(FIRST), Err(Error::InvalidInput(_))),
+            "{kind}"
+        );
+        assert!(snapshot_dir(&lab, FIRST).exists(), "{kind}");
+    }
+}
+
+#[test]
+fn delete_never_follows_symlinks_out_of_the_snapshot() {
+    for lab in labs("delete-links-out") {
+        let kind = lab.kind;
+        let backend = two_snapshots(&lab);
+        let outside = lab.repo.parent().unwrap().join("outside");
+        fs::create_dir_all(outside.join("dir")).unwrap();
+        fs::write(outside.join("dir/precious"), "keep").unwrap();
+        let localhost = localhost(&lab, FIRST);
+        std::os::unix::fs::symlink(outside.join("dir/precious"), localhost.join("to-file"))
+            .unwrap();
+        std::os::unix::fs::symlink(outside.join("dir"), localhost.join("to-dir")).unwrap();
+        std::os::unix::fs::symlink("/", localhost.join("to-root")).unwrap();
+        backend.delete(FIRST).unwrap();
+        assert!(!snapshot_dir(&lab, FIRST).exists(), "{kind}");
+        assert_eq!(
+            fs::read_to_string(outside.join("dir/precious")).unwrap(),
+            "keep",
+            "{kind}"
+        );
+    }
+}
+
+#[test]
+fn delete_refuses_a_snapshot_with_something_mounted_inside() {
+    for lab in labs("delete-mounted") {
+        let kind = lab.kind;
+        populate(&lab.source);
+        let inside = fs::canonicalize(&lab.repo)
+            .unwrap()
+            .join("timeshift/snapshots")
+            .join(FIRST)
+            .join("localhost/mnt");
+        let line = format!(
+            "99 1 7:0 / {} rw,relatime shared:9 - ext4 /dev/loop9 rw\n",
+            inside.display()
+        );
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let backend = NativeRsync::new(config(&lab, false), QuietRunner::new(path))
+            .with_clock(clock())
+            .with_mountinfo(move || Ok(line.clone()));
+        backend.create("").unwrap();
+        let error = backend.delete(FIRST).unwrap_err();
+        assert!(
+            matches!(error, Error::InvalidInput(ref m) if m.contains("mounted inside")),
+            "{kind}: {error:?}"
+        );
+        // Refused before anything was deleted.
+        assert!(localhost(&lab, FIRST).join("etc/same").exists(), "{kind}");
+    }
+}
+
+#[test]
+fn delete_removes_only_its_own_tag_links() {
+    for lab in labs("delete-tag-links") {
+        let kind = lab.kind;
+        let backend = two_snapshots(&lab);
+        let tag_dir = |tag: &str| lab.repo.join(format!("timeshift/snapshots-{tag}"));
+        // A link Timeshift's schedule made, and something that isn't a link.
+        std::os::unix::fs::symlink(
+            format!("../snapshots/{FIRST}"),
+            tag_dir("daily").join(FIRST),
+        )
+        .unwrap();
+        fs::write(tag_dir("hourly").join(FIRST), "not a link").unwrap();
+        backend.delete(FIRST).unwrap();
+        for tag in ["ondemand", "daily"] {
+            assert!(
+                fs::symlink_metadata(tag_dir(tag).join(FIRST)).is_err(),
+                "{kind}: {tag}"
+            );
+        }
+        assert!(tag_dir("hourly").join(FIRST).is_file(), "{kind}");
+        assert!(tag_dir("ondemand").join(SECOND).is_symlink(), "{kind}");
+    }
+}
+
+/// A real bind mount and a real loop mount inside a snapshot, set up by the user with
+/// `just nested-mount` (mounting needs root). Opt-in: `APSIS_NESTED_MOUNT` names the prepared
+/// repository. Both mounted folders, and the snapshot, must survive the delete.
+#[test]
+fn delete_leaves_real_mounts_inside_alone() {
+    let Some(repo) = std::env::var_os("APSIS_NESTED_MOUNT").map(PathBuf::from) else {
+        eprintln!("nested mount test skipped; see `just nested-mount`");
+        return;
+    };
+    let snapshot = repo.join("timeshift/snapshots").join(NESTED_NAME);
+    for inside in ["bind", "loop"] {
+        let point = snapshot.join("localhost").join(inside);
+        let listed = Command::new("findmnt")
+            .args(["--noheadings", "--output", "TARGET", "--mountpoint"])
+            .arg(&point)
+            .output()
+            .unwrap();
+        assert!(
+            !listed.stdout.is_empty(),
+            "{} isn't mounted; run `just nested-mount` first",
+            point.display()
+        );
+    }
+    // Regular files readable by the tester: the ext4 image's `lost+found` is root's.
+    let readable = |dir: &Path| -> BTreeMap<PathBuf, (u64, u64)> {
+        let mut out = BTreeMap::new();
+        let mut stack = vec![dir.to_owned()];
+        while let Some(current) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&current) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(meta) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if meta.is_dir() {
+                    stack.push(path);
+                } else if meta.is_file() {
+                    out.insert(path.strip_prefix(dir).unwrap().to_owned(), inode(&path));
+                }
+            }
+        }
+        out
+    };
+    let before: Vec<_> = ["bind", "loop"]
+        .iter()
+        .map(|m| readable(&snapshot.join("localhost").join(m)))
+        .collect();
+    let config = NativeConfig {
+        repo: repo.clone(),
+        device: None,
+        device_uuid: None,
+        source: repo.clone(),
+        sys_uuid: SYS_UUID.to_owned(),
+        sys_distro: String::new(),
+        exclude: Vec::new(),
+        dry_run: false,
+    };
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let backend = NativeRsync::new(config, QuietRunner::new(path));
+    let error = backend.delete(NESTED_NAME).unwrap_err();
+    assert!(
+        matches!(error, Error::InvalidInput(ref m) if m.contains("mounted inside")),
+        "{error:?}"
+    );
+    assert!(snapshot.join("info.json").exists());
+    let after: Vec<_> = ["bind", "loop"]
+        .iter()
+        .map(|m| readable(&snapshot.join("localhost").join(m)))
+        .collect();
+    assert_eq!(before, after);
+    assert!(!before[0].is_empty() && !before[1].is_empty());
+
+    // The walk alone (without the mount check) stops at the loop mount, another filesystem,
+    // before deleting anything in it.
+    let error = native::prune::remove_tree(&snapshot.join("localhost"), "loop").unwrap_err();
+    assert!(error.to_string().contains("another filesystem"), "{error}");
+    assert_eq!(readable(&snapshot.join("localhost/loop")), before[1]);
+}
+
+/// The snapshot name `just nested-mount` makes.
+const NESTED_NAME: &str = "2026-01-01_00-00-00";
+
 #[test]
 fn a_leftover_staging_folder_is_reported() {
     for lab in labs("staging-leftover") {
@@ -845,9 +1095,10 @@ fn symlinked_folders_are_not_written_through() {
             "{kind}: {error:?}"
         );
         assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0, "{kind}");
+        let error = backend.delete(FIRST).unwrap_err();
         assert!(
-            matches!(backend.delete(FIRST), Err(Error::Native(_))),
-            "{kind}"
+            matches!(error, Error::InvalidInput(ref m) if m.contains("timeshift/ is a symlink")),
+            "{kind}: {error:?}"
         );
     }
 }

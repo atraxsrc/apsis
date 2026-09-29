@@ -1,16 +1,21 @@
 # Architecture
 
+Apsis 0.2.0 is standalone: it takes rsync snapshots itself and never runs `timeshift`. It keeps
+Timeshift's on-disk layout, so Timeshift-made snapshots keep working. Manual only: no schedule,
+no automatic deletion. (Up to 0.1.x Apsis drove the `timeshift` command line; that design is in
+git history, DECISIONS.md and TIMESHIFT-CLI.md.)
+
 ## Crates
 
 | crate | kind | depends on | job |
 |---|---|---|---|
-| `apsis-core` | lib | no UI crates | Snapshot model, `Backend` trait, Timeshift CLI backend, output parser, native rsync backend, file-level restore |
+| `apsis-core` | lib | no UI crates | Snapshot model, `Backend` trait, the native rsync backend, Apsis's config (and the import from Timeshift's settings), keep-last-N, file-level restore, the helper's wire types and client |
 | `apsis` | bin (applet) | libcosmic, apsis-core | Panel button + terminal-style popup |
-| `apsis-helper` | bin (phase 4) | zbus, apsis-core | Root D-Bus service guarded by polkit |
+| `apsis-helper` | bin | zbus, apsis-core | Root D-Bus service guarded by polkit |
 
 `apsis-core` must stay UI-free and testable without root or a COSMIC session.
 
-## Backend trait (as built in Phase 1)
+## Backend trait
 
 ```rust
 pub trait Backend {
@@ -20,10 +25,12 @@ pub trait Backend {
 }
 
 pub struct SnapshotList {
-    pub device: Option<String>,   // as reported by timeshift; None when "Not Selected"
-    pub uuid: Option<String>,     // backup device UUID; preferred for --snapshot-device
-    pub mode: Option<Mode>,       // Btrfs | Rsync
+    pub device: Option<String>,   // /dev/sdX1; None when no device is chosen
+    pub uuid: Option<String>,     // backup device UUID
+    pub mode: Option<Mode>,       // Rsync (the wire format still has btrfs)
     pub snapshots: Vec<Snapshot>,
+    pub warnings: Vec<String>,    // incomplete folders, a leftover staging folder
+    pub usage: Option<DiskUsage>, // statvfs of the backup device, when known
 }
 
 pub struct Snapshot {
@@ -34,146 +41,144 @@ pub struct Snapshot {
 }
 ```
 
-Implementations:
-- `TimeshiftCli<R: Runner>` - builds argv (`Vec<OsString>`, `argv[0] = "timeshift"`) and runs it
-  through the `Runner` trait so tests can inject canned output. Never passes user text through a
-  shell; the comment is a single argv element. After each successful `list()` it remembers the
-  device (UUID, else path) and adds `--snapshot-device` to later calls. `create`/`delete` refuse to run
-  (`Error::NoSnapshotDevice`) until a list has shown a device, so they never fall back to
-  Timeshift's configured default. The applet uses
-  `PkexecRunner` (`pkexec --disable-internal-agent /abs/path/timeshift ...`, see DECISIONS.md).
-- `helper::HelperClient` (phase 4) - the applet's client for `apsis-helper` over the system bus.
-  It is async (zbus on the applet's tokio) rather than a `Backend`: create/delete wait for a
-  signal, which doesn't fit a blocking trait. Same results and errors as the CLI backend.
-- `native::NativeRsync<R: Runner>` (phase 5, rsync only; btrfs is 5.1) - Timeshift's rsync
-  snapshots without `timeshift`, in Timeshift's exact layout (see DECISIONS.md, Phase 5), so
-  either tool reads, uses and deletes the other's. `NativeConfig` says where: `repo` (the backup
-  device's mount), `source` (`/` for real), `sys_uuid`, `sys_distro`, the `exclude` list
-  (`native::exclude::for_backup`, Timeshift's algorithm) and `dry_run`.
-  - `list`: reads `timeshift/snapshots/*/info.json`; folders Timeshift would count as incomplete
-    are warnings.
-  - `create`: `plan` works out the name (local time), the `--link-dest` snapshot (newest valid
-    one with this `sys-uuid`), `exclude.list`, the rsync argv and `info.json`. With `dry_run`
-    the plan is only logged. Otherwise it's built in `timeshift/apsis-staging/<name>/` (rsync
-    through `QuietRunner`: fixed `PATH`, stdout discarded, stderr tail kept), checked like
-    Timeshift checks it (a total size in `rsync-log`), renamed into `snapshots/`, and the
-    `snapshots-<tag>/` links rebuilt. A failure removes the staging folder.
-  - `delete`: removes the folder and rebuilds the links. The applet doesn't use it (it deletes
-    through Timeshift); it's there for the trait and the tests.
-  - Refuses to write through a symlinked `timeshift/`, `snapshots/` or staging folder.
+The one implementation is `native::NativeRsync<R: Runner>`: Timeshift's rsync snapshots in
+Timeshift's exact layout (see DECISIONS.md, Phase 5), so Timeshift reads, uses and deletes
+Apsis's and the other way round. `NativeConfig` says where: `repo` (the backup device's mount),
+`source` (`/` for real), `sys_uuid`, `sys_distro` and the `exclude` list
+(`native::exclude::for_backup`, Timeshift's algorithm, from the config's filters).
 
-The applet calls the backend on a background task (libcosmic `Task`) and never blocks the UI thread.
+- `list`: reads `timeshift/snapshots/*/info.json`; folders Timeshift would count as incomplete,
+  and a leftover staging folder, are warnings.
+- `create`: `plan` works out the name (local time), the `--link-dest` snapshot (newest valid
+  one with this `sys-uuid`), `exclude.list`, the rsync argv and `info.json` (tag `ondemand`).
+  It's built in `timeshift/apsis-staging/<name>/` (rsync through `QuietRunner`: fixed `PATH`,
+  `ionice -c 3 nice -n <to 19>`, `--info=progress2` for the progress), checked like Timeshift
+  checks it (a total size in `rsync-log`), renamed into `snapshots/`, and the
+  `snapshots-<tag>/` links rebuilt. A failure removes the staging folder.
+- `delete` (`delete_snapshot`), as root, only a plain snapshot folder, refused before anything
+  is deleted otherwise:
+  - the name matches `YYYY-MM-DD_HH-MM-SS` (so never `snapshots/` itself, `..` or a path);
+  - `timeshift/`, `snapshots/` and `<name>/` are each opened with `openat(O_NOFOLLOW |
+    O_DIRECTORY)` from the mount: a symlink anywhere on the way is refused;
+  - `<name>/info.json` is a regular file;
+  - nothing is mounted at or below `<name>/` (`/proc/self/mountinfo`, `usage::mounts_under`):
+    a bind mount has the same `st_dev`, so the walk alone couldn't tell;
+  - removal is `native::prune::remove_at`: every folder opened with `O_NOFOLLOW` relative to
+    the one above, symlinks removed as links, and a folder on another filesystem stops it;
+  - then `snapshots-<tag>/<name>` links are removed (only symlinks, only that name).
+- Refuses to write through a symlinked `timeshift/`, `snapshots/` or staging folder.
+
+The applet calls the helper on a background task (libcosmic `Task`) and never blocks the UI
+thread. `helper::HelperClient` is the applet's client: async (zbus on the applet's tokio),
+since create, delete and restore wait for a signal.
+
+## Config
+
+`/etc/apsis/config.toml` (`apsis_core::config`), written only by the helper:
+
+```toml
+# Written by apsis-helper; change it in Apsis's settings.
+# filters: rsync patterns, first match wins; "+ " in front includes.
+version = 1
+backup_device_uuid = "8cecb045-975d-49d0-bd57-1ec9f6eb77b5"
+filters = [
+    "+ /home/user1/**",
+    "/var/lib/libvirt/**",
+]
+```
+
+- `filters` is one ordered list in Timeshift's format, home folder patterns included
+  (`<home>/**`, `+ <home>/.**`, `+ <home>/**`): rsync takes the first match, so the order is
+  kept as it is. The settings view shows a home row per user, read from the list.
+- **Import**: while there's no `config.toml`, `config::effective` imports Timeshift's
+  `/etc/timeshift/timeshift.json` (only read): its `backup_device_uuid` and `exclude` list, with
+  notes on what was and wasn't taken. List and create use it until it's saved. No
+  `timeshift.json`: an empty config. A `config.toml` that can't be read is an error, not an
+  import.
+- `config::validate`: a device that differs from the saved one must be connected and a plain,
+  unencrypted Linux filesystem (`Device::selectable`); filters not blank, no control
+  characters, not repeated.
 
 ## Privilege model
 
-- The applet runs as the user and is never setuid and never run as root (Wayland GUIs must not run as root).
-- Phases 2–3: `pkexec timeshift …` — COSMIC's polkit agent shows the password prompt.
-  Downside: a prompt per call. Since Phase 4 this is the fallback when the helper isn't installed.
-- Phase 4: `apsis-helper` system service, D-Bus activated. Each method checks a polkit action:
-  - `<app-id>.list` → `allow_active=yes`
+- The applet runs as the user and is never setuid and never run as root (Wayland GUIs must not
+  run as root).
+- `apsis-helper` is a system service, D-Bus activated. Each method checks a polkit action:
+  - `<app-id>.list` → `allow_active=yes` (list, read the config)
   - `<app-id>.create`, `<app-id>.delete` → `auth_admin_keep`
-  - `<app-id>.configure` (phase 4.5, writing Timeshift's settings) → `auth_admin_keep`
-  - `<app-id>.browse` (phase 6a, browsing a snapshot's files and restore dry runs) →
-    `auth_admin_keep`: snapshots hold root-only files
-  - `<app-id>.restore` (phase 6a, folder mode) → `auth_admin_keep`
-  - `<app-id>.restore-original` (phase 6a, original mode) → `auth_admin`, asked every time
-- Input validation in the helper: snapshot names must match Timeshift's pattern
-  (`YYYY-MM-DD_HH-MM-SS`); comments are length-limited and passed as argv, never a shell.
+  - `<app-id>.configure` (write `/etc/apsis/config.toml`) → `auth_admin_keep`
+  - `<app-id>.browse` (browsing a snapshot's files and restore dry runs) → `auth_admin_keep`:
+    snapshots hold root-only files
+  - `<app-id>.restore` (folder mode) → `auth_admin_keep`
+  - `<app-id>.restore-original` (original mode) → `auth_admin`, asked every time
+- Without the helper the applet does nothing but say so; there's no `pkexec` fallback.
+- Input validation in the helper: snapshot names must match `YYYY-MM-DD_HH-MM-SS`; comments are
+  length-limited (they go into `info.json`); configs and restore requests are checked again.
 
-## apsis-helper (phase 4)
+## apsis-helper
 
-All names (bus name, path, interface, methods, signal, error names, polkit action IDs, unit) are
-constants in `apsis_core::helper::names`; the helper's tests check its interface and the files in
-`resources/helper/` against them.
+All names (bus name, path, interface, methods, signals, error names, polkit action IDs, unit)
+are constants in `apsis_core::helper::names`; the helper's tests check its interface and the
+files in `resources/helper/` against them.
 
 | | |
 |---|---|
 | bus name | `io.github.atraxsrc.Apsis.Helper` (system bus, owned by root only) |
 | object / interface | `/io/github/atraxsrc/Apsis/Helper`, `io.github.atraxsrc.Apsis.Helper1` |
-| `List() -> (sssa(sss)as)` | `(device, uuid, mode, [(name, tags, comment)], warnings)`; polkit `list`, not interactive. Unchanged for older applets |
-| `ListWithUsage() -> ((sssa(sss)as)a{st})` | `List`'s reply plus the backup device's usage in bytes: `total`, `used`, `free` (all or none, from `statvfs`) and `reported-free` (Timeshift's `X GB free` line); missing keys mean unknown, unknown keys are ignored. Same polkit `list`. The applet calls this and falls back to `List` on `UnknownMethod` |
-| `Create(s comment)` | polkit `create`, interactive; returns once started |
-| `Delete(s name)` | polkit `delete`, interactive; returns once started |
-| `ReadSettings() -> (ssa(ssb)b)` | `(timeshift.json text, lsblk JSON, [(user, home, encrypted)], timeshift-gtk open)`; polkit `list`, not interactive |
-| `WriteSettings(s expected, (sbbabauas) settings) -> s` | polkit `configure`, interactive; writes `/etc/timeshift/timeshift.json`, returns once done (see below) |
-| `NativeList() -> (sssa(sss)as)` | native backend list, same shape as `List`; polkit `list`, not interactive |
-| `NativeListWithUsage() -> ((sssa(sss)as)a{st})` | `NativeList` plus usage, as `ListWithUsage`; `statvfs` on `/run/apsis/backup` while mounted |
-| `NativeDryRun(s comment) -> s` | the native create's plan as text, also logged; nothing written; polkit `list`, not interactive |
-| `NativeCreate(s comment)` | native rsync snapshot; polkit `create`, interactive; returns once started, `Finished("create", ..)` follows |
+| `NativeListWithUsage() -> ((sssa(sss)as)a{st})` | `(device, uuid, mode, [(name, tags, comment)], warnings)` and the backup device's usage in bytes (`total`, `used`, `free`, all or none, `statvfs` while mounted); polkit `list`, not interactive |
+| `NativeCreate(s comment)` | a snapshot; polkit `create`, interactive; returns once started, `Finished("create", ..)` follows |
+| `Delete(s name)` | one snapshot (see Backend above), only a name the fresh list has; polkit `delete`, interactive; returns once started, `Finished("delete", ..)` follows |
+| `ReadConfig() -> (s(sas)sa(ssb)as)` | `(config.toml text or empty, the config in effect, lsblk JSON, [(user, home, encrypted)], import notes)`; polkit `list`, not interactive |
+| `WriteConfig(s expected, (sas) config) -> s` | writes `/etc/apsis/config.toml` if it still reads `expected` (empty: none yet); polkit `configure`, interactive; returns once done |
 | `Browse(s snapshot, s path) -> (a(sstxuuussstx)b)` | one folder of a snapshot, see below; polkit `browse`, interactive |
 | `Restore(s snapshot, as paths, s destination, b dry_run)` | polkit `browse` (dry run), `restore` (folder) or `restore-original` (original), interactive; returns once started, `Finished("restore", ..)` follows with the plan or result |
-| `Progress(s op, d percent, x eta_seconds, s text)` | signal, only to the caller, while a create or real restore runs: at most one per 500 ms (the `100%` one always), all sent before `Finished`; `-1` = unknown. The first has no numbers (progress will come). From Timeshift's `% complete` line or rsync's `--info=progress2` |
+| `Progress(s op, d percent, x eta_seconds, s text)` | signal, only to the caller, while a create or real restore runs: at most one per 500 ms (the `100%` one always), all sent before `Finished`; `-1` = unknown. The first has no numbers (progress will come). From rsync's `--info=progress2` |
 | `Finished(s op, b ok, s message)` | signal, sent only to the caller that started the operation; `message` is the error, or for a restore the plan/result text |
-| errors | `...Helper1.Error.{NotAuthorized,Busy,InvalidInput,NotInstalled,DeviceNotFound,Failed,Changed}` |
+| errors | `...Helper1.Error.{NotAuthorized,Busy,InvalidInput,Failed,DeviceNotFound,Changed}` |
 
-In `Finished` and `Failed`, `helper::encode_error` prefixes a restore refusal with `refused: `
-and an rsync failure with `restore failed: `, so the client gets `Error::InvalidInput` /
-`Error::Restore` back.
+`helper::encode_error` keeps an error's kind across the bus (a missing disk, a refusal
+`refused: `, a failed restore `restore failed: `); anything else is its text.
 
 Each call, in order:
-1. Input checked again (`validate_comment`, snapshot name pattern); the applet isn't trusted.
-2. Create/Delete: refused with `Busy` if Timeshift is already running, before any password dialog.
+1. Input checked again (`validate_comment`, snapshot name pattern, the config); the applet
+   isn't trusted.
+2. Refused with `Busy` if another operation runs, before any password dialog.
 3. polkit `CheckAuthorization` with subject `system-bus-name` = the caller's unique bus name (not
-   a PID, so a reused PID can't inherit an answer); `AllowUserInteraction` for create/delete.
-   No answer from polkit counts as a no.
-4. The single-operation lock is taken; a second call gets `Busy`, never waits in a queue.
-5. `timeshift` runs with a fixed argv, found on a fixed `PATH`, with a cleared environment
-   (`HOME=/root`, `USER`/`LOGNAME=root`, `LC_ALL=C.UTF-8`) and stdin null. Create and delete run
-   a fresh `--list` first and target the device it reports; delete only deletes a name in it.
-6. Create/Delete return as soon as Timeshift starts. When it ends, the lock is released and
-   `Finished` is sent to the caller. A Timeshift failure's message carries the exit code and
-   Timeshift's last 5 lines (its `E:`/`W:` lines, which it prints on stdout, plus stderr); a
-   missing disk carries the device (`helper::encode_error`).
-7. Every call and its result is logged to the journal (`journalctl -u apsis-helper`); comments
-   are cut to 40 characters.
+   a PID, so a reused PID can't inherit an answer); `AllowUserInteraction` for everything but
+   `list`. No answer from polkit counts as a no.
+4. The single-operation lock is taken; a second call gets `Busy`, never waits in a queue. Every
+   use of the backup mount point goes through it.
+5. Tools run with a fixed argv, found on a fixed `PATH`, with a cleared environment
+   (`HOME=/root`, `USER`/`LOGNAME=root`, `LC_ALL=C.UTF-8`) and stdin null.
+6. The backup device from the config is mounted at `/run/apsis/backup` by UUID for the call:
+   `ro,nosuid,nodev,noexec` for list, browse and restore, `rw,nosuid,nodev` for create and
+   delete; unmounted when the call ends. Encrypted devices and anything that isn't a Linux
+   filesystem are refused.
+7. Create, delete and restore return as soon as they start. When they end, the lock is
+   released and `Finished` is sent to the caller.
+8. Every call and its result is logged to the journal (`journalctl -u apsis-helper`); comments
+   are cut to 40 characters. A delete logs `delete "<name>" for :1.42: started`, the path it
+   deleted, and `done` or the reason.
 
 Long operations don't depend on any D-Bus call timeout: the only long wait inside a method
 call is the password dialog, and zbus sets no call timeout by default. The applet waits for
 `Finished`, or for the helper to leave the bus without sending one, which it reports as an error.
 
-Progress: the runners read the child's stdout as it comes, in pieces split on `\r` and `\n`
-(`Runner::run_streaming`, `progress::read_segments`); progress lines go to the operation's
-`ProgressSink` and are left out of the stdout kept for error messages and restore plans. The
-sink throttles and hands updates to a separate task that sends `Progress`, so a slow bus never
-holds up Timeshift or rsync; that task is awaited before `Finished` goes out. pkexec's runner
-doesn't stream.
-
-The helper exits after 60 s with no call open and nothing running. It never exits while
-Timeshift runs or a call (including one waiting for the password dialog) is open, and it waits
+The helper exits after 60 s with no call open and nothing running. It never exits while an
+operation runs or a call (including one waiting for the password dialog) is open, and it waits
 until each `Finished` is sent. The next call starts it again.
-
-### Native backend (phase 5)
-
-`NativeList`, `NativeDryRun` and `NativeCreate` build the backend from the system
-(`apsis-helper/src/native.rs`), holding the single-operation lock:
-
-1. Timeshift's settings file (read only): the backup device UUID and the user filters. btrfs
-   mode is refused (rsync only for now), as is a device that isn't connected, is encrypted, or
-   isn't a Linux filesystem (Timeshift unlocks LUKS; the native backend doesn't).
-2. `lsblk` for the device, `findmnt --noheadings --output UUID --mountpoint /` for `sys-uuid`,
-   `/etc/lsb-release` or `/etc/os-release` for `sys-distro`, `/etc/fstab` and `/etc/passwd`
-   (with ecryptfs folders) for the exclude list.
-3. Whatever is mounted at `/run/apsis/backup` is unmounted, then `mount -o
-   ro|rw,nosuid,nodev /dev/disk/by-uuid/<uuid> /run/apsis/backup`: read-only for list and dry
-   run, read-write for create. Unmounted when the call ends.
-4. `NativeCreate` is refused (`Busy`) while a Timeshift holds its lock
-   (`/var/run/lock/timeshift/lock` with a live `timeshift` PID), checked before the password
-   dialog and again after it.
-
-Native create runs rsync as root over the whole of `/` with Timeshift's filters, like Timeshift.
 
 ### File-level restore (phase 6a)
 
 `apsis_core::restore` has the rules and runs rsync; it needs no root, so the tests run it on
 folders of their own and on the ext4 image. The helper (`apsis-helper/src/restore.rs`) adds the
-real places: the backup device from Timeshift's settings (`native::backup_device`, rsync mode,
-unencrypted) mounted `ro,nosuid,nodev,noexec` at `/run/apsis/backup` for one call, the running
-system at `/`, the caller's uid from the bus (`GetConnectionUnixUser`) with home and gid from
-`/etc/passwd`, names from `/etc/passwd` and `/etc/group`.
+real places: the backup device from the config (`native::backup_device`, unencrypted) mounted
+`ro,nosuid,nodev,noexec` at `/run/apsis/backup` for one call, the running system at `/`, the
+caller's uid from the bus (`GetConnectionUnixUser`) with home and gid from `/etc/passwd`, names
+from `/etc/passwd` and `/etc/group`.
 
-- Both methods take the single-operation lock (they share the mount point with the native
-  backend) and are refused (`Busy`) while another operation runs. A real restore is also
-  refused while Timeshift holds its lock, before and after the password dialog.
+- Both methods take the single-operation lock and are refused (`Busy`) while another operation
+  runs.
 - Paths: `SnapPath` (absolute, no NUL, no empty/`.`/`..` component) resolved under
   `timeshift/snapshots/<name>/localhost/` with `lstat` one component at a time; a symlink
   before the last component is refused, a last-component symlink is copied as a link unless
@@ -198,44 +203,17 @@ system at `/`, the caller's uid from the bus (`GetConnectionUnixUser`) with home
   started`, then the summary with the uid and `done`, or the error. Browse logs the folder and
   the entry count.
 
-### Settings (phase 4.5)
-
-`WriteSettings(expected, settings)` edits `/etc/timeshift/timeshift.json` and nothing else. The
-settings are `(backup device UUID, btrfs mode, include @home, [5 schedules], [5 counts],
-[filters])`, levels monthly, weekly, daily, hourly, boot. In order:
-
-1. Refused with `Busy` if Timeshift is running, then polkit `configure` (password, cached).
-2. The single-operation lock is taken, so no list, create or delete runs meanwhile.
-3. `lsblk` (fixed argv, `settings::LSBLK_ARGS`) for the connected devices.
-4. The file is read; if it isn't exactly `expected` (what the caller read), `Changed`.
-5. `settings::edit` checks and applies them (`InvalidInput` with the reason if not): a new
-   device must be connected, unencrypted and a Linux filesystem (btrfs in btrfs mode); btrfs mode
-   needs a btrfs filesystem; counts 1-999; filters not blank, no control characters, no
-   duplicates. Only Timeshift's own fields change, all written as strings like Timeshift writes
-   them; every other field stays in place. The result must read back as exactly the settings.
-6. The old file is copied to `timeshift.json.bak`, then the new text replaces the file: temp file
-   in `/etc/timeshift/`, `fsync`, `rename`, `fsync` of the folder. The mode is kept. The file is
-   checked against `expected` again just before the swap.
-7. The remembered `--snapshot-device` is dropped, and one `timeshift --list` runs: every Timeshift
-   run syncs its cron jobs (`/etc/cron.d/timeshift-{hourly,boot}`) with the settings on exit, so
-   this puts the new schedule in place. If that list fails, the settings stay written and the
-   returned text says so; an empty text means all went well.
-
-The applet asks the bus before each list/create/delete whether the helper is installed
-(activatable) or running. If it is, the helper is used. If not, or there's no system bus, it
-falls back to pkexec. An installed helper that fails is reported as an error, not replaced by
-pkexec.
-
 ## Theming
 
 - libcosmic widgets pick up the computed COSMIC theme automatically and update live.
 - Use theme tokens only (`cosmic::theme::active()` palette / container styles). No hex literals.
 - Monospace everywhere in the popup via libcosmic's monospace font.
 
-## Files installed (by `just install`, run by the user)
+## Files installed (by `just install` or the .deb)
 
 - `/usr/bin/apsis`
 - `/usr/share/applications/<app-id>.desktop` (with `X-CosmicApplet=true` as the template sets)
+  and `<app-id>.Window.desktop` (the launcher entry, `apsis --window`)
 - `/usr/share/icons/hicolor/{scalable,symbolic}/apps/<app-id>{,-symbolic}.svg`
 - `/usr/share/metainfo/<app-id>.metainfo.xml`
 - `/usr/share/man/man1/apsis.1.gz` - `docs/apsis.1`, gzipped with `-9n`
@@ -243,8 +221,11 @@ pkexec.
 - `/usr/share/dbus-1/system-services/io.github.atraxsrc.Apsis.Helper.service` - D-Bus activation
 - `/usr/share/dbus-1/system.d/io.github.atraxsrc.Apsis.Helper.conf` - bus policy
 - `/usr/lib/systemd/system/apsis-helper.service` - `Type=dbus`, no `[Install]`, not sandboxed
-  (Timeshift needs the whole filesystem and mounts)
+  (a snapshot reads the whole filesystem, and the helper mounts devices)
 - `/usr/share/polkit-1/actions/io.github.atraxsrc.Apsis.policy` - the seven actions
+
+Made at run time: `/etc/apsis/config.toml` (and `.bak`), by the helper; the .deb's postrm
+removes `/etc/apsis/` on purge.
 
 The activation file and unit come from `resources/helper/*.in` with `@libexecdir@` filled in.
 Afterwards `just install` runs `systemctl daemon-reload` and the bus's `ReloadConfig` (dbus-broker

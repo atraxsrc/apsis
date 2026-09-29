@@ -1,6 +1,9 @@
 #!/bin/sh
 # The unit, activation file and bus policy are gone: let systemd and the system bus forget
 # them. As in postinst, neither may be running, which isn't an error.
+#
+# On purge, Apsis's config goes too: /etc/apsis/ (config.toml and its .bak), written by the
+# helper. Snapshots on the backup disk are never touched.
 set -e
 
 case "$1" in
@@ -10,6 +13,12 @@ case "$1" in
         fi
         busctl call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus \
             ReloadConfig >/dev/null 2>&1 || true
+        ;;
+esac
+
+case "$1" in
+    purge)
+        rm -rf /etc/apsis
         ;;
 esac
 

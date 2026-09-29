@@ -112,21 +112,17 @@ pub struct Snapshot {
 /// The result of listing snapshots on the backup device.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SnapshotList {
-    /// Backup device path as reported by Timeshift. `None` when no device is selected.
+    /// Backup device path (`/dev/sdX1`). `None` when no device is selected.
     pub device: Option<String>,
     /// Filesystem UUID of the backup device.
     pub uuid: Option<String>,
     pub mode: Option<Mode>,
     pub snapshots: Vec<Snapshot>,
-    /// What Timeshift complained about in an otherwise good list: its `E:`/`W:` lines (e.g.
-    /// `E: Failed to remove directory` after a stale mount), and table lines that weren't
-    /// snapshot rows. Shown to the user; they don't fail the list.
+    /// Problems in an otherwise good list: folders that aren't complete snapshots, a leftover
+    /// staging folder. Shown to the user; they don't fail the list.
     pub warnings: Vec<String>,
-    /// Free space Timeshift reported (`5 snapshots, 123.4 GB free`), rounded as it printed it.
-    /// `None` when it didn't say (no device, no snapshots, the native backend).
-    pub reported_free: Option<u64>,
-    /// The backup filesystem's size, used and free space from `statvfs`, when `apsis-helper`
-    /// found it mounted. `None` means unknown: the applet shows no bar then.
+    /// The backup filesystem's size, used and free space from `statvfs` while `apsis-helper`
+    /// has it mounted. `None` means unknown: the applet shows no bar then.
     pub usage: Option<DiskUsage>,
 }
 

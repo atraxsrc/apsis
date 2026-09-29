@@ -1,10 +1,10 @@
 .\" SPDX-License-Identifier: GPL-3.0-only
 .\" Man page for apsis, written directly in roff. Check with: man -l docs/apsis.1
-.TH APSIS 1 "2026-09-27" "apsis 0.1.2" "User Commands"
+.TH APSIS 1 "2026-09-29" "apsis 0.2.0" "User Commands"
 .\" No hyphenation: action names and paths must stay whole.
 .nh
 .SH NAME
-apsis \- Timeshift-style system snapshots for the COSMIC desktop
+apsis \- simple system snapshots and file restore for the COSMIC desktop
 .SH SYNOPSIS
 .B apsis
 .br
@@ -12,10 +12,18 @@ apsis \- Timeshift-style system snapshots for the COSMIC desktop
 .B \-\-window
 .SH DESCRIPTION
 .B apsis
-is a panel applet for the COSMIC desktop that lists, creates, deletes and browses
-.BR timeshift (1)
-system snapshots, restores single files from them, and edits Timeshift's settings.
+is a panel applet for the COSMIC desktop that creates, lists, deletes and browses rsync
+system snapshots on a backup disk, and restores single files from them.
 Its popup looks like a small terminal and follows the COSMIC theme.
+.PP
+Snapshots are kept in Timeshift's on\-disk layout
+.RI ( timeshift/snapshots/<name>/
+on the backup disk), so snapshots Timeshift made are listed, browsed, restored from and
+deleted like Apsis's own.
+Apsis doesn't need or run Timeshift.
+It is manual only: there is no schedule, and a snapshot is only deleted when the user deletes
+it.
+Encrypted (LUKS) backup disks aren't supported yet.
 .PP
 Started by the COSMIC panel,
 .B apsis
@@ -24,13 +32,11 @@ Started anywhere else (the app launcher, a terminal), or with
 .BR \-\-window ,
 it shows the same view in a normal window.
 .PP
-Everything that needs root (creating, deleting, browsing, restoring, writing settings) goes
-through
+Everything that needs root (listing, creating, deleting, browsing, restoring, writing the
+settings) goes through
 .BR apsis\-helper ,
 a small system service started on demand over D\-Bus, and polkit asks for the password.
-Without the helper, create, delete and list fall back to
-.BR pkexec (1),
-which asks every time.
+Apsis doesn't work without it.
 .SH OPTIONS
 .TP
 .B \-\-window
@@ -51,6 +57,7 @@ Move the selection.
 Create a snapshot; type a comment at the
 .B >
 line, then Enter.
+rsync runs at idle I/O priority and nice 19.
 .TP
 .B d
 Delete the marked snapshots, or the selected one if none are marked; type
@@ -65,8 +72,8 @@ Mark or unmark the selected snapshot for deletion.
 Mark or unmark, then move down.
 .TP
 .B p
-Prune: show which old manual snapshots
-.B keep manual
+Prune: show which old snapshots
+.B keep
 would delete, and delete them after
 .B y
 and Enter.
@@ -114,56 +121,43 @@ Read the folder again.
 Change the selected row.
 .TP
 .BR + ", " \- ", " e
-Keep one more, one fewer, or type the count.
+One more, one fewer, or type the number (keep, remind).
 .TP
 .BR a ", " x
 Add a filter, remove the selected filter.
 .TP
 .B w
-Write the settings to Timeshift.
+Write the settings (password asked).
 .TP
 .B r
 Read them again, dropping changes.
 .SH SETTINGS
-These are Timeshift's own settings, in
-.IR /etc/timeshift/timeshift.json ,
-except the
-.B apsis
-section.
-Changes are kept until
+The backup device and filters are Apsis's config,
+.IR /etc/apsis/config.toml ,
+written by
+.B apsis\-helper
+when
 .B w
-writes them.
+is pressed.
+Before it exists, the settings show what was read from Timeshift's
+.I /etc/timeshift/timeshift.json
+(the backup device and filter list; the file is only read), and
+.B w
+saves that as Apsis's own.
 .TP
 .B device
 The disk or partition snapshots go to: a Linux filesystem, not encrypted.
 Prefer another disk than the system one.
 .TP
-.B mode
-.B rsync
-copies the system to the backup device; later snapshots only copy what changed.
-.B btrfs
-(only on btrfs systems) snapshots the
-.B @
-subvolume, and
-.B @home
-if chosen, on the system disk.
-.TP
-.B schedule
-Monthly, weekly, daily, hourly and boot snapshots, each on or off, with a count to keep.
-Timeshift removes older scheduled snapshots past the count; on-demand snapshots, and
-scheduled ones (other than boot) with a comment, are kept.
-.TP
 .B home
-Per user, in rsync mode:
+Per user:
 .B excluded
-(nothing from the home folder),
+(nothing from the home folder, the default),
 .B hidden files only
-(dot-files and dot-folders, i.e. settings), or
+(dot\-files and dot\-folders, i.e. settings), or
 .B everything
 (all files).
-With
-.BR everything ,
-a full system restore also rolls documents back.
+Kept as Timeshift's patterns in the filter list.
 .TP
 .B filters
 rsync patterns: plain ones exclude, a leading
@@ -178,42 +172,39 @@ starts at the root.
 For example
 .I /var/lib/libvirt/**
 leaves out virtual machine images.
+Built\-in excludes (caches, /proc, /tmp, other mounts) are always added.
 .TP
-.B apsis backend
-.B timeshift
-(default) runs Timeshift for everything;
-.B native rsync
-(experimental) has Apsis make rsync snapshots itself, in Timeshift's layout.
-Saved at once, not by
-.BR w .
-.TP
-.B apsis dry run
-With the native backend,
-.B c
-only shows the plan and writes nothing.
-.TP
-.B apsis keep manual
-Off by default.
-Keeps the newest N on-demand snapshots without a comment
+.B apsis keep
+Per user, saved at once; off by default.
+Keeps the newest N snapshots without a comment
 (commented ones are pinned: kept, and not counted);
 .B p
 previews and, after
 .BR y ,
-deletes older ones that have no comment and no other tag.
+deletes the older ones.
 The newest snapshot is never deleted.
 .TP
 .B apsis remind
+Per user, saved at once.
 The panel icon turns the warning colour when the newest snapshot is older than this many
 days (default 7; 0 turns it off).
 .SH FILES
 .TP
+.I /etc/apsis/config.toml
+Apsis's config: the backup device's UUID and the filters.
+Written only by
+.BR apsis\-helper ,
+0644, owned by root; the previous file is kept as
+.IR config.toml.bak .
+.TP
 .I /etc/timeshift/timeshift.json
-Timeshift's settings, read and written by the settings view (the old file is kept as
-.IR timeshift.json.bak ).
+Timeshift's settings, read once for the import while there is no
+.IR config.toml ;
+never written.
 .TP
 .I ~/Apsis-restored/<snapshot>/
-Where folder-mode restores go, owned by the user.
-Original-mode restores keep each replaced file as
+Where folder\-mode restores go, owned by the user.
+Original\-mode restores keep each replaced file as
 .IR <name>.apsis-before-<snapshot> .
 .TP
 .I /usr/libexec/apsis-helper
@@ -233,12 +224,20 @@ The applet runs as the user and never as root.
 .B apsis\-helper
 checks each call with polkit, against the caller's D\-Bus name, and runs one operation at a
 time.
+It mounts the backup disk (by UUID, nosuid, nodev) for the length of one call, read\-only
+except for a create or a delete.
+A delete only removes a folder named like a snapshot under
+.IR timeshift/snapshots/ ,
+reached without any symlink, with an
+.IR info.json ,
+and with nothing mounted inside it; it never follows a symlink or crosses into another
+filesystem, and then removes only that snapshot's tag links.
 Calls and results are logged to the journal
 .RB ( "journalctl \-u apsis\-helper" ).
 For the active session:
 .TP
 .B io.github.atraxsrc.Apsis.list
-Listing snapshots and reading settings: no password.
+Listing snapshots and reading the settings: no password.
 .TP
 .B io.github.atraxsrc.Apsis.create
 .TQ
@@ -249,7 +248,7 @@ Listing snapshots and reading settings: no password.
 .B io.github.atraxsrc.Apsis.browse
 .TQ
 .B io.github.atraxsrc.Apsis.restore
-Creating, deleting, writing settings, browsing and folder-mode restores: the password,
+Creating, deleting, writing the settings, browsing and folder\-mode restores: the password,
 remembered for a few minutes
 .RB ( auth_admin_keep ).
 .TP
@@ -259,9 +258,8 @@ Restoring files over the running system: the password every time
 .PP
 Inactive and remote sessions need the password for every action.
 .SH SEE ALSO
-.BR timeshift (1),
-.BR pkexec (1),
 .BR polkit (8),
-.BR rsync (1)
+.BR rsync (1),
+.BR timeshift (1)
 .PP
 https://github.com/atraxsrc/apsis

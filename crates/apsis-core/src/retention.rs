@@ -1,40 +1,35 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! "Keep the last N manual snapshots": which on-demand snapshots to delete. Pure; the applet
-//! shows the plan and deletes only after `y`, one snapshot at a time through the helper.
+//! "Keep the last N snapshots": which snapshots to delete. Pure; the applet shows the plan and
+//! deletes only after `y`, one snapshot at a time through the helper. Nothing is ever deleted
+//! without that.
 //!
 //! Commented snapshots are pinned: they are never removed and don't count towards N, so N is
-//! the number of uncommented on-demand snapshots kept (unlike Timeshift, whose levels count
-//! commented ones, `SnapshotRepo.vala:638-688` in 24.01.1). The uncommented ones past the
-//! count are candidates, newest first. A candidate is deleted only if on-demand is its only
-//! tag: the `timeshift` command line can't take one tag off, and a snapshot that is also
-//! hourly, daily... is Timeshift's retention's to handle. And the newest snapshot is never
-//! deleted.
+//! the number of uncommented snapshots kept. Tags don't matter (snapshots Timeshift's schedule
+//! took count like any other). The newest snapshot is never deleted.
 
 use std::cmp::Reverse;
 
-use crate::model::{Snapshot, Tag};
+use crate::model::Snapshot;
 
 /// Why a manual snapshot past the count stays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kept {
-    /// One of the newest N uncommented manual snapshots.
+    /// One of the newest N uncommented snapshots.
     Recent,
     /// It has a comment: pinned, and not counted towards N.
     Comment,
-    /// It has other tags too (boot, hourly...): Timeshift's retention decides.
-    OtherTags,
     /// The newest snapshot of all. Can't happen with a count of at least 1 (it's then among
     /// the newest N); kept as a guard.
     Newest,
 }
 
-/// What keeping the last `keep` manual snapshots means for a list.
+/// What keeping the last `keep` snapshots means for a list.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ManualPlan {
     /// Names to delete, oldest first.
     pub delete: Vec<String>,
-    /// Every other manual snapshot and why it stays, newest first.
+    /// Every other snapshot and why it stays, newest first.
     pub kept: Vec<(String, Kept)>,
 }
 
@@ -44,8 +39,8 @@ impl ManualPlan {
     }
 }
 
-/// The plan for keeping the newest `keep` uncommented manual (on-demand) snapshots of
-/// `snapshots`, plus every commented one. `keep == 0` means the setting is off: nothing to
+/// The plan for keeping the newest `keep` uncommented snapshots of `snapshots`, plus every
+/// commented one. `keep == 0` means the setting is off: nothing to
 /// delete.
 #[must_use]
 pub fn manual(snapshots: &[Snapshot], keep: u32) -> ManualPlan {
@@ -57,10 +52,7 @@ pub fn manual(snapshots: &[Snapshot], keep: u32) -> ManualPlan {
         .iter()
         .max_by_key(|s| (s.created, &s.name))
         .map(|s| s.name.as_str());
-    let mut manual: Vec<&Snapshot> = snapshots
-        .iter()
-        .filter(|s| s.tags.contains(&Tag::OnDemand))
-        .collect();
+    let mut manual: Vec<&Snapshot> = snapshots.iter().collect();
     manual.sort_by_key(|s| Reverse((s.created, &s.name)));
     let keep = usize::try_from(keep).unwrap_or(usize::MAX);
     let mut counted = 0;
@@ -74,8 +66,6 @@ pub fn manual(snapshots: &[Snapshot], keep: u32) -> ManualPlan {
         } else if counted < keep {
             counted += 1;
             Some(Kept::Recent)
-        } else if snapshot.tags.iter().any(|&t| t != Tag::OnDemand) {
-            Some(Kept::OtherTags)
         } else if Some(snapshot.name.as_str()) == newest {
             Some(Kept::Newest)
         } else {
@@ -93,7 +83,7 @@ pub fn manual(snapshots: &[Snapshot], keep: u32) -> ManualPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::parse_snapshot_name;
+    use crate::model::{Tag, parse_snapshot_name};
 
     fn snap(name: &str, tags: &[Tag], comment: Option<&str>) -> Snapshot {
         Snapshot {
@@ -183,45 +173,29 @@ mod tests {
     }
 
     #[test]
-    fn uncommented_multi_tag_ones_count_towards_n() {
-        // An on-demand snapshot that is also hourly is uncommented on-demand: it takes a slot.
-        let all = vec![
-            o(DAYS[0]),
-            o(DAYS[1]),
-            snap(DAYS[2], &[Tag::OnDemand, Tag::Hourly], None),
-        ];
-        let plan = manual(&all, 1);
-        assert_eq!(plan.delete, names(&DAYS[..2]));
-        assert_eq!(plan.kept, [(DAYS[2].to_owned(), Kept::Recent)]);
-    }
-
-    #[test]
-    fn scheduled_and_multi_tag_snapshots_are_left_to_timeshift() {
+    fn tags_dont_matter() {
+        // Snapshots Timeshift's schedule took, or with no tag at all, count like the others.
         let all = vec![
             snap(DAYS[0], &[Tag::Daily], None),
             snap(DAYS[1], &[Tag::OnDemand, Tag::Hourly], None),
-            o(DAYS[2]),
-            snap(DAYS[3], &[Tag::Boot], None),
+            snap(DAYS[2], &[], None),
+            snap(DAYS[3], &[Tag::Boot], Some("pinned")),
             o(DAYS[4]),
         ];
         let plan = manual(&all, 1);
-        // Only on-demand-only ones go; daily and boot aren't manual at all.
-        assert_eq!(plan.delete, names(&[DAYS[2]]));
-        assert!(plan.kept.contains(&(DAYS[1].to_owned(), Kept::OtherTags)));
-        assert!(!plan.kept.iter().any(|(n, _)| n == DAYS[0] || n == DAYS[3]));
-    }
-
-    #[test]
-    fn untagged_snapshots_are_not_manual() {
-        // Timeshift would delete a tagless one; this setting doesn't touch it.
-        let all = vec![snap(DAYS[0], &[], None), o(DAYS[1]), o(DAYS[2])];
-        let plan = manual(&all, 1);
-        assert_eq!(plan.delete, names(&[DAYS[1]]));
+        assert_eq!(plan.delete, names(&DAYS[..3]));
+        assert_eq!(
+            plan.kept,
+            [
+                (DAYS[4].to_owned(), Kept::Recent),
+                (DAYS[3].to_owned(), Kept::Comment)
+            ]
+        );
     }
 
     #[test]
     fn the_newest_snapshot_is_never_deleted() {
-        // With N >= 1 the newest manual one is always among the newest N; the `Newest` guard
+        // With N >= 1 the newest one is always among the newest N; the `Newest` guard
         // is there in case that ever changes. Checked for every count and position.
         for keep in 1..=7 {
             for comment_at in 0..DAYS.len() {
@@ -235,13 +209,5 @@ mod tests {
                 assert_eq!(plan.delete.len() + plan.kept.len(), DAYS.len());
             }
         }
-    }
-
-    #[test]
-    fn a_newer_scheduled_snapshot_doesnt_change_the_manual_count() {
-        let mut all: Vec<_> = DAYS[..3].iter().map(|d| o(d)).collect();
-        all.push(snap("2026-09-28_00-00-00", &[Tag::Hourly], None));
-        let plan = manual(&all, 2);
-        assert_eq!(plan.delete, names(&[DAYS[0]]));
     }
 }

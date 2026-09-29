@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The native rsync backend as the helper runs it: the backup device named in Timeshift's
-//! settings, mounted at [`MOUNT_POINT`] for the length of one call, and the rest of what a
-//! snapshot is taken with (this system's `/` UUID, distribution, `/etc/fstab`, the filters).
+//! The native rsync backend as the helper runs it: the backup device named in Apsis's config,
+//! mounted at [`MOUNT_POINT`] for the length of one call, and the rest of what a snapshot is
+//! taken with (this system's `/` UUID, distribution, `/etc/fstab`, the filters).
 //!
-//! Timeshift's settings are only read here. List and dry run mount the device read-only.
+//! List, browse and restore mount the device read-only; create and delete read-write.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use apsis_core::config::Config;
 use apsis_core::native::exclude::{self, HomeUser};
 use apsis_core::native::{self, NativeConfig, NativeRsync, QuietRunner};
-use apsis_core::settings::{self, Config, Device};
+use apsis_core::settings::{self, Device};
 use apsis_core::{Error, Result, Runner};
 
 use crate::runner::SAFE_PATH;
@@ -31,7 +32,7 @@ pub const FINDMNT_ROOT_UUID: [&str; 5] = [
     "--mountpoint",
 ];
 
-/// Read-only (list, dry run) or read-write (create).
+/// Read-only (list, browse, restore) or read-write (create, delete).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
     ReadOnly,
@@ -43,19 +44,17 @@ pub enum Access {
 ///
 /// # Errors
 ///
-/// btrfs mode, no backup device, the device not connected, or one Apsis doesn't mount
-/// (encrypted, not a Linux filesystem).
+/// No backup device, the device not connected, or one Apsis doesn't mount (encrypted, not a
+/// Linux filesystem).
 pub fn config(
-    timeshift_json: &str,
+    apsis: &Config,
     lsblk_json: &str,
     root_uuid: &str,
     distro: String,
     fstab: &str,
     users: &[HomeUser],
-    dry_run: bool,
 ) -> Result<(NativeConfig, Device)> {
-    let settings = Config::parse(timeshift_json)?.settings();
-    let device = backup_device(timeshift_json, lsblk_json)?;
+    let device = backup_device(apsis, lsblk_json)?;
     let config = NativeConfig {
         repo: PathBuf::from(MOUNT_POINT),
         device: Some(device.path()),
@@ -63,26 +62,20 @@ pub fn config(
         source: PathBuf::from("/"),
         sys_uuid: root_uuid.trim().to_owned(),
         sys_distro: distro,
-        exclude: exclude::for_backup(&settings.exclude, fstab, users),
-        dry_run,
+        exclude: exclude::for_backup(&apsis.filters, fstab, users),
+        dry_run: false,
     };
     Ok((config, device))
 }
 
-/// The backup device Timeshift's settings name, as lsblk shows it: connected, rsync mode, and
-/// one Apsis mounts itself (unencrypted, a Linux filesystem).
+/// The backup device Apsis's config names, as lsblk shows it: connected, and one Apsis mounts
+/// itself (unencrypted, a Linux filesystem).
 ///
 /// # Errors
 ///
-/// btrfs mode, no backup device, the device not connected, encrypted or not a Linux filesystem.
-pub fn backup_device(timeshift_json: &str, lsblk_json: &str) -> Result<Device> {
-    let settings = Config::parse(timeshift_json)?.settings();
-    if settings.btrfs_mode {
-        return Err(Error::Native(
-            "Timeshift is in btrfs mode; Apsis reads rsync snapshots only for now".to_owned(),
-        ));
-    }
-    let uuid = settings.backup_device_uuid;
+/// No backup device, the device not connected, encrypted or not a Linux filesystem.
+pub fn backup_device(apsis: &Config, lsblk_json: &str) -> Result<Device> {
+    let uuid = apsis.backup_device_uuid.clone();
     if uuid.is_empty() {
         return Err(Error::NoSnapshotDevice);
     }
@@ -95,8 +88,8 @@ pub fn backup_device(timeshift_json: &str, lsblk_json: &str) -> Result<Device> {
         })?;
     if !device.selectable() {
         return Err(Error::Native(format!(
-            "the backup device ({}, {}) is encrypted or not a Linux filesystem; Apsis doesn't \
-             unlock or mount those, Timeshift does",
+            "the backup device ({}, {}) is encrypted or not a Linux filesystem; encrypted \
+             backup disks aren't supported yet",
             device.path(),
             if device.fstype.is_empty() {
                 "no filesystem"
@@ -137,27 +130,28 @@ impl<R: Runner> Drop for Mounted<R> {
     }
 }
 
-/// The native backend on the backup device from Timeshift's settings, mounted for `access`.
-/// The device stays mounted while the returned guard lives; drop the backend first.
+/// The native backend on the backup device from Apsis's config (or, before it's saved, the
+/// import), mounted for `access`. The device stays mounted while the returned guard lives;
+/// drop the backend first.
 ///
 /// # Errors
 ///
-/// See [`config`]; also a failed `lsblk`, `findmnt` or `mount`.
+/// See [`config`]; also a failed `lsblk`, `findmnt` or `mount`, or a `config.toml` that
+/// can't be read.
 pub fn open<R: Runner + Clone>(
     runner: &R,
     access: Access,
-    dry_run: bool,
     log: impl Fn(&str) + Send + Sync + 'static,
 ) -> Result<(NativeRsync<QuietRunner>, Mounted<R>)> {
-    let text = Files::system().read()?;
     let devices = lsblk(runner)?;
+    let (apsis, _) = Files::system().effective(&settings::parse_lsblk(&devices)?, &[])?;
     let root_uuid = run(runner, &[&FINDMNT_ROOT_UUID[..], &["/"]].concat())?;
     let distro = native::distro::full_name(Path::new("/"));
     // Timeshift reads a missing fstab or passwd as empty.
     let fstab = fs::read_to_string("/etc/fstab").unwrap_or_default();
     let passwd = fs::read_to_string("/etc/passwd").unwrap_or_default();
     let users = exclude::home_users(&passwd, Path::new("/"));
-    let (config, device) = config(&text, &devices, &root_uuid, distro, &fstab, &users, dry_run)?;
+    let (config, device) = config(&apsis, &devices, &root_uuid, distro, &fstab, &users)?;
     let mounted = mount(runner, &device, access)?;
     let backend =
         NativeRsync::new(config, QuietRunner::new(SAFE_PATH).low_priority()).with_log(log);
@@ -178,60 +172,17 @@ fn mount<R: Runner + Clone>(runner: &R, device: &Device, access: Access) -> Resu
     })
 }
 
-/// The backup device from Timeshift's settings, mounted read-only (and `noexec`) at
+/// The backup device from Apsis's config, mounted read-only (and `noexec`) at
 /// [`MOUNT_POINT`] while the guard lives: for browsing and restoring.
 ///
 /// # Errors
 ///
 /// See [`backup_device`]; also a failed `lsblk` or `mount`.
 pub fn mount_backup<R: Runner + Clone>(runner: &R) -> Result<Mounted<R>> {
-    let text = Files::system().read()?;
-    let device = backup_device(&text, &lsblk(runner)?)?;
+    let devices = lsblk(runner)?;
+    let (apsis, _) = Files::system().effective(&settings::parse_lsblk(&devices)?, &[])?;
+    let device = backup_device(&apsis, &devices)?;
     mount(runner, &device, Access::ReadOnly)
-}
-
-/// The device a `timeshift --list` showed (`uuid`), mounted read-only (and `noexec`) at
-/// [`MOUNT_POINT`] while the guard lives: for the disk usage when nothing else has it mounted.
-/// Only a device lsblk shows with a Linux filesystem, as for the native backend.
-///
-/// # Errors
-///
-/// A failed `lsblk` or `mount`; the UUID not among the devices, or encrypted or not a Linux
-/// filesystem.
-pub fn mount_listed<R: Runner + Clone>(runner: &R, uuid: &str) -> Result<Mounted<R>> {
-    let devices = settings::parse_lsblk(&lsblk(runner)?)?;
-    let device = devices
-        .into_iter()
-        .find(|d| d.uuid == uuid)
-        .ok_or_else(|| Error::DeviceNotFound {
-            device: uuid.to_owned(),
-        })?;
-    if !device.selectable() {
-        return Err(Error::Native(format!(
-            "{} is encrypted or not a Linux filesystem",
-            device.path()
-        )));
-    }
-    mount(runner, &device, Access::ReadOnly)
-}
-
-/// Timeshift's lock file (`AppLock.create("timeshift", ...)`, `AppLock.vala:33-37`,
-/// `Main.vala:263`): `<pid>;<mode>`, held while any Timeshift (command line or window) runs.
-pub const TIMESHIFT_LOCK: &str = "/var/run/lock/timeshift/lock";
-
-/// The PID in Timeshift's lock file, if that process is a Timeshift: a `/proc/<pid>/exe` whose
-/// name contains `timeshift`, 26.09.0's test. 24.01.1 (`AppLock.vala:39-50`,
-/// `TeeJee.Process.vala:294-313`) counts any running process with that PID; this is stricter
-/// about what counts, so a stale lock whose PID was reused doesn't block a native create. A
-/// native create doesn't start while a Timeshift runs.
-pub fn timeshift_running() -> Option<u32> {
-    let text = fs::read_to_string(TIMESHIFT_LOCK).ok()?;
-    let pid: u32 = text.split(';').next()?.trim().parse().ok()?;
-    let exe = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-    exe.file_name()?
-        .to_string_lossy()
-        .contains("timeshift")
-        .then_some(pid)
 }
 
 /// Runs a fixed argv; its stdout, or an error with its stderr.
@@ -252,69 +203,59 @@ fn run(runner: &impl Runner, argv: &[&str]) -> Result<String> {
 mod tests {
     use super::*;
 
-    const CONFIG: &str = include_str!("../../apsis-core/tests/fixtures/config-rsync.json");
     const LSBLK: &str = include_str!("../../apsis-core/tests/fixtures/lsblk.json");
     const ROOT_UUID: &str = "22222222-2222-2222-2222-222222222222\n";
+    /// `sdb1` in the lsblk fixture.
+    const BACKUP_UUID: &str = "00000000-0000-0000-0000-000000000000";
 
-    fn configured() -> Result<(NativeConfig, Device)> {
-        config(
-            CONFIG,
+    fn apsis(uuid: &str) -> Config {
+        Config {
+            backup_device_uuid: uuid.to_owned(),
+            filters: vec!["+ /home/user1/**".to_owned(), "*.iso".to_owned()],
+        }
+    }
+
+    #[test]
+    fn config_follows_apsiss_config() {
+        let (config, device) = config(
+            &apsis(BACKUP_UUID),
             LSBLK,
             ROOT_UUID,
             "Pop 24.04 (noble)".to_owned(),
             "",
             &[],
-            true,
         )
-    }
-
-    #[test]
-    fn config_follows_timeshifts_settings() {
-        let settings = Config::parse(CONFIG).unwrap().settings();
-        let (config, device) = configured().unwrap();
+        .unwrap();
         assert_eq!(config.repo, Path::new(MOUNT_POINT));
         assert_eq!(config.source, Path::new("/"));
-        assert_eq!(
-            config.device_uuid.as_deref(),
-            Some(settings.backup_device_uuid.as_str())
-        );
-        assert_eq!(device.uuid, settings.backup_device_uuid);
+        assert_eq!(config.device_uuid.as_deref(), Some(BACKUP_UUID));
+        assert_eq!(device.uuid, BACKUP_UUID);
         assert_eq!(config.sys_uuid, "22222222-2222-2222-2222-222222222222");
-        assert!(config.dry_run);
+        assert!(!config.dry_run);
         assert_eq!(
             config.exclude,
-            exclude::for_backup(&settings.exclude, "", &[])
+            exclude::for_backup(&apsis(BACKUP_UUID).filters, "", &[])
         );
     }
 
     #[test]
-    fn btrfs_mode_and_missing_devices_are_refused() {
-        let btrfs = CONFIG.replace("\"btrfs_mode\" : \"false\"", "\"btrfs_mode\" : \"true\"");
-        assert_ne!(btrfs, CONFIG);
-        let result = config(&btrfs, LSBLK, ROOT_UUID, String::new(), "", &[], true);
+    fn missing_encrypted_and_unset_devices_are_refused() {
+        let open = |uuid: &str| config(&apsis(uuid), LSBLK, ROOT_UUID, String::new(), "", &[]);
+        assert!(matches!(
+            open("33333333-0000-0000-0000-000000000000"),
+            Err(Error::DeviceNotFound { .. })
+        ));
+        assert!(matches!(open(""), Err(Error::NoSnapshotDevice)));
+        // The unlocked LUKS filesystem.
+        let result = open("33333333-3333-3333-3333-333333333333");
         assert!(
-            matches!(result, Err(Error::Native(ref m)) if m.contains("btrfs")),
+            matches!(result, Err(Error::Native(ref m)) if m.contains("aren't supported yet")),
             "{result:?}"
         );
-
-        let settings = Config::parse(CONFIG).unwrap().settings();
-        let unplugged = LSBLK.replace(
-            &settings.backup_device_uuid,
-            "33333333-0000-0000-0000-000000000000",
-        );
-        let result = config(CONFIG, &unplugged, ROOT_UUID, String::new(), "", &[], true);
-        assert!(
-            matches!(result, Err(Error::DeviceNotFound { .. })),
-            "{result:?}"
-        );
-
-        let unset = CONFIG.replace(&settings.backup_device_uuid, "");
-        let result = config(&unset, LSBLK, ROOT_UUID, String::new(), "", &[], true);
-        assert!(matches!(result, Err(Error::NoSnapshotDevice)), "{result:?}");
     }
 
     #[test]
-    fn mount_is_by_uuid_and_read_only_unless_creating() {
+    fn mount_is_by_uuid_and_read_only_unless_writing() {
         assert_eq!(
             mount_argv("abcd", Access::ReadOnly),
             [

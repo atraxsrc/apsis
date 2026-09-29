@@ -1,3 +1,0 @@
-E: Device not found: '/dev/sdX1'
-E: Failed to remove directory
-Ret=256

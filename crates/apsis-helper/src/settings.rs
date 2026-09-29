@@ -1,76 +1,119 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Timeshift's settings file on disk: reading it with what the settings view needs, and
-//! replacing it safely.
+//! Apsis's config file on disk (`/etc/apsis/config.toml`): reading it (or, before there is
+//! one, importing Timeshift's settings), and replacing it safely.
 //!
 //! A write never leaves a half-written file: the new text goes to a temporary file next to it,
 //! is flushed to disk, then renamed over the old one (and the folder flushed too). The previous
-//! file is kept first as `timeshift.json.bak`, the same way. Checking and editing the text is
-//! `apsis_core::settings::edit`.
+//! file is kept first as `config.toml.bak`, the same way. Both are `0644`, owned by root (the
+//! helper). Checking the config is `apsis_core::config::validate`.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use apsis_core::helper::WireSettingsInfo;
-use apsis_core::settings::{self, BACKUP_PATH, CONFIG_PATH, LSBLK_ARGS, Settings};
+use apsis_core::config::{self, BACKUP_PATH, CONFIG_PATH, Config, TIMESHIFT_CONFIG};
+use apsis_core::helper::{WireConfigInfo, config_to_wire};
+use apsis_core::settings::{self, LSBLK_ARGS, User};
 use apsis_core::{Error, Result, Runner};
 
-/// Timeshift's settings file and its backup.
+/// The mode of `config.toml` and its backup.
+const MODE: u32 = 0o644;
+
+/// Apsis's config file, its backup, and Timeshift's settings (read once, for the import).
 pub struct Files {
     config: PathBuf,
     backup: PathBuf,
+    timeshift: PathBuf,
 }
 
 impl Files {
-    /// `/etc/timeshift/timeshift.json` and `.bak`.
+    /// `/etc/apsis/config.toml`, `.bak`, and `/etc/timeshift/timeshift.json`.
     pub fn system() -> Self {
-        Self::new(CONFIG_PATH.into(), BACKUP_PATH.into())
+        Self::new(
+            CONFIG_PATH.into(),
+            BACKUP_PATH.into(),
+            TIMESHIFT_CONFIG.into(),
+        )
     }
 
-    pub fn new(config: PathBuf, backup: PathBuf) -> Self {
-        Self { config, backup }
-    }
-
-    /// The file as it is.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InvalidConfig`] when there's none yet (Timeshift writes it on its first run).
-    pub fn read(&self) -> Result<String> {
-        fs::read_to_string(&self.config).map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound => {
-                Error::InvalidConfig("not found; open Timeshift once to set it up".to_owned())
-            }
-            _ => Error::Io(error),
-        })
-    }
-
-    /// Checks `settings` against the connected devices and writes them into the file, if it
-    /// still reads `expected`. Returns whether anything changed.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::SettingsChanged`], [`Error::InvalidSettings`], [`Error::InvalidConfig`], or
-    /// what lsblk or the filesystem reported.
-    pub fn write(&self, runner: &impl Runner, expected: &str, settings: &Settings) -> Result<bool> {
-        let devices = settings::parse_lsblk(&lsblk(runner)?)?;
-        let current = self.read()?;
-        if current != expected {
-            return Err(Error::SettingsChanged);
+    pub fn new(config: PathBuf, backup: PathBuf, timeshift: PathBuf) -> Self {
+        Self {
+            config,
+            backup,
+            timeshift,
         }
-        let text = settings::edit(&current, settings, &devices)?;
+    }
+
+    /// `config.toml` as it is; `None` when there's none yet.
+    ///
+    /// # Errors
+    ///
+    /// It's there but can't be read.
+    pub fn read(&self) -> Result<Option<String>> {
+        match fs::read_to_string(&self.config) {
+            Ok(text) => Ok(Some(text)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// The config in effect: the file's, else an import of Timeshift's settings, else empty;
+    /// with the import's notes (see `apsis_core::config::effective`).
+    ///
+    /// # Errors
+    ///
+    /// A `config.toml` that can't be read.
+    pub fn effective(
+        &self,
+        devices: &[settings::Device],
+        users: &[User],
+    ) -> Result<(Config, Vec<String>)> {
+        let text = self.read()?;
+        let timeshift = if text.is_none() {
+            fs::read_to_string(&self.timeshift).ok()
+        } else {
+            None
+        };
+        config::effective(text.as_deref(), timeshift.as_deref(), devices, users)
+    }
+
+    /// Checks `config` against the connected devices and writes it, if the file still reads
+    /// `expected` (empty: there's no file yet). Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ConfigChanged`], [`Error::InvalidSettings`], [`Error::InvalidConfig`] (the file
+    /// there can't be read), or what lsblk or the filesystem reported.
+    pub fn write(&self, runner: &impl Runner, expected: &str, config: &Config) -> Result<bool> {
+        let devices = settings::parse_lsblk(&lsblk(runner)?)?;
+        let current = self.read()?.unwrap_or_default();
+        if current != expected {
+            return Err(Error::ConfigChanged);
+        }
+        let old = if current.is_empty() {
+            None
+        } else {
+            Some(Config::parse(&current)?)
+        };
+        config::validate(config, old.as_ref(), &devices)?;
+        let text = config.to_text();
         if text == current {
             return Ok(false);
         }
-        let mode = fs::metadata(&self.config)?.permissions().mode() & 0o7777;
-        write_atomically(&self.backup, &current, mode)?;
-        // Checked again right before the swap: Timeshift may have saved meanwhile.
-        if self.read()? != current {
-            return Err(Error::SettingsChanged);
+        if let Some(dir) = self.config.parent() {
+            fs::DirBuilder::new().recursive(true).create(dir)?;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o755))?;
         }
-        write_atomically(&self.config, &text, mode)?;
+        if !current.is_empty() {
+            write_atomically(&self.backup, &current, MODE)?;
+        }
+        // Checked again right before the swap.
+        if self.read()?.unwrap_or_default() != current {
+            return Err(Error::ConfigChanged);
+        }
+        write_atomically(&self.config, &text, MODE)?;
         Ok(true)
     }
 }
@@ -122,24 +165,36 @@ pub fn lsblk(runner: &impl Runner) -> Result<String> {
     Ok(output.stdout)
 }
 
-/// What `ReadSettings` returns: the file, the devices, the users and whether `timeshift-gtk`
-/// is open.
+/// The users whose home folders the filters cover, from `/etc/passwd`, with ecryptfs homes
+/// marked.
+pub fn users() -> Result<Vec<User>> {
+    let passwd = fs::read_to_string("/etc/passwd")?;
+    Ok(settings::parse_passwd(&passwd)
+        .into_iter()
+        .map(|user| User {
+            encrypted_home: encrypted_home(&user.name, &user.home),
+            ..user
+        })
+        .collect())
+}
+
+/// What `ReadConfig` returns: the file, the config in effect, the devices, the users and the
+/// import's notes.
 ///
 /// # Errors
 ///
 /// The file can't be read, or lsblk fails.
-pub fn info(files: &Files, runner: &impl Runner) -> Result<WireSettingsInfo> {
-    let text = files.read()?;
-    let devices = lsblk(runner)?;
-    let passwd = fs::read_to_string("/etc/passwd")?;
-    let users = settings::parse_passwd(&passwd)
+pub fn info(files: &Files, runner: &impl Runner) -> Result<WireConfigInfo> {
+    let text = files.read()?.unwrap_or_default();
+    let devices_json = lsblk(runner)?;
+    let devices = settings::parse_lsblk(&devices_json)?;
+    let users = users()?;
+    let (config, notes) = files.effective(&devices, &users)?;
+    let users = users
         .into_iter()
-        .map(|user| {
-            let encrypted = encrypted_home(&user.name, &user.home);
-            (user.name, user.home, encrypted)
-        })
+        .map(|user| (user.name, user.home, user.encrypted_home))
         .collect();
-    Ok((text, devices, users, timeshift_gui_open()))
+    Ok((text, config_to_wire(&config), devices_json, users, notes))
 }
 
 /// Timeshift's check for an ecryptfs home: the user's `Private.mnt` names the home folder.
@@ -148,31 +203,23 @@ fn encrypted_home(name: &str, home: &str) -> bool {
     fs::read_to_string(mount_file).is_ok_and(|text| text.lines().any(|l| l.trim() == home))
 }
 
-/// Whether a `timeshift-gtk` process is running.
-fn timeshift_gui_open() -> bool {
-    let Ok(processes) = fs::read_dir("/proc") else {
-        return false;
-    };
-    processes.flatten().any(|process| {
-        fs::read_to_string(process.path().join("comm"))
-            .is_ok_and(|comm| comm.trim() == "timeshift-gtk")
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use apsis_core::RunOutput;
-    use apsis_core::settings::{Config, Level};
 
     use super::*;
 
-    const CONFIG: &str = include_str!("../../apsis-core/tests/fixtures/config-rsync.json");
+    const TIMESHIFT: &str = include_str!("../../apsis-core/tests/fixtures/config-rsync.json");
     const LSBLK: &str = include_str!("../../apsis-core/tests/fixtures/lsblk.json");
+    /// `sdb1` in the lsblk fixture: connected, ext4.
+    const BACKUP_UUID: &str = "00000000-0000-0000-0000-000000000000";
+    /// The unlocked LUKS filesystem in the fixture.
+    const UNLOCKED_UUID: &str = "33333333-3333-3333-3333-333333333333";
 
-    /// Answers lsblk with the fixture, and remembers what it was asked.
+    /// Answers lsblk with the fixture.
     struct FakeLsblk;
 
     impl Runner for FakeLsblk {
@@ -187,7 +234,8 @@ mod tests {
         }
     }
 
-    /// A fresh folder under the temp dir holding `timeshift.json` (mode 0644).
+    /// A fresh folder under the temp dir, standing in for `/etc`: `apsis/` doesn't exist yet,
+    /// `timeshift/timeshift.json` does.
     fn folder() -> (PathBuf, Files) {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
@@ -195,112 +243,147 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::SeqCst)
         ));
-        fs::create_dir_all(&dir).unwrap();
-        let config = dir.join("timeshift.json");
-        fs::write(&config, CONFIG).unwrap();
-        fs::set_permissions(&config, fs::Permissions::from_mode(0o644)).unwrap();
-        let files = Files::new(config, dir.join("timeshift.json.bak"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("timeshift")).unwrap();
+        fs::write(dir.join("timeshift/timeshift.json"), TIMESHIFT).unwrap();
+        let files = Files::new(
+            dir.join("apsis/config.toml"),
+            dir.join("apsis/config.toml.bak"),
+            dir.join("timeshift/timeshift.json"),
+        );
         (dir, files)
     }
 
-    fn daily(settings: &mut Settings) {
-        settings.schedule[Level::Daily.index()] = true;
+    fn config(uuid: &str, filters: &[&str]) -> Config {
+        Config {
+            backup_device_uuid: uuid.to_owned(),
+            filters: filters.iter().map(|f| (*f).to_owned()).collect(),
+        }
+    }
+
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
     #[test]
-    fn write_keeps_a_backup_and_the_mode() {
+    fn before_the_first_save_timeshifts_settings_are_imported() {
         let (dir, files) = folder();
-        let mut settings = Config::parse(CONFIG).unwrap().settings();
-        daily(&mut settings);
-        assert!(files.write(&FakeLsblk, CONFIG, &settings).unwrap());
+        assert_eq!(files.read().unwrap(), None);
+        let (config, notes) = files.effective(&[], &[]).unwrap();
+        assert_eq!(config.backup_device_uuid, BACKUP_UUID);
+        assert_eq!(config.filters.len(), 4);
+        assert!(notes[0].starts_with("imported from"));
+        // Without timeshift.json: empty, no notes.
+        fs::remove_file(dir.join("timeshift/timeshift.json")).unwrap();
+        assert_eq!(
+            files.effective(&[], &[]).unwrap(),
+            (Config::default(), Vec::new())
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
 
-        let written = fs::read_to_string(dir.join("timeshift.json")).unwrap();
-        assert_eq!(Config::parse(&written).unwrap().settings(), settings);
-        assert_eq!(
-            fs::read_to_string(dir.join("timeshift.json.bak")).unwrap(),
-            CONFIG
+    #[test]
+    fn the_first_save_makes_the_file_and_then_timeshift_isnt_read() {
+        let (dir, files) = folder();
+        let first = config(BACKUP_UUID, &["+ /home/user1/**", "*.iso"]);
+        assert!(files.write(&FakeLsblk, "", &first).unwrap());
+        let written = fs::read_to_string(dir.join("apsis/config.toml")).unwrap();
+        assert_eq!(Config::parse(&written).unwrap(), first);
+        assert_eq!(mode(&dir.join("apsis/config.toml")), 0o644);
+        assert_eq!(mode(&dir.join("apsis")), 0o755);
+        assert!(
+            !dir.join("apsis/config.toml.bak").exists(),
+            "nothing to back up"
         );
-        let mode = |name: &str| fs::metadata(dir.join(name)).unwrap().permissions().mode() & 0o777;
+        assert!(!dir.join("apsis/config.toml.apsis-tmp").exists());
+        // From now on the file decides; Timeshift's settings are left alone.
+        let (config, notes) = files.effective(&[], &[]).unwrap();
+        assert_eq!((config, notes.len()), (first, 0));
         assert_eq!(
-            (mode("timeshift.json"), mode("timeshift.json.bak")),
-            (0o644, 0o644)
+            fs::read_to_string(dir.join("timeshift/timeshift.json")).unwrap(),
+            TIMESHIFT
         );
-        assert!(!dir.join("timeshift.json.apsis-tmp").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
-        // The next write replaces the one backup.
-        let mut again = settings.clone();
-        again.counts[Level::Daily.index()] = 9;
-        assert!(files.write(&FakeLsblk, &written, &again).unwrap());
+    #[test]
+    fn a_later_save_keeps_a_backup_of_the_previous_file() {
+        let (dir, files) = folder();
+        let first = config(BACKUP_UUID, &[]);
+        files.write(&FakeLsblk, "", &first).unwrap();
+        let first_text = fs::read_to_string(dir.join("apsis/config.toml")).unwrap();
+        let second = config(BACKUP_UUID, &["*.mp3"]);
+        assert!(files.write(&FakeLsblk, &first_text, &second).unwrap());
         assert_eq!(
-            fs::read_to_string(dir.join("timeshift.json.bak")).unwrap(),
-            written
+            fs::read_to_string(dir.join("apsis/config.toml.bak")).unwrap(),
+            first_text
         );
+        assert_eq!(mode(&dir.join("apsis/config.toml.bak")), 0o644);
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn a_file_changed_since_reading_is_left_alone() {
         let (dir, files) = folder();
-        let mut settings = Config::parse(CONFIG).unwrap().settings();
-        daily(&mut settings);
-        let stale = CONFIG.replace("\"2\"", "\"4\"");
+        let first = config(BACKUP_UUID, &[]);
+        files.write(&FakeLsblk, "", &first).unwrap();
+        // The caller read "no file", but there is one now.
         assert!(matches!(
-            files.write(&FakeLsblk, &stale, &settings),
-            Err(Error::SettingsChanged)
+            files.write(&FakeLsblk, "", &config(BACKUP_UUID, &["x"])),
+            Err(Error::ConfigChanged)
         ));
-        assert_eq!(
-            fs::read_to_string(dir.join("timeshift.json")).unwrap(),
-            CONFIG
-        );
-        assert!(!dir.join("timeshift.json.bak").exists());
+        assert!(!dir.join("apsis/config.toml.bak").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn invalid_settings_write_nothing() {
+    fn an_encrypted_or_missing_device_is_never_written() {
         let (dir, files) = folder();
-        let mut settings = Config::parse(CONFIG).unwrap().settings();
-        settings.counts[Level::Boot.index()] = 0;
-        assert!(matches!(
-            files.write(&FakeLsblk, CONFIG, &settings),
-            Err(Error::InvalidSettings(_))
-        ));
-        assert_eq!(
-            fs::read_to_string(dir.join("timeshift.json")).unwrap(),
-            CONFIG
-        );
-        assert!(!dir.join("timeshift.json.bak").exists());
+        for uuid in [UNLOCKED_UUID, "99999999-9999-9999-9999-999999999999", ""] {
+            assert!(
+                matches!(
+                    files.write(&FakeLsblk, "", &config(uuid, &[])),
+                    Err(Error::InvalidSettings(_))
+                ),
+                "{uuid}"
+            );
+        }
+        assert!(!dir.join("apsis/config.toml").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn unchanged_settings_write_nothing() {
+    fn unchanged_config_writes_nothing() {
         let (dir, files) = folder();
-        let settings = Config::parse(CONFIG).unwrap().settings();
-        assert!(!files.write(&FakeLsblk, CONFIG, &settings).unwrap());
-        assert!(!dir.join("timeshift.json.bak").exists());
+        let first = config(BACKUP_UUID, &[]);
+        files.write(&FakeLsblk, "", &first).unwrap();
+        let text = fs::read_to_string(dir.join("apsis/config.toml")).unwrap();
+        assert!(!files.write(&FakeLsblk, &text, &first).unwrap());
+        assert!(!dir.join("apsis/config.toml.bak").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn stale_temp_files_are_replaced() {
         let (dir, files) = folder();
-        fs::write(dir.join("timeshift.json.apsis-tmp"), "junk").unwrap();
-        fs::write(dir.join("timeshift.json.bak.apsis-tmp"), "junk").unwrap();
-        let mut settings = Config::parse(CONFIG).unwrap().settings();
-        daily(&mut settings);
-        assert!(files.write(&FakeLsblk, CONFIG, &settings).unwrap());
-        assert!(!dir.join("timeshift.json.apsis-tmp").exists());
-        assert!(!dir.join("timeshift.json.bak.apsis-tmp").exists());
+        fs::create_dir_all(dir.join("apsis")).unwrap();
+        fs::write(dir.join("apsis/config.toml.apsis-tmp"), "junk").unwrap();
+        files
+            .write(&FakeLsblk, "", &config(BACKUP_UUID, &[]))
+            .unwrap();
+        assert!(!dir.join("apsis/config.toml.apsis-tmp").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn a_missing_file_says_to_set_timeshift_up() {
-        let files = Files::new(
-            "/nonexistent/timeshift.json".into(),
-            "/nonexistent/x.bak".into(),
-        );
-        assert!(matches!(files.read(), Err(Error::InvalidConfig(_))));
+    fn a_broken_config_file_is_an_error_not_an_import() {
+        let (dir, files) = folder();
+        fs::create_dir_all(dir.join("apsis")).unwrap();
+        fs::write(dir.join("apsis/config.toml"), "version = 7").unwrap();
+        assert!(matches!(
+            files.effective(&[], &[]),
+            Err(Error::InvalidConfig(_))
+        ));
+        fs::remove_dir_all(dir).unwrap();
     }
 }

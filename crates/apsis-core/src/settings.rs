@@ -1,30 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Timeshift's settings: `/etc/timeshift/timeshift.json`, the devices it can back up to, and the
-//! users whose home folders its filters cover.
+//! What the settings view and the config work with: the devices snapshots can go to (`lsblk`),
+//! the users whose home folders the filters cover (`/etc/passwd`), the home folder patterns and
+//! filter checks, and the json-glib style JSON writer `info.json` is written with.
 //!
-//! Everything here follows Timeshift's own code (linuxmint/timeshift e7e54ab: `Main.vala`
-//! `save_app_config` / `load_app_config`, `UsersBox.vala`, `ExcludeBox.vala`, `Device.vala`), so
-//! `timeshift-launcher` and Apsis can edit the same file:
-//!
-//! - Every value is a JSON string (`"true"`, `"5"`): Timeshift reads each one with
-//!   `get_string_member`. [`Config::parse`] refuses a file where one of its fields isn't.
-//! - Only the fields in [`Settings`] change. Every other field stays as it was, in its place.
-//! - The file is written the way json-glib writes it (2-space indent, `"key" : value`, no final
-//!   newline), so an unchanged file comes out byte for byte the same.
+//! The home patterns, filter rules and device checks are Timeshift's (linuxmint/timeshift:
+//! `UsersBox.vala`, `ExcludeBox.vala`, `Device.vala`), so a config imported from Timeshift keeps
+//! backing up exactly what it did.
 
 use serde_json::{Map, Value};
 
 use crate::error::{Error, Result};
 
-/// Where Timeshift keeps its settings.
-pub const CONFIG_PATH: &str = "/etc/timeshift/timeshift.json";
-/// The one backup of the previous settings the helper keeps.
-pub const BACKUP_PATH: &str = "/etc/timeshift/timeshift.json.bak";
-/// Retention counts, as Timeshift's own spin buttons allow. A 0 would make Timeshift's cleanup
-/// untag (and so delete) every uncommented snapshot of that level.
-pub const MIN_COUNT: u32 = 1;
-pub const MAX_COUNT: u32 = 999;
 /// Longest filter pattern accepted, in bytes (Linux's `PATH_MAX`).
 pub const MAX_FILTER_BYTES: usize = 4096;
 
@@ -38,257 +25,6 @@ pub const LSBLK_ARGS: [&str; 6] = [
     "--output",
     "NAME,KNAME,PKNAME,TYPE,FSTYPE,UUID,SIZE,LABEL",
 ];
-
-const BACKUP_DEVICE_UUID: &str = "backup_device_uuid";
-const PARENT_DEVICE_UUID: &str = "parent_device_uuid";
-const BTRFS_MODE: &str = "btrfs_mode";
-/// Older Timeshift versions' name; when it's there Timeshift reads it instead of the new one.
-const INCLUDE_BTRFS_HOME_OLD: &str = "include_btrfs_home";
-const INCLUDE_BTRFS_HOME: &str = "include_btrfs_home_for_backup";
-const EXCLUDE: &str = "exclude";
-const EXCLUDE_APPS: &str = "exclude-apps";
-
-/// Fields Timeshift reads as strings.
-const STRING_FIELDS: [&str; 22] = [
-    BACKUP_DEVICE_UUID,
-    PARENT_DEVICE_UUID,
-    "do_first_run",
-    BTRFS_MODE,
-    INCLUDE_BTRFS_HOME_OLD,
-    INCLUDE_BTRFS_HOME,
-    "include_btrfs_home_for_restore",
-    "stop_cron_emails",
-    "schedule_monthly",
-    "schedule_weekly",
-    "schedule_daily",
-    "schedule_hourly",
-    "schedule_boot",
-    "count_monthly",
-    "count_weekly",
-    "count_daily",
-    "count_hourly",
-    "count_boot",
-    "snapshot_size",
-    "snapshot_count",
-    "date_format",
-    "pause_snapshots",
-];
-
-/// A schedule level: one `schedule_<level>` and one `count_<level>` field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Level {
-    Monthly,
-    Weekly,
-    Daily,
-    Hourly,
-    Boot,
-}
-
-impl Level {
-    /// In the order of Timeshift's Schedule tab.
-    pub const ALL: [Self; 5] = [
-        Self::Monthly,
-        Self::Weekly,
-        Self::Daily,
-        Self::Hourly,
-        Self::Boot,
-    ];
-
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Monthly => "monthly",
-            Self::Weekly => "weekly",
-            Self::Daily => "daily",
-            Self::Hourly => "hourly",
-            Self::Boot => "boot",
-        }
-    }
-
-    /// Index into [`Settings::schedule`] and [`Settings::counts`].
-    #[must_use]
-    pub fn index(self) -> usize {
-        self as usize
-    }
-
-    fn schedule_field(self) -> String {
-        format!("schedule_{}", self.name())
-    }
-
-    fn count_field(self) -> String {
-        format!("count_{}", self.name())
-    }
-
-    /// Timeshift's defaults when the field is missing.
-    fn default_count(self) -> u32 {
-        match self {
-            Self::Monthly => 2,
-            Self::Weekly => 3,
-            Self::Daily | Self::Boot => 5,
-            Self::Hourly => 6,
-        }
-    }
-}
-
-/// What Apsis edits in Timeshift's settings.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Settings {
-    /// Filesystem UUID of the backup device; empty when none is selected.
-    pub backup_device_uuid: String,
-    /// btrfs snapshots instead of rsync.
-    pub btrfs_mode: bool,
-    /// btrfs mode: back up the `@home` subvolume too. (rsync mode covers home folders with
-    /// filters, see [`User`].)
-    pub include_btrfs_home: bool,
-    /// Per [`Level`], in [`Level::ALL`] order.
-    pub schedule: [bool; 5],
-    /// How many snapshots to keep per [`Level`], in [`Level::ALL`] order.
-    pub counts: [u32; 5],
-    /// Timeshift's filter list, in order (rsync uses the first match). `+ ` in front includes,
-    /// anything else excludes. The home folder patterns of [`User`] live here too.
-    pub exclude: Vec<String>,
-}
-
-impl Settings {
-    #[must_use]
-    pub fn scheduled(&self, level: Level) -> bool {
-        self.schedule[level.index()]
-    }
-
-    #[must_use]
-    pub fn count(&self, level: Level) -> u32 {
-        self.counts[level.index()]
-    }
-}
-
-/// Timeshift's settings file, every field kept in its place.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Config {
-    fields: Map<String, Value>,
-}
-
-impl Config {
-    /// Reads a settings file, refusing one Timeshift itself would misread: not a JSON object,
-    /// a string field that isn't a string, or a filter list that isn't a list of strings.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InvalidConfig`], saying what's wrong.
-    pub fn parse(text: &str) -> Result<Self> {
-        let value: Value = serde_json::from_str(text)
-            .map_err(|e| Error::InvalidConfig(format!("not valid JSON: {e}")))?;
-        let Value::Object(fields) = value else {
-            return Err(Error::InvalidConfig("not a JSON object".to_owned()));
-        };
-        for field in STRING_FIELDS {
-            if fields.get(field).is_some_and(|v| !v.is_string()) {
-                return Err(Error::InvalidConfig(format!("{field} is not a string")));
-            }
-        }
-        for field in [EXCLUDE, EXCLUDE_APPS] {
-            let strings = |v: &Value| v.as_array().is_some_and(|a| a.iter().all(Value::is_string));
-            if fields.get(field).is_some_and(|v| !strings(v)) {
-                return Err(Error::InvalidConfig(format!(
-                    "{field} is not a list of strings"
-                )));
-            }
-        }
-        Ok(Self { fields })
-    }
-
-    /// The settings as Timeshift reads them, with Timeshift's defaults for missing fields.
-    #[must_use]
-    pub fn settings(&self) -> Settings {
-        let include_btrfs_home = if self.fields.contains_key(INCLUDE_BTRFS_HOME_OLD) {
-            self.flag(INCLUDE_BTRFS_HOME_OLD)
-        } else {
-            self.flag(INCLUDE_BTRFS_HOME)
-        };
-        Settings {
-            backup_device_uuid: self
-                .string(BACKUP_DEVICE_UUID)
-                .unwrap_or_default()
-                .to_owned(),
-            btrfs_mode: self.flag(BTRFS_MODE),
-            include_btrfs_home,
-            schedule: Level::ALL.map(|level| self.flag(&level.schedule_field())),
-            counts: Level::ALL.map(|level| {
-                self.string(&level.count_field())
-                    .map_or(level.default_count(), vala_int)
-            }),
-            exclude: self
-                .fields
-                .get(EXCLUDE)
-                .and_then(Value::as_array)
-                .map(|patterns| {
-                    patterns
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default(),
-        }
-    }
-
-    /// UUID of the backup device's parent (LUKS or LVM container), empty for none.
-    #[must_use]
-    pub fn parent_device_uuid(&self) -> &str {
-        self.string(PARENT_DEVICE_UUID).unwrap_or_default()
-    }
-
-    /// Writes `settings` into the fields Timeshift reads them from, all as strings. Fields
-    /// already there keep their place; missing ones go at the end.
-    fn apply(&mut self, settings: &Settings, parent_device_uuid: &str) {
-        let flag = |on: bool| Value::from(if on { "true" } else { "false" });
-        self.set(
-            BACKUP_DEVICE_UUID,
-            Value::from(settings.backup_device_uuid.as_str()),
-        );
-        self.set(PARENT_DEVICE_UUID, Value::from(parent_device_uuid));
-        self.set(BTRFS_MODE, flag(settings.btrfs_mode));
-        if self.fields.contains_key(INCLUDE_BTRFS_HOME_OLD) {
-            self.set(INCLUDE_BTRFS_HOME_OLD, flag(settings.include_btrfs_home));
-        }
-        self.set(INCLUDE_BTRFS_HOME, flag(settings.include_btrfs_home));
-        for level in Level::ALL {
-            self.set(&level.schedule_field(), flag(settings.scheduled(level)));
-            self.set(
-                &level.count_field(),
-                Value::from(settings.count(level).to_string()),
-            );
-        }
-        let exclude = settings.exclude.iter().map(|p| Value::from(p.as_str()));
-        self.set(EXCLUDE, Value::Array(exclude.collect()));
-    }
-
-    fn set(&mut self, field: &str, value: Value) {
-        self.fields.insert(field.to_owned(), value);
-    }
-
-    fn string(&self, field: &str) -> Option<&str> {
-        self.fields.get(field).and_then(Value::as_str)
-    }
-
-    /// Vala's `bool.parse`: only `"true"` is true.
-    fn flag(&self, field: &str) -> bool {
-        self.string(field) == Some("true")
-    }
-
-    /// The file as json-glib writes it (see the module docs).
-    #[must_use]
-    pub fn to_text(&self) -> String {
-        let mut out = String::new();
-        write_object(&mut out, &self.fields, 0);
-        out
-    }
-}
-
-/// Vala's `int.parse` for a count: the number, or 0 for anything that isn't one (a negative
-/// number too, which isn't a count).
-fn vala_int(text: &str) -> u32 {
-    text.trim().parse().unwrap_or(0)
-}
 
 fn indent(out: &mut String, depth: usize) {
     out.extend(std::iter::repeat_n("  ", depth));
@@ -335,104 +71,6 @@ fn write_value(out: &mut String, value: &Value, depth: usize) {
         }
         other => out.push_str(&other.to_string()),
     }
-}
-
-/// The new settings file: `current` with `new` applied, after checking `new` against the
-/// devices there are now.
-///
-/// The backup device's parent UUID comes from `devices` when the device changes, and stays as
-/// it was when it doesn't (Timeshift keeps it too while the device isn't connected). The
-/// result is read back and must give exactly `new`.
-///
-/// # Errors
-///
-/// [`Error::InvalidConfig`] if `current` can't be edited safely, [`Error::InvalidSettings`] if
-/// `new` doesn't pass [`validate`].
-pub fn edit(current: &str, new: &Settings, devices: &[Device]) -> Result<String> {
-    let mut config = Config::parse(current)?;
-    let old = config.settings();
-    validate(new, &old, devices)?;
-    let parent = if new.backup_device_uuid == old.backup_device_uuid {
-        config.parent_device_uuid().to_owned()
-    } else {
-        devices
-            .iter()
-            .find(|d| d.uuid == new.backup_device_uuid)
-            .map(|d| d.parent_uuid.clone())
-            .unwrap_or_default()
-    };
-    config.apply(new, &parent);
-    let text = config.to_text();
-    let reread = Config::parse(&text)?;
-    if reread.settings() != *new || reread.parent_device_uuid() != parent {
-        return Err(Error::InvalidConfig(
-            "the new file doesn't read back as written".to_owned(),
-        ));
-    }
-    Ok(text)
-}
-
-/// Checks `new` before it's written. `old` is what the file says now, `devices` what's
-/// connected now.
-///
-/// - A new backup device must be connected and selectable ([`Device::selectable`]); in btrfs
-///   mode it must be btrfs. An unchanged one may be unplugged, unless btrfs mode is being
-///   turned on (the device must then be there to be checked).
-/// - btrfs mode can only be turned on when there's a btrfs filesystem ([`btrfs_available`]).
-/// - Retention counts are [`MIN_COUNT`]..=[`MAX_COUNT`].
-/// - Filters pass [`validate_filter`] and aren't repeated.
-///
-/// # Errors
-///
-/// [`Error::InvalidSettings`] with the first problem found.
-pub fn validate(new: &Settings, old: &Settings, devices: &[Device]) -> Result<()> {
-    let invalid = |reason: String| Err(Error::InvalidSettings(reason));
-    if new.btrfs_mode && !old.btrfs_mode && !btrfs_available(devices) {
-        return invalid("btrfs mode needs a btrfs filesystem, and there is none".to_owned());
-    }
-    let device = devices
-        .iter()
-        .find(|d| !d.uuid.is_empty() && d.uuid == new.backup_device_uuid);
-    if new.backup_device_uuid != old.backup_device_uuid {
-        match device {
-            _ if new.backup_device_uuid.is_empty() => {
-                return invalid("choose a backup device".to_owned());
-            }
-            None => return invalid("the chosen backup device isn't connected".to_owned()),
-            Some(device) if !device.selectable() => {
-                return invalid(format!("{} can't hold snapshots", device.path()));
-            }
-            Some(_) => {}
-        }
-    }
-    if new.btrfs_mode && !old.btrfs_mode && device.is_none() {
-        return invalid("btrfs mode needs a connected btrfs backup device".to_owned());
-    }
-    if let Some(device) = device.filter(|_| new.btrfs_mode)
-        && device.fstype != "btrfs"
-    {
-        return invalid(format!(
-            "btrfs mode needs a btrfs device; {} is {}",
-            device.path(),
-            device.fstype
-        ));
-    }
-    for level in Level::ALL {
-        let count = new.count(level);
-        if !(MIN_COUNT..=MAX_COUNT).contains(&count) {
-            return invalid(format!(
-                "keep {MIN_COUNT} to {MAX_COUNT} {} snapshots, not {count}",
-                level.name()
-            ));
-        }
-    }
-    for (i, pattern) in new.exclude.iter().enumerate() {
-        validate_filter(pattern)?;
-        if new.exclude[..i].contains(pattern) {
-            return invalid(format!("filter {pattern:?} is there twice"));
-        }
-    }
-    Ok(())
 }
 
 /// A filter as Timeshift's filter editor takes it: any rsync pattern that isn't blank (after an
@@ -514,8 +152,8 @@ impl Device {
     }
 
     /// Whether Apsis offers it as a backup device: a Linux filesystem of its own (not a LUKS,
-    /// LVM or ZFS container), with a UUID, and not inside an encrypted container (Apsis leaves
-    /// encrypted backup devices to Timeshift for now).
+    /// LVM or ZFS container), with a UUID, and not inside an encrypted container (encrypted
+    /// backup devices aren't supported yet).
     #[must_use]
     pub fn selectable(&self) -> bool {
         let container = matches!(
@@ -586,12 +224,6 @@ pub fn parse_lsblk(json: &str) -> Result<Vec<Device>> {
         .collect())
 }
 
-/// Timeshift's check before offering btrfs mode: some filesystem is btrfs.
-#[must_use]
-pub fn btrfs_available(devices: &[Device]) -> bool {
-    devices.iter().any(|d| d.fstype == "btrfs")
-}
-
 /// Which files of a user's home folder rsync mode backs up (Timeshift's Users tab).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeState {
@@ -620,7 +252,7 @@ impl HomeState {
 pub struct User {
     pub name: String,
     pub home: String,
-    /// An ecryptfs home: Timeshift uses other patterns for it. Apsis only shows it.
+    /// An ecryptfs home: Timeshift's other patterns for it. Apsis shows it and doesn't change it.
     pub encrypted_home: bool,
 }
 
@@ -699,17 +331,4 @@ pub fn parse_passwd(text: &str) -> Vec<User> {
         .collect();
     users.sort_by(|a, b| a.name.cmp(&b.name));
     users
-}
-
-/// Everything the settings view shows: the file as read, and the system it applies to.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SettingsInfo {
-    /// The file exactly as read. Sent back with a write, which the helper refuses if the file
-    /// has changed since.
-    pub text: String,
-    pub config: Config,
-    pub devices: Vec<Device>,
-    pub users: Vec<User>,
-    /// `timeshift-gtk` is open: it saves its own copy of the settings when it closes.
-    pub timeshift_gui_open: bool,
 }

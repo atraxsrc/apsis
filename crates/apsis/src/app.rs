@@ -3,18 +3,18 @@
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::rc::Rc;
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 use std::time::Duration;
 
+use apsis_core::config::{Config as ApsisConfig, ConfigInfo};
 use apsis_core::helper::HelperClient;
 use apsis_core::restore::{
     Destination, Entry, Kind, Listing as FolderListing, Live, Request, SnapPath,
 };
 use apsis_core::retention::{self, Kept, ManualPlan};
-use apsis_core::settings::{HomeState, Settings, SettingsInfo};
+use apsis_core::settings::HomeState;
 use apsis_core::{
-    Backend, DiskUsage, MAX_COMMENT_CHARS, PkexecRunner, Progress, Snapshot, SnapshotList,
-    TimeshiftCli, validate_comment,
+    DiskUsage, MAX_COMMENT_CHARS, Progress, Snapshot, SnapshotList, validate_comment,
 };
 use cosmic::applet::{menu_button, padded_control};
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
@@ -134,8 +134,6 @@ static INPUT_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("prompt
 static DEBUG_KEYS: LazyLock<bool> =
     LazyLock::new(|| std::env::var_os("APSIS_DEBUG_KEYS").is_some_and(|v| v == "1"));
 
-type Cli = TimeshiftCli<PkexecRunner>;
-
 /// How Apsis was started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -165,7 +163,7 @@ pub fn run_window() -> cosmic::iced::Result {
     cosmic::app::run::<AppModel>(settings, Mode::Window)
 }
 
-/// The applet: a panel button and a terminal-style popup listing Timeshift snapshots. In
+/// The applet: a panel button and a terminal-style popup listing snapshots. In
 /// [`Mode::Window`] the main window takes the popup's place.
 pub struct AppModel {
     /// Application state which is managed by the COSMIC runtime.
@@ -177,22 +175,19 @@ pub struct AppModel {
     menu: Option<Id>,
     /// Configuration data that persists between application runs.
     config: Config,
-    /// The fallback when `apsis-helper` isn't installed: `pkexec timeshift ...`, shared with
-    /// the background tasks.
-    pkexec: Arc<Cli>,
     listing: Listing,
     /// A list is running in the background.
     loading: bool,
     /// UUID of the backup disk from the last good list, to name it when it goes missing.
     known_uuid: Option<String>,
-    /// A create or delete is running in the background (as root, via pkexec).
+    /// A create, delete or restore is running in the background (as root, in the helper).
     running: Option<Operation>,
     /// What the `>` line is asking for.
     prompt: Prompt,
     /// How the last create or delete went, or why a comment was refused.
     status: Option<Status>,
     /// The running create's or restore's last `Progress` from the helper. `None` until the
-    /// first one (never, through pkexec or an older helper: a bare spinner then).
+    /// first one.
     progress: Option<Progress>,
     spinner: usize,
     /// Index into the displayed (newest first) snapshots.
@@ -200,12 +195,10 @@ pub struct AppModel {
     /// Names of the snapshots marked for a bulk delete (space / `J`).
     marked: BTreeSet<String>,
     overlay: Overlay,
-    /// Timeshift's settings, for the settings view.
+    /// Apsis's config, for the settings view.
     settings: SettingsLoad,
-    /// A settings write is running in the helper.
+    /// A config write is running in the helper.
     saving_settings: bool,
-    /// The last native dry run's plan, shown by [`Overlay::DryRun`].
-    dry_run_plan: Option<String>,
     /// The snapshot browser, while it's open ([`Overlay::Browse`]).
     browser: Option<Browser>,
     /// A restore whose dry run was shown: Enter runs it for real.
@@ -243,8 +236,7 @@ enum SettingsLoad {
 /// What the last list produced.
 #[derive(Debug, Clone)]
 enum Listing {
-    /// Nothing listed yet. The first list runs when the popup first opens, not at login,
-    /// because each list asks for a password until the Phase 4 helper exists.
+    /// Nothing listed yet.
     NotLoaded,
     /// Snapshots newest first.
     Loaded(SnapshotList),
@@ -252,21 +244,15 @@ enum Listing {
 }
 
 /// A `Clone`able summary of [`apsis_core::Error`] for messages and the view.
-///
-/// Used for list, create and delete.
 #[derive(Debug, Clone)]
 pub enum CliError {
-    NotInstalled,
-    /// polkit refused `apsis-helper`, or the password dialog was dismissed. Timeshift didn't
-    /// run. (pkexec reports the same as exit code 126 or 127, see [`pkexec_refused`].)
+    /// `apsis-helper` isn't installed (or the system bus can't be reached): nothing works
+    /// without it.
+    NoHelper,
+    /// polkit refused `apsis-helper`, or the password dialog was dismissed. Nothing ran.
     NotAuthorized,
-    /// Timeshift failed: its exit code and the last lines it printed about it.
-    Failed {
-        code: Option<i32>,
-        output: Vec<String>,
-    },
-    /// The backup disk isn't there (unplugged, or dropped off the USB bus). `device` is what
-    /// Timeshift named.
+    /// The backup disk isn't there (unplugged, or dropped off the USB bus). `device` is its
+    /// UUID.
     DeviceNotFound {
         device: String,
     },
@@ -276,12 +262,7 @@ pub enum CliError {
 impl From<apsis_core::Error> for CliError {
     fn from(error: apsis_core::Error) -> Self {
         match error {
-            apsis_core::Error::NotInstalled => Self::NotInstalled,
             apsis_core::Error::NotAuthorized => Self::NotAuthorized,
-            apsis_core::Error::Failed { code, output } => Self::Failed {
-                code,
-                output: fmt::tail(&output, apsis_core::MAX_OUTPUT_LINES),
-            },
             apsis_core::Error::DeviceNotFound { device } => Self::DeviceNotFound { device },
             other => Self::Other(other.to_string()),
         }
@@ -326,8 +307,6 @@ pub enum Operation {
         names: Vec<String>,
         done: usize,
     },
-    /// Native backend with dry run on: what a create would do. Nothing is written.
-    DryRun(String),
     /// A file-level restore, or its dry run.
     Restore(Request),
 }
@@ -427,8 +406,6 @@ enum Overlay {
     Help,
     About,
     Settings,
-    /// The last native dry run's plan, in the left pane.
-    DryRun,
     /// A snapshot's files, in the left pane; the selected entry's details on the right.
     Browse,
     /// A restore's plan (Enter runs it) or result, in the left pane.
@@ -514,8 +491,6 @@ pub enum Message {
     Finished(Operation, Result<(), CliError>),
     /// The running create or restore got this far.
     Progress(Progress),
-    /// A native dry run finished: the plan's text.
-    DryRunDone(Result<String, CliError>),
     Tick,
     Select(usize),
     /// Double-click on a snapshot: its files.
@@ -533,7 +508,7 @@ pub enum Message {
     Escape,
     /// `[s]ettings` hint.
     OpenSettings,
-    SettingsRead(Result<SettingsInfo, CliError>),
+    SettingsRead(Result<ConfigInfo, CliError>),
     /// A settings write finished: a note from the helper (empty when all went well).
     SettingsWritten(Result<String, CliError>),
     /// A click on a settings row, and a double-click (changes it, like space).
@@ -577,7 +552,6 @@ impl cosmic::Application for AppModel {
             popup: None,
             menu: None,
             config,
-            pkexec: Arc::new(TimeshiftCli::new(PkexecRunner)),
             listing: Listing::NotLoaded,
             known_uuid: None,
             loading: false,
@@ -591,7 +565,6 @@ impl cosmic::Application for AppModel {
             overlay: Overlay::None,
             settings: SettingsLoad::NotLoaded,
             saving_settings: false,
-            dry_run_plan: None,
             browser: None,
             pending_restore: None,
             list_after_browser: false,
@@ -607,7 +580,7 @@ impl cosmic::Application for AppModel {
             // `loading` keeps the popup from starting a second list meanwhile.
             Mode::Applet => {
                 app.loading = true;
-                background_list(app.config.native_backend)
+                background_list()
             }
             Mode::Window => app.open_window(),
         };
@@ -724,7 +697,7 @@ impl cosmic::Application for AppModel {
             Message::BackgroundRefresh => {
                 if self.popup.is_none() && !self.loading && self.running.is_none() {
                     self.loading = true;
-                    return background_list(self.config.native_backend);
+                    return background_list();
                 }
             }
             Message::BackgroundListed(result) => {
@@ -817,7 +790,6 @@ impl cosmic::Application for AppModel {
                     self.progress = Some(progress);
                 }
             }
-            Message::DryRunDone(result) => return self.on_dry_run(result),
             Message::Listed(result) => {
                 self.on_listed(result);
                 // After a create: offer to prune, quietly (only if there's something to do).
@@ -998,17 +970,15 @@ impl AppModel {
         self.pending_restore = None;
     }
 
-    /// Lists in the background, through `apsis-helper` or pkexec. Does nothing while a list,
-    /// create or delete is running (Timeshift runs one at a time).
+    /// Lists in the background, through `apsis-helper`. Does nothing while a list, create or
+    /// delete is running (the helper runs one at a time).
     fn start_list(&mut self) -> Task<cosmic::Action<Message>> {
         if self.loading || self.running.is_some() || self.saving_settings {
             return Task::none();
         }
         self.loading = true;
         self.spinner = 0;
-        let pkexec = Arc::clone(&self.pkexec);
-        let native = self.config.native_backend;
-        cosmic::task::future(async move { Message::Listed(list_snapshots(pkexec, native).await) })
+        cosmic::task::future(async move { Message::Listed(list_snapshots().await) })
     }
 
     fn on_listed(&mut self, result: Result<SnapshotList, CliError>) {
@@ -1259,12 +1229,12 @@ impl AppModel {
         };
         self.settings = SettingsLoad::Loading { cursor };
         self.spinner = 0;
-        cosmic::task::future(async { Message::SettingsRead(read_settings().await) })
+        cosmic::task::future(async { Message::SettingsRead(read_config().await) })
     }
 
     fn on_settings_read(
         &mut self,
-        result: Result<SettingsInfo, CliError>,
+        result: Result<ConfigInfo, CliError>,
     ) -> Task<cosmic::Action<Message>> {
         let cursor = match self.settings {
             SettingsLoad::Loading { cursor } => cursor,
@@ -1301,12 +1271,12 @@ impl AppModel {
             self.status = Some(Status::Error(reason));
             return Task::none();
         }
-        let (expected, settings) = (view.info.text.clone(), view.edited.clone());
+        let (expected, config) = (view.info.text.clone(), view.edited.clone());
         self.saving_settings = true;
         self.status = None;
         self.spinner = 0;
         cosmic::task::future(async move {
-            Message::SettingsWritten(write_settings(expected, settings).await)
+            Message::SettingsWritten(write_config(expected, config).await)
         })
     }
 
@@ -1418,11 +1388,7 @@ impl AppModel {
                     self.prompt = Prompt::Comment(comment);
                     return Task::none();
                 }
-                if self.config.native_backend && self.config.native_dry_run {
-                    self.run(Operation::DryRun(comment))
-                } else {
-                    self.run(Operation::Create(comment))
-                }
+                self.run(Operation::Create(comment))
             }
             Prompt::ConfirmDelete { name, typed } => {
                 if typed.trim().eq_ignore_ascii_case("y") {
@@ -1452,7 +1418,7 @@ impl AppModel {
         }
     }
 
-    /// Creates or deletes in the background, through `apsis-helper` or pkexec.
+    /// Creates, deletes or restores in the background, through `apsis-helper`.
     fn run(&mut self, operation: Operation) -> Task<cosmic::Action<Message>> {
         if self.loading || self.running.is_some() || self.saving_settings {
             return Task::none();
@@ -1461,28 +1427,20 @@ impl AppModel {
         self.status = None;
         self.progress = None;
         self.spinner = 0;
-        if let Operation::DryRun(comment) = operation {
-            return cosmic::task::future(async move {
-                Message::DryRunDone(native_dry_run(&comment).await)
-            });
-        }
         if let Operation::Restore(request) = operation {
             return with_progress(move |mut progress| async move {
                 let result = restore(&request, &mut progress).await;
                 Message::RestoreDone(request, result)
             });
         }
-        let pkexec = Arc::clone(&self.pkexec);
-        let native = self.config.native_backend;
         with_progress(move |mut progress| async move {
-            let result = operate(pkexec, operation.clone(), native, &mut progress).await;
+            let result = operate(operation.clone(), &mut progress).await;
             Message::Finished(operation, result)
         })
     }
 
-    /// Shows how it went and refreshes the list if Timeshift ran (not when polkit refused, or
-    /// the input or device check stopped it first: nothing changed, and without the helper a
-    /// refresh would be another password prompt).
+    /// Shows how it went and refreshes the list if anything may have changed (not when polkit
+    /// refused, or the helper or the disk isn't there).
     fn on_finished(
         &mut self,
         operation: &Operation,
@@ -1501,15 +1459,13 @@ impl AppModel {
             });
         }
         let ran = match &result {
-            Ok(()) => true,
-            Err(CliError::Failed { code, .. }) => !pkexec_refused(*code),
+            // A failed create or delete may have left something (a staging folder, a partly
+            // deleted snapshot): the list shows it.
+            Ok(()) | Err(CliError::Other(_)) => true,
             // Nothing ran, or (disk missing) a list would only fail again.
-            Err(
-                CliError::NotInstalled
-                | CliError::NotAuthorized
-                | CliError::DeviceNotFound { .. }
-                | CliError::Other(_),
-            ) => false,
+            Err(CliError::NoHelper | CliError::NotAuthorized | CliError::DeviceNotFound { .. }) => {
+                false
+            }
         };
         // A bulk delete that got past its first snapshot changed the list either way.
         let ran = ran || matches!(operation, Operation::DeleteMany { done, .. } if *done > 0);
@@ -1544,8 +1500,7 @@ impl AppModel {
                 let reason = error_summary(&error, self.known_uuid.as_deref());
                 Status::Error(fl!("delete-failed", reason = reason))
             }
-            // Dry runs end in `on_dry_run`, restores in `on_restore_done`.
-            (Operation::DryRun(_), _) => Status::Info(fl!("dry-run-done")),
+            // Restores end in `on_restore_done`.
             (Operation::Restore(_), _) => Status::Info(fl!("restore-done")),
         });
         let mut tasks = Vec::new();
@@ -1557,27 +1512,6 @@ impl AppModel {
             tasks.push(focus_input());
         }
         Task::batch(tasks)
-    }
-
-    /// A native dry run ended: its plan goes in the left pane. Nothing was written, so there's
-    /// nothing to refresh.
-    fn on_dry_run(&mut self, result: Result<String, CliError>) -> Task<cosmic::Action<Message>> {
-        self.running = None;
-        match result {
-            Ok(plan) => {
-                self.dry_run_plan = Some(plan);
-                self.overlay = Overlay::DryRun;
-                self.status = Some(Status::Info(fl!("dry-run-done")));
-            }
-            Err(error) => {
-                let reason = error_summary(&error, self.known_uuid.as_deref());
-                self.status = Some(Status::Error(fl!("dry-run-failed", reason = reason)));
-            }
-        }
-        if self.popup.is_some() {
-            return focus_input();
-        }
-        Task::none()
     }
 
     /// Enter on a snapshot: its files, from `/`, through the helper (password once, cached).
@@ -1793,29 +1727,18 @@ impl AppModel {
         Task::batch(tasks)
     }
 
-    /// Saves Apsis's backend choice (changed in the settings view) to cosmic-config, and lists
-    /// again when the backend itself changed.
+    /// Saves Apsis's own settings (changed in the settings view) to cosmic-config.
     fn set_backend(&mut self, choice: ApsisChoice) -> Task<cosmic::Action<Message>> {
-        let switched = choice.native != self.config.native_backend;
         let saved =
             cosmic_config::Config::new(<Self as cosmic::Application>::APP_ID, Config::VERSION)
                 .and_then(|context| {
-                    self.config.set_native_backend(&context, choice.native)?;
-                    self.config.set_native_dry_run(&context, choice.dry_run)?;
                     self.config.set_keep_manual(&context, choice.keep_manual)?;
                     self.config.set_remind_days(&context, choice.remind_days)
                 });
-        let backend_changed = (choice.native, choice.dry_run)
-            != (self.config.native_backend, self.config.native_dry_run);
         self.status = Some(match saved {
-            Ok(_) if !backend_changed => Status::Info(fl!("settings-apsis-saved")),
-            Ok(_) => Status::Info(backend_name(choice)),
+            Ok(_) => Status::Info(fl!("settings-apsis-saved")),
             Err(error) => Status::Error(fl!("backend-save-failed", reason = error.to_string())),
         });
-        if switched {
-            self.dry_run_plan = None;
-            return self.start_list();
-        }
         Task::none()
     }
 
@@ -1856,8 +1779,7 @@ impl AppModel {
                 self.status = Some(Status::Info(fl!("settings-unsaved")));
                 return focus_input();
             }
-            view.edited = view.saved();
-            view.discard_armed = false;
+            view.discard();
             self.status = None;
         }
         if self.overlay != Overlay::None {
@@ -1939,7 +1861,6 @@ impl AppModel {
             return Vec::new();
         };
         let keep = self.config.keep_manual.to_string();
-        let find = |name: &str| self.snapshots().iter().find(|s| s.name == name);
         let mut lines: Vec<String> = plan
             .delete
             .iter()
@@ -1950,21 +1871,6 @@ impl AppModel {
             match why {
                 Kept::Recent => fl!("prune-keep-recent", name = label, count = keep.clone()),
                 Kept::Comment => fl!("prune-keep-comment", name = label),
-                Kept::OtherTags => {
-                    // The tags besides on-demand: why Timeshift's retention decides.
-                    let tags = find(name)
-                        .map(|s| {
-                            let others: Vec<&str> = s
-                                .tags
-                                .iter()
-                                .filter(|&&t| t != apsis_core::Tag::OnDemand)
-                                .map(|t| t.name())
-                                .collect();
-                            others.join(", ")
-                        })
-                        .unwrap_or_default();
-                    fl!("prune-keep-tags", name = label, tags = tags)
-                }
                 Kept::Newest => fl!("prune-keep-newest", name = label),
             }
         }));
@@ -2029,7 +1935,7 @@ impl AppModel {
                     Some(days) => fl!("tooltip-stale", text = text, days = days.to_string()),
                     None => text,
                 };
-                match list.usage.map(|u| u.free).or(list.reported_free) {
+                match list.usage.map(|u| u.free) {
                     Some(free) => fl!("tooltip-free", text = text, free = fmt::size_short(free)),
                     None => text,
                 }
@@ -2085,10 +1991,6 @@ impl AppModel {
     /// ` ~/apsis $ ls --snapshots                 rsync · 3 snapshots`
     fn header(&self) -> Element<'_, Message> {
         let summary = match &self.listing {
-            Listing::Loaded(list) if self.config.native_backend => fl!(
-                "summary-native",
-                summary = fmt::summary(list.mode, list.snapshots.len())
-            ),
             Listing::Loaded(list) => fmt::summary(list.mode, list.snapshots.len()),
             Listing::NotLoaded | Listing::Failed(_) => String::new(),
         };
@@ -2110,8 +2012,7 @@ impl AppModel {
     }
 
     /// `disk  sdX1  ████████░░░░  448G used · 483G free · 9 snapshots` under the panes, from
-    /// the last list. Without `statvfs` numbers there's no bar, only Timeshift's free space;
-    /// with neither, no line at all. Not in the settings view: its notes are sized to fit the
+    /// the last list. Without `statvfs` numbers, no line at all. Not in the settings view: its notes are sized to fit the
     /// smallest window without it (`settings_details_fit...` test).
     fn disk_line(&self) -> Option<Element<'_, Message>> {
         let Listing::Loaded(list) = &self.listing else {
@@ -2120,7 +2021,7 @@ impl AppModel {
         if self.overlay == Overlay::Settings {
             return None;
         }
-        let text = fmt::disk_text(list.usage, list.reported_free, list.snapshots.len())?;
+        let text = fmt::disk_text(list.usage, list.snapshots.len())?;
         let mut children = vec![
             monotext(fl!("disk-label"))
                 .class(theme::Text::Custom(dim_text))
@@ -2153,7 +2054,6 @@ impl AppModel {
         match self.overlay {
             Overlay::Help => fl!("pane-help"),
             Overlay::About => fl!("pane-about"),
-            Overlay::DryRun => fl!("pane-dry-run"),
             Overlay::Prune => fl!("pane-prune"),
             Overlay::Browse => self.browse_title(),
             Overlay::RestorePlan if self.pending_restore.is_some() => fl!("pane-restore-plan"),
@@ -2177,7 +2077,6 @@ impl AppModel {
             (
                 Overlay::Help
                 | Overlay::Settings
-                | Overlay::DryRun
                 | Overlay::Prune
                 | Overlay::Browse
                 | Overlay::RestorePlan,
@@ -2222,7 +2121,6 @@ impl AppModel {
             (Overlay::Settings, _) => self.settings_body(),
             (Overlay::Help, _) => scroll(help()),
             (Overlay::About, _) => scroll(about()),
-            (Overlay::DryRun, _) => scroll(dry_run_view(self.dry_run_plan.as_deref())),
             (Overlay::Prune, _) => scroll(lines(self.prune_lines())),
             (Overlay::Browse, _) => self.browse_body(),
             (Overlay::RestorePlan, _) => scroll(dry_run_view(self.restore_text.as_deref())),
@@ -2317,9 +2215,6 @@ impl AppModel {
                 ),
                 Tone::Normal,
             ),
-            (Some(Operation::DryRun(_)), _) => {
-                (format!("{} {spinner}", fl!("dry-running")), Tone::Normal)
-            }
             (Some(Operation::Restore(request)), _) if request.dry_run => (
                 format!("{} {spinner}", fl!("restore-dry-running")),
                 Tone::Normal,
@@ -2427,16 +2322,18 @@ impl AppModel {
                 .class(theme::Text::Custom(warning_text))
                 .into()
         }));
+        // Before the first save: what was imported from Timeshift's settings.
         if self.overlay == Overlay::Settings
             && let SettingsLoad::Ready(view) = &self.settings
-            && view.info.timeshift_gui_open
+            && view.imported()
+            && view.dirty()
         {
-            lines.push(
-                monotext(fl!("settings-gui-open"))
+            lines.extend(view.info.imported.iter().map(|note| {
+                monotext(note.clone())
                     .wrapping(Wrapping::WordOrGlyph)
                     .class(theme::Text::Custom(warning_text))
-                    .into(),
-            );
+                    .into()
+            }));
         }
         pane(
             fl!("pane-activity"),
@@ -2787,7 +2684,6 @@ impl AppModel {
             }
             Prompt::Count { counted, typed } => (
                 Some(match counted {
-                    Counted::Level(level) => fl!("prompt-count", level = level.name()),
                     Counted::KeepManual => fl!("prompt-keep-manual"),
                     Counted::Remind => fl!("prompt-remind"),
                 }),
@@ -2899,7 +2795,6 @@ fn settings_row<'a>(
 
 /// A settings row's text, and whether it's dimmed (off, or nothing set).
 fn settings_row_text(view: &SettingsView, row: Row) -> (String, bool) {
-    let check = |on: bool| if on { "[x]" } else { "[ ]" };
     match row {
         Row::Device => match view.device() {
             Some(device) => {
@@ -2924,26 +2819,6 @@ fn settings_row_text(view: &SettingsView, row: Row) -> (String, bool) {
                 true,
             ),
         },
-        Row::Mode if view.edited.btrfs_mode => ("btrfs".to_owned(), false),
-        Row::Mode if view.btrfs_available() => ("rsync".to_owned(), false),
-        Row::Mode => (fl!("settings-rsync-only"), false),
-        Row::BtrfsHome => (
-            format!(
-                "{} {}",
-                check(view.edited.include_btrfs_home),
-                fl!("settings-btrfs-home")
-            ),
-            false,
-        ),
-        Row::Schedule(level) => (
-            format!(
-                "{} {:<8} {}",
-                check(view.edited.scheduled(level)),
-                level.name(),
-                fl!("settings-keep", count = view.edited.count(level))
-            ),
-            !view.edited.scheduled(level),
-        ),
         Row::Home(index) => {
             let user = view.user(index);
             let state = view.home_state(index);
@@ -2955,18 +2830,12 @@ fn settings_row_text(view: &SettingsView, row: Row) -> (String, bool) {
             let text = format!("{:<10} {}{encrypted}", user.name, home_state_name(state));
             (text, state == HomeState::Excluded)
         }
-        Row::Filter(index) => (view.edited.exclude[index].clone(), false),
+        // Home folder patterns are shown dimmed: the home rows above change them.
+        Row::Filter(index) => {
+            let filter = &view.edited.filters[index];
+            (filter.clone(), view.is_home_pattern(filter))
+        }
         Row::AddFilter => (fl!("settings-add-filter"), true),
-        Row::Backend if view.backend.native => (fl!("settings-backend-native"), false),
-        Row::Backend => (fl!("settings-backend-timeshift"), false),
-        Row::DryRun => (
-            format!(
-                "{} {}",
-                check(view.backend.dry_run),
-                fl!("settings-dry-run")
-            ),
-            false,
-        ),
         Row::KeepManual => match view.backend.keep_manual {
             0 => (fl!("settings-keep-manual-off"), true),
             keep => (fl!("settings-keep-manual", count = keep.to_string()), false),
@@ -3000,17 +2869,6 @@ fn settings_row_details(view: &SettingsView, row: Row) -> Element<'static, Messa
                 fl!("settings-device-missing-note")
             }
         },
-        Row::Mode if view.edited.btrfs_mode => fl!("settings-mode-btrfs"),
-        Row::Mode if view.btrfs_available() => fl!("settings-mode-rsync"),
-        Row::Mode => fl!("settings-mode-rsync-only"),
-        Row::BtrfsHome => fl!("settings-btrfs-home-note"),
-        Row::Schedule(level) => {
-            pairs.push((
-                fl!("settings-key-keep"),
-                view.edited.count(level).to_string(),
-            ));
-            fl!("settings-schedule-note", level = level.name())
-        }
         Row::Home(index) => {
             let user = view.user(index);
             pairs.extend([
@@ -3033,8 +2891,10 @@ fn settings_row_details(view: &SettingsView, row: Row) -> Element<'static, Messa
             }
         }
         Row::Filter(index) => {
-            let pattern = &view.edited.exclude[index];
-            let kind = if pattern.starts_with("+ ") {
+            let pattern = &view.edited.filters[index];
+            let kind = if view.is_home_pattern(pattern) {
+                fl!("settings-filter-home")
+            } else if pattern.starts_with("+ ") {
                 fl!("settings-filter-include")
             } else {
                 fl!("settings-filter-exclude")
@@ -3043,8 +2903,6 @@ fn settings_row_details(view: &SettingsView, row: Row) -> Element<'static, Messa
             fl!("settings-filter-note")
         }
         Row::AddFilter => fl!("settings-add-note"),
-        Row::Backend => fl!("settings-backend-note"),
-        Row::DryRun => fl!("settings-dry-run-note"),
         Row::KeepManual => fl!("settings-keep-manual-note"),
         Row::Remind => fl!("settings-remind-note"),
     };
@@ -3070,8 +2928,6 @@ fn settings_row_details(view: &SettingsView, row: Row) -> Element<'static, Messa
 fn section_name(section: Section) -> String {
     match section {
         Section::Device => fl!("settings-device"),
-        Section::Mode => fl!("settings-mode"),
-        Section::Schedule => fl!("settings-schedule"),
         Section::Home => fl!("settings-home"),
         Section::Filters => fl!("settings-filters"),
         Section::Apsis => fl!("settings-apsis"),
@@ -3225,19 +3081,9 @@ fn lines<'a>(lines: impl IntoIterator<Item = String>) -> Element<'a, Message> {
 fn error_view<'a>(error: &'a CliError, known_uuid: Option<&str>) -> Element<'a, Message> {
     let mut out = Vec::new();
     match error {
-        CliError::NotInstalled => out.push(fl!("not-installed")),
+        CliError::NoHelper => out.push(fl!("need-helper")),
         CliError::NotAuthorized => out.push(fl!("failed-auth")),
         CliError::DeviceNotFound { device } => out.push(disk_missing(device, known_uuid)),
-        CliError::Failed { code, output } => {
-            out.push(match code {
-                Some(code) => fl!("failed-code", code = code.to_string()),
-                None => fl!("failed-signal"),
-            });
-            if pkexec_refused(*code) {
-                out.push(fl!("failed-auth"));
-            }
-            out.extend(output.iter().cloned());
-        }
         CliError::Other(message) => out.push(fl!("failed-other", message = message.clone())),
     }
     let mut column = vec![
@@ -3255,113 +3101,49 @@ fn error_view<'a>(error: &'a CliError, known_uuid: Option<&str>) -> Element<'a, 
         .into()
 }
 
-/// Lists through `apsis-helper` when it's installed (no password for the active session),
-/// else through pkexec (a password prompt each time). The native backend needs the helper.
-async fn list_snapshots(pkexec: Arc<Cli>, native: bool) -> Result<SnapshotList, CliError> {
-    if native {
-        return native_helper()
-            .await?
-            .native_list()
-            .await
-            .map_err(CliError::from);
-    }
-    if let Some(helper) = HelperClient::connect().await {
-        return helper.list().await.map_err(CliError::from);
-    }
-    blocking(move || pkexec.list()).await
+/// `apsis-helper`, which does everything that needs root. Apsis can't work without it.
+async fn helper() -> Result<HelperClient, CliError> {
+    HelperClient::connect().await.ok_or(CliError::NoHelper)
 }
 
-/// Lists through `apsis-helper` for the reminder; `None` without a helper, so nothing ever
-/// falls back to pkexec (a password dialog out of nowhere).
-fn background_list(native: bool) -> Task<cosmic::Action<Message>> {
+/// Lists through `apsis-helper` (no password for the active session).
+async fn list_snapshots() -> Result<SnapshotList, CliError> {
+    helper().await?.list().await.map_err(CliError::from)
+}
+
+/// Lists through `apsis-helper` for the reminder; `None` without a helper.
+fn background_list() -> Task<cosmic::Action<Message>> {
     cosmic::task::future(async move {
         let Some(helper) = HelperClient::connect().await else {
             return Message::BackgroundListed(None);
         };
-        let listed = if native {
-            helper.native_list().await
-        } else {
-            helper.list().await
-        };
-        Message::BackgroundListed(Some(listed.map_err(CliError::from)))
+        Message::BackgroundListed(Some(helper.list().await.map_err(CliError::from)))
     })
 }
 
-/// `apsis-helper`, which the native backend always runs in (it needs root).
-async fn native_helper() -> Result<HelperClient, CliError> {
-    HelperClient::connect()
-        .await
-        .ok_or_else(|| CliError::Other(fl!("native-need-helper")))
-}
-
-/// The native backend's plan for a create with `comment`; nothing is written.
-async fn native_dry_run(comment: &str) -> Result<String, CliError> {
-    native_helper()
-        .await?
-        .native_dry_run(comment)
-        .await
-        .map_err(CliError::from)
-}
-
-/// Creates or deletes through `apsis-helper` when it's installed, else through pkexec. With
-/// the helper this returns when its `Finished` signal arrives, however long Timeshift takes.
+/// Creates, deletes or restores through `apsis-helper`; returns when its `Finished` signal
+/// arrives, however long rsync takes.
 ///
-/// A helper that's installed but fails is reported, not replaced by pkexec, so a broken
-/// install gets noticed.
-///
-/// With the native backend, a create is the helper's native create. A delete always goes to
-/// Timeshift, which removes native snapshots like its own.
-///
-/// A bulk delete runs one step per call: the snapshot at `done`. Through the helper the
-/// password is asked once (`auth_admin_keep`); through pkexec, for each snapshot.
+/// A bulk delete runs one step per call: the snapshot at `done`. The password is asked once
+/// (`auth_admin_keep`).
 async fn operate(
-    pkexec: Arc<Cli>,
     operation: Operation,
-    native: bool,
     progress: &mut (dyn FnMut(Progress) + Send),
 ) -> Result<(), CliError> {
-    if native && let Operation::Create(comment) = &operation {
-        return native_helper()
-            .await?
-            .native_create_with_progress(comment, progress)
-            .await
-            .map_err(CliError::from);
-    }
-    if let Some(helper) = HelperClient::connect().await {
-        let done = match &operation {
-            Operation::Create(comment) => helper.create_with_progress(comment, progress).await,
-            Operation::Delete(name) => helper.delete(name).await,
-            Operation::DeleteMany { names, done } => match names.get(*done) {
-                Some(name) => helper.delete(name).await,
-                None => Ok(()),
-            },
-            Operation::DryRun(comment) => return native_dry_run(comment).await.map(drop),
-            Operation::Restore(request) => return restore(request, progress).await.map(drop),
-        };
-        return done.map_err(CliError::from);
-    }
-    blocking(move || match &operation {
-        Operation::Create(comment) => pkexec.create(comment),
-        Operation::Delete(name) => pkexec.delete(name),
-        Operation::DeleteMany { names, done } => {
-            names.get(*done).map_or(Ok(()), |n| pkexec.delete(n))
-        }
-        Operation::DryRun(_) => Err(apsis_core::Error::Helper(fl!("native-need-helper"))),
-        Operation::Restore(_) => Err(apsis_core::Error::Helper(fl!("restore-need-helper"))),
-    })
-    .await
+    let helper = helper().await?;
+    let done = match &operation {
+        Operation::Create(comment) => helper.create_with_progress(comment, progress).await,
+        Operation::Delete(name) => helper.delete(name).await,
+        Operation::DeleteMany { names, done } => match names.get(*done) {
+            Some(name) => helper.delete(name).await,
+            None => Ok(()),
+        },
+        Operation::Restore(request) => return restore(request, progress).await.map(drop),
+    };
+    done.map_err(CliError::from)
 }
 
-/// `backend: native rsync, dry run` and the like, for the activity pane.
-fn backend_name(choice: ApsisChoice) -> String {
-    match (choice.native, choice.dry_run) {
-        (false, _) => fl!("backend-now-timeshift"),
-        (true, true) => fl!("backend-now-native-dry-run"),
-        (true, false) => fl!("backend-now-native"),
-    }
-}
-
-/// The left pane after a native dry run: the plan, line by line.
+/// A plan or result in the left pane (a restore's), line by line.
 fn dry_run_view(plan: Option<&str>) -> Element<'static, Message> {
     let lines: Vec<Element<'static, Message>> = plan
         .unwrap_or_default()
@@ -3538,22 +3320,17 @@ where
     cosmic::task::stream(stream::select(updates.map(Message::Progress), done))
 }
 
-/// Timeshift's settings, the devices and the users, through `apsis-helper` (there's no pkexec
-/// fallback: writing the file safely needs the helper).
-async fn read_settings() -> Result<SettingsInfo, CliError> {
-    let helper = HelperClient::connect()
-        .await
-        .ok_or_else(|| CliError::Other(fl!("settings-need-helper")))?;
-    helper.read_settings().await.map_err(CliError::from)
+/// Apsis's config (or the import from Timeshift's settings), the devices and the users,
+/// through `apsis-helper`.
+async fn read_config() -> Result<ConfigInfo, CliError> {
+    helper().await?.read_config().await.map_err(CliError::from)
 }
 
-/// Writes `settings` through `apsis-helper` if the file still reads `expected`.
-async fn write_settings(expected: String, settings: Settings) -> Result<String, CliError> {
-    let helper = HelperClient::connect()
-        .await
-        .ok_or_else(|| CliError::Other(fl!("settings-need-helper")))?;
-    helper
-        .write_settings(&expected, &settings)
+/// Writes `config` through `apsis-helper` if `config.toml` still reads `expected`.
+async fn write_config(expected: String, config: ApsisConfig) -> Result<String, CliError> {
+    helper()
+        .await?
+        .write_config(&expected, &config)
         .await
         .map_err(CliError::from)
 }
@@ -3577,35 +3354,12 @@ fn scroll_to(id: &widget::Id, index: usize, count: usize) -> Task<cosmic::Action
     )
 }
 
-/// Runs blocking pkexec work off the UI's runtime.
-async fn blocking<T: Send + 'static>(
-    work: impl FnOnce() -> apsis_core::Result<T> + Send + 'static,
-) -> Result<T, CliError> {
-    match tokio::task::spawn_blocking(work).await {
-        Ok(done) => done.map_err(CliError::from),
-        Err(join) => Err(CliError::Other(join.to_string())),
-    }
-}
-
-/// pkexec: 126 = not authorised or dialog dismissed, 127 = couldn't authenticate. Timeshift
-/// didn't run.
-fn pkexec_refused(code: Option<i32>) -> bool {
-    matches!(code, Some(126 | 127))
-}
-
-/// Why a create or delete failed, for the activity pane: Timeshift's last lines (one per
-/// line), or what else went wrong.
+/// Why a create or delete failed, for the activity pane.
 fn error_summary(error: &CliError, known_uuid: Option<&str>) -> String {
     match error {
-        CliError::NotInstalled => fl!("not-installed"),
+        CliError::NoHelper => fl!("need-helper"),
         CliError::NotAuthorized => fl!("failed-auth"),
         CliError::DeviceNotFound { device } => disk_missing(device, known_uuid),
-        CliError::Failed { code, .. } if pkexec_refused(*code) => fl!("failed-auth"),
-        CliError::Failed { code, output } if output.is_empty() => match code {
-            Some(code) => fl!("failed-code", code = code.to_string()),
-            None => fl!("failed-signal"),
-        },
-        CliError::Failed { output, .. } => output.join("\n"),
         CliError::Other(message) => message.clone(),
     }
 }
@@ -3706,8 +3460,8 @@ fn help() -> Element<'static, Message> {
 }
 
 /// ```text
-/// Apsis 0.1.0
-/// Timeshift-style system snapshots for the COSMIC™ desktop
+/// Apsis 0.2.0
+/// Simple system snapshots and file restore for the COSMIC™ desktop
 ///
 /// license   GPL-3.0-only
 /// source    https://github.com/atraxsrc/apsis
@@ -4003,7 +3757,6 @@ fn text_style(theme: &Theme, color: Color) -> iced_text::Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apsis_core::settings::Level;
     use cosmic::iced::keyboard::key::{NativeCode, Physical};
     use cosmic::iced::keyboard::{Location, Modifiers};
 
@@ -4108,8 +3861,7 @@ mod tests {
             popup: None,
             menu: None,
             config: Config::default(),
-            pkexec: Arc::new(TimeshiftCli::new(PkexecRunner)),
-            listing: Listing::Failed(CliError::NotInstalled),
+            listing: Listing::Failed(CliError::NoHelper),
             known_uuid: None,
             loading: false,
             running: None,
@@ -4122,7 +3874,6 @@ mod tests {
             overlay: Overlay::None,
             settings: SettingsLoad::NotLoaded,
             saving_settings: false,
-            dry_run_plan: None,
             browser: None,
             pending_restore: None,
             list_after_browser: false,
@@ -4269,7 +4020,7 @@ mod tests {
     #[test]
     fn window_mode_takes_keys_for_the_main_window() {
         let mut app = window_model();
-        app.on_listed(Ok(apsis_core::parse_list(DEVICE_LIST).unwrap()));
+        app.on_listed(Ok(fixture(DEVICE_LIST)));
         let window = app.popup.expect("window open");
         send(&mut app, Message::Key(window, KeyAction::Down));
         assert_eq!(app.selected, 1);
@@ -4289,15 +4040,53 @@ mod tests {
         assert!(app.popup.is_none());
     }
 
-    const DEVICE_LIST: &str = include_str!("../../apsis-core/tests/fixtures/list-rsync-device.txt");
-    const UNCONFIGURED_LIST: &str =
-        include_str!("../../apsis-core/tests/fixtures/list-unconfigured.txt");
+    /// Five snapshots on a configured device, the newest with a comment (as the helper would
+    /// list them, oldest first).
+    const DEVICE_LIST: &str = "device";
+    /// No backup device chosen: no snapshots.
+    const UNCONFIGURED_LIST: &str = "unconfigured";
+    /// [`DEVICE_LIST`] with a warning about an incomplete folder.
+    const STALE_MOUNT_LIST: &str = "warning";
 
-    /// The popup open on a listed fixture. Nothing here runs timeshift: `update`'s tasks are
-    /// dropped without being run.
-    fn listed(fixture: &str) -> AppModel {
+    /// The list `name` stands for (see the constants above).
+    fn fixture(name: &str) -> SnapshotList {
+        if name == UNCONFIGURED_LIST {
+            return SnapshotList::default();
+        }
+        let snapshot = |name: &str, comment: Option<&str>| Snapshot {
+            name: name.to_owned(),
+            created: apsis_core::parse_snapshot_name(name).unwrap(),
+            tags: vec![apsis_core::Tag::OnDemand],
+            comment: comment.map(str::to_owned),
+        };
+        let mut list = SnapshotList {
+            device: Some("/dev/sdX1".to_owned()),
+            uuid: Some("00000000-0000-0000-0000-000000000000".to_owned()),
+            mode: Some(apsis_core::Mode::Rsync),
+            snapshots: vec![
+                snapshot("2026-09-19_09-29-57", None),
+                snapshot("2026-09-19_09-58-41", None),
+                snapshot("2026-09-22_13-28-36", None),
+                snapshot("2026-09-23_08-33-55", None),
+                snapshot(
+                    "2026-09-25_11-28-53",
+                    Some("apsis test: comment with spaces"),
+                ),
+            ],
+            warnings: Vec::new(),
+            usage: None,
+        };
+        if name == STALE_MOUNT_LIST {
+            list.warnings = vec!["2026-09-02_09-00-00: incomplete: no info.json".to_owned()];
+        }
+        list
+    }
+
+    /// The popup open on a listed fixture. Nothing here runs anything as root: `update`'s
+    /// tasks are dropped without being run.
+    fn listed(fixture_name: &str) -> AppModel {
         let mut app = model();
-        app.on_listed(Ok(apsis_core::parse_list(fixture).unwrap()));
+        app.on_listed(Ok(fixture(fixture_name)));
         send(&mut app, Message::TogglePopup);
         assert!(app.popup.is_some() && !app.loading);
         app
@@ -4307,11 +4096,11 @@ mod tests {
         send(app, Message::Input(text.to_owned()));
     }
 
-    fn failed(code: i32) -> Result<(), CliError> {
-        Err(CliError::Failed {
-            code: Some(code),
-            output: vec!["E: boom".to_owned()],
-        })
+    /// A create or delete that ran and failed (rsync, a write): the list may have changed.
+    fn failed() -> Result<(), CliError> {
+        Err(CliError::Other(
+            "rsync exited with code 11: boom".to_owned(),
+        ))
     }
 
     #[test]
@@ -4461,11 +4250,11 @@ mod tests {
         send(&mut app, Message::ToggleHelp);
 
         mark(&mut app, &[0, 1]);
-        let mut list = apsis_core::parse_list(DEVICE_LIST).unwrap();
+        let mut list = fixture(DEVICE_LIST);
         list.snapshots.retain(|s| s.name != app.snapshots()[0].name);
         send(&mut app, Message::Listed(Ok(list)));
         assert_eq!(app.marked.len(), 1);
-        send(&mut app, Message::Listed(Err(CliError::NotInstalled)));
+        send(&mut app, Message::Listed(Err(CliError::NoHelper)));
         assert!(app.marked.is_empty());
     }
 
@@ -4560,13 +4349,13 @@ mod tests {
         };
         app.running = Some(step(0));
         send(&mut app, Message::Finished(step(0), Ok(())));
-        send(&mut app, Message::Finished(step(1), failed(1)));
+        send(&mut app, Message::Finished(step(1), failed()));
 
         assert!(app.running.is_none());
         assert!(app.loading, "one was deleted, so the list changed");
         assert_eq!(
             status_error(&app),
-            "delete stopped at 09-23 08:33: E: boom\n\
+            "delete stopped at 09-23 08:33: rsync exited with code 11: boom\n\
              deleted (1): 09-25 11:28 \"apsis test: comment with spaces\"\n\
              not deleted (2): 09-23 08:33, 09-22 13:28"
         );
@@ -4632,16 +4421,19 @@ mod tests {
     }
 
     #[test]
-    fn finishing_refreshes_only_if_timeshift_ran() {
+    fn finishing_refreshes_only_if_something_may_have_changed() {
         let create = Operation::Create(String::new());
         for (result, refresh) in [
             (Ok(()), true),
-            (failed(1), true),
-            (failed(126), false),
-            (failed(127), false),
-            (Err(CliError::NotInstalled), false),
+            (failed(), true),
+            (Err(CliError::NoHelper), false),
             (Err(CliError::NotAuthorized), false),
-            (Err(CliError::Other("no snapshot device".to_owned())), false),
+            (
+                Err(CliError::DeviceNotFound {
+                    device: "00000000".to_owned(),
+                }),
+                false,
+            ),
         ] {
             let mut app = listed(DEVICE_LIST);
             app.running = Some(create.clone());
@@ -4664,9 +4456,6 @@ mod tests {
         };
         assert!(text.ends_with(&fl!("failed-auth")), "{text}");
     }
-
-    const STALE_MOUNT_LIST: &str =
-        include_str!("../../apsis-core/tests/fixtures/list-rsync-stale-mount.txt");
 
     fn status_error(app: &AppModel) -> &str {
         match &app.status {
@@ -4712,16 +4501,15 @@ mod tests {
     }
 
     #[test]
-    fn timeshift_output_is_shown_not_just_the_exit_code() {
+    fn the_helpers_reason_is_shown() {
         let mut app = listed(DEVICE_LIST);
-        let failed = apsis_core::Error::Failed {
-            code: Some(1),
-            output: "E: first\nE: second".to_owned(),
-        };
+        let failed = apsis_core::Error::InvalidInput(
+            "not deleting 2026-09-19_09-29-57: something is mounted inside it".to_owned(),
+        );
         let delete = Operation::Delete("2026-09-19_09-29-57".to_owned());
         send(&mut app, Message::Finished(delete, Err(failed.into())));
         assert!(
-            status_error(&app).ends_with("E: first\nE: second"),
+            status_error(&app).ends_with("mounted inside it"),
             "{}",
             status_error(&app)
         );
@@ -4731,9 +4519,12 @@ mod tests {
     fn list_warnings_reach_the_activity_pane() {
         let mut app = listed(DEVICE_LIST);
         assert!(app.list_warnings().is_empty());
-        app.on_listed(Ok(apsis_core::parse_list(STALE_MOUNT_LIST).unwrap()));
+        app.on_listed(Ok(fixture(STALE_MOUNT_LIST)));
         assert_eq!(app.snapshots().len(), 5);
-        assert_eq!(app.list_warnings(), ["E: Failed to remove directory"]);
+        assert_eq!(
+            app.list_warnings(),
+            ["2026-09-02_09-00-00: incomplete: no info.json"]
+        );
     }
 
     #[test]
@@ -4765,14 +4556,14 @@ mod tests {
     }
 
     #[test]
-    fn failure_shows_the_last_stderr_line() {
+    fn failure_shows_the_helpers_reason() {
         let mut app = listed(DEVICE_LIST);
         let delete = Operation::Delete("2026-09-19_09-29-57".to_owned());
-        send(&mut app, Message::Finished(delete, failed(1)));
+        send(&mut app, Message::Finished(delete, failed()));
         let Some(Status::Error(text)) = &app.status else {
             panic!("{:?}", app.status)
         };
-        assert!(text.ends_with("E: boom"), "{text}");
+        assert!(text.ends_with("rsync exited with code 11: boom"), "{text}");
     }
 
     #[test]
@@ -4792,7 +4583,7 @@ mod tests {
         assert_eq!(app.activity_line(), (fl!("created"), Tone::Dim));
 
         let delete = Operation::Delete("2026-09-19_09-29-57".to_owned());
-        send(&mut app, Message::Finished(delete, failed(1)));
+        send(&mut app, Message::Finished(delete, failed()));
         assert_eq!(app.activity_line().1, Tone::Error);
     }
 
@@ -5053,7 +4844,7 @@ mod tests {
     }
 
     #[test]
-    fn deletes_and_dry_runs_have_no_progress_line() {
+    fn deletes_have_no_progress_line() {
         let mut app = listed(DEVICE_LIST);
         app.running = Some(Operation::Delete(app.snapshots()[0].name.clone()));
         app.progress = Some(Progress {
@@ -5062,13 +4853,11 @@ mod tests {
             text: String::new(),
         });
         assert_eq!(app.progress_line(), None);
-        app.running = Some(Operation::DryRun(String::new()));
-        assert_eq!(app.progress_line(), None);
     }
 
     /// Six on-demand snapshots a day apart, the oldest commented, the newest last.
     fn manual_list() -> SnapshotList {
-        let mut list = apsis_core::parse_list(DEVICE_LIST).unwrap();
+        let mut list = fixture(DEVICE_LIST);
         list.snapshots = (20..26)
             .map(|day| {
                 let name = format!("2026-09-{day}_10-00-00");
@@ -5112,19 +4901,6 @@ mod tests {
         );
         let lines = app.prune_lines();
         assert_eq!(lines.len(), 6);
-        // A multi-tag one says which other tags keep it.
-        let Listing::Loaded(list) = &mut app.listing else {
-            panic!()
-        };
-        // The list is newest first: the oldest (commented) one is last.
-        let oldest = list.snapshots.last_mut().unwrap();
-        oldest.tags = vec![apsis_core::Tag::OnDemand, apsis_core::Tag::Hourly];
-        oldest.comment = None;
-        assert!(
-            app.prune_lines().iter().any(|l| l.ends_with("also hourly")),
-            "{:?}",
-            app.prune_lines()
-        );
         assert!(lines[0].starts_with("delete"), "{lines:?}");
         assert!(lines.iter().any(|l| l.ends_with("comment")), "{lines:?}");
         typed(&mut app, "y");
@@ -5186,7 +4962,7 @@ mod tests {
         app.running = Some(Operation::Create(String::new()));
         send(
             &mut app,
-            Message::Finished(Operation::Create(String::new()), failed(1)),
+            Message::Finished(Operation::Create(String::new()), failed()),
         );
         send(&mut app, Message::Listed(Ok(manual_list())));
         assert_eq!(app.overlay, Overlay::None);
@@ -5276,10 +5052,10 @@ mod tests {
         assert!(app.disk_line().is_none());
         app.on_listed(Ok(SnapshotList::default()));
         assert!(app.disk_line().is_none(), "unknown usage: no line");
-        // Timeshift's free line alone: a line without a bar, and the tooltip says it.
+        // A list without `statvfs` numbers (the helper couldn't get them): no line either.
         let mut app = listed(DEVICE_LIST);
-        assert!(app.disk_line().is_some());
-        assert!(app.tooltip().ends_with("115G free"), "{}", app.tooltip());
+        assert!(app.disk_line().is_none());
+        assert!(!app.tooltip().contains("free"), "{}", app.tooltip());
         let Listing::Loaded(list) = &mut app.listing else {
             panic!()
         };
@@ -5386,7 +5162,7 @@ mod tests {
     fn selection_stays_in_place_when_the_selected_snapshot_is_gone() {
         let mut app = listed(DEVICE_LIST);
         app.selected = 2;
-        let mut list = apsis_core::parse_list(DEVICE_LIST).unwrap();
+        let mut list = fixture(DEVICE_LIST);
         let gone = app.snapshots()[2].name.clone();
         list.snapshots.retain(|s| s.name != gone);
         app.on_listed(Ok(list));
@@ -5408,13 +5184,24 @@ mod tests {
         assert!(!VERSION.is_empty());
     }
 
-    const CONFIG: &str = include_str!("../../apsis-core/tests/fixtures/config-rsync.json");
+    const TIMESHIFT: &str = include_str!("../../apsis-core/tests/fixtures/config-rsync.json");
     const LSBLK: &str = include_str!("../../apsis-core/tests/fixtures/lsblk.json");
 
-    fn settings_info() -> SettingsInfo {
-        let users = vec![("root".to_owned(), "/root".to_owned(), false)];
-        apsis_core::helper::info_from_wire((CONFIG.to_owned(), LSBLK.to_owned(), users, false))
+    /// A saved config (the real Timeshift file's device and filters), one user: root, whose
+    /// home is "everything" there.
+    fn settings_info() -> ConfigInfo {
+        let config = apsis_core::config::import_timeshift(TIMESHIFT, &[], &[])
             .unwrap()
+            .config;
+        let users = vec![("root".to_owned(), "/root".to_owned(), false)];
+        apsis_core::helper::config_info_from_wire((
+            config.to_text(),
+            apsis_core::helper::config_to_wire(&config),
+            LSBLK.to_owned(),
+            users,
+            Vec::new(),
+        ))
+        .unwrap()
     }
 
     /// The popup on the settings view, read from the fixtures.
@@ -5623,14 +5410,14 @@ mod tests {
     #[test]
     fn space_enter_and_double_click_change_a_row() {
         let mut app = in_settings();
-        go_to(&mut app, Row::Mode);
+        go_to(&mut app, Row::Home(0));
         typed(&mut app, " ");
-        assert!(view(&app).edited.btrfs_mode);
-        send(&mut app, Message::Submit);
-        assert!(!view(&app).edited.btrfs_mode);
-        send(&mut app, Message::SettingsActivate(1));
-        assert!(view(&app).edited.btrfs_mode);
+        assert_eq!(view(&app).home_state(0), HomeState::Excluded);
         assert_eq!(app.body_title(), fl!("pane-settings-unsaved"));
+        send(&mut app, Message::Submit);
+        assert_eq!(view(&app).home_state(0), HomeState::Hidden);
+        send(&mut app, Message::SettingsActivate(1));
+        assert_eq!(view(&app).home_state(0), HomeState::All);
     }
 
     #[test]
@@ -5646,37 +5433,37 @@ mod tests {
         typed(&mut app, "*.mp3");
         send(&mut app, Message::Submit);
         assert_eq!(app.prompt, Prompt::Command);
-        assert_eq!(view(&app).edited.exclude.last().unwrap(), "*.mp3");
+        assert_eq!(view(&app).edited.filters.last().unwrap(), "*.mp3");
         assert_eq!(view(&app).current(), Row::Filter(4));
         typed(&mut app, "x");
-        assert_eq!(view(&app).edited.exclude.len(), 4);
+        assert_eq!(view(&app).edited.filters.len(), 4);
     }
 
     #[test]
     fn counts_take_digits_at_the_prompt() {
         let mut app = in_settings();
-        go_to(&mut app, Row::Schedule(Level::Daily));
+        go_to(&mut app, Row::KeepManual);
         typed(&mut app, "e");
         assert_eq!(
             app.prompt,
             Prompt::Count {
-                counted: Counted::Level(Level::Daily),
-                typed: "5".to_owned()
+                counted: Counted::KeepManual,
+                typed: "0".to_owned()
             }
         );
         typed(&mut app, "12x");
         send(&mut app, Message::Submit);
-        assert_eq!(view(&app).edited.count(Level::Daily), 12);
+        assert_eq!(view(&app).backend.keep_manual, 12);
         typed(&mut app, "+");
         typed(&mut app, "+");
         typed(&mut app, "-");
-        assert_eq!(view(&app).edited.count(Level::Daily), 13);
+        assert_eq!(view(&app).backend.keep_manual, 13);
     }
 
     #[test]
     fn esc_with_unsaved_changes_asks_first() {
         let mut app = in_settings();
-        go_to(&mut app, Row::Schedule(Level::Boot));
+        go_to(&mut app, Row::Home(0));
         typed(&mut app, " ");
         let popup = app.popup.unwrap();
         send(&mut app, Message::Key(popup, KeyAction::Escape));
@@ -5694,13 +5481,13 @@ mod tests {
         // Nothing to write.
         typed(&mut app, "w");
         assert!(!app.saving_settings);
-        go_to(&mut app, Row::Schedule(Level::Daily));
+        go_to(&mut app, Row::Home(0));
         typed(&mut app, " ");
         typed(&mut app, "w");
         assert!(app.saving_settings);
         // Keys wait while it writes.
         typed(&mut app, " ");
-        assert!(view(&app).edited.scheduled(Level::Daily));
+        assert_eq!(view(&app).home_state(0), HomeState::Excluded);
 
         send(&mut app, Message::SettingsWritten(Ok(String::new())));
         assert!(!app.saving_settings);
@@ -5712,12 +5499,12 @@ mod tests {
     #[test]
     fn a_refused_write_keeps_the_edits() {
         let mut app = in_settings();
-        go_to(&mut app, Row::Schedule(Level::Daily));
+        go_to(&mut app, Row::Home(0));
         typed(&mut app, " ");
         typed(&mut app, "w");
         send(
             &mut app,
-            Message::SettingsWritten(Err(CliError::from(apsis_core::Error::SettingsChanged))),
+            Message::SettingsWritten(Err(CliError::from(apsis_core::Error::ConfigChanged))),
         );
         assert!(matches!(app.status, Some(Status::Error(_))));
         assert!(view(&app).dirty());

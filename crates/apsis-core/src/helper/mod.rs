@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Talking to `apsis-helper`, the root D-Bus service that runs Timeshift for the applet.
+//! Talking to `apsis-helper`, the root D-Bus service that does the snapshot work for the applet.
 //!
 //! - [`names`]: the shared bus, interface, error and polkit names.
-//! - [`WireList`]: what `List` returns, and conversions to and from [`SnapshotList`].
-//! - [`WireListWithUsage`]: what `ListWithUsage` returns, the same plus the disk usage.
-//! - [`WireSettingsInfo`] and [`WireSettings`]: what `ReadSettings` returns and `WriteSettings`
-//!   takes.
+//! - [`WireList`] and [`WireListWithUsage`]: a snapshot list and the backup disk's usage.
+//! - [`WireConfigInfo`] and [`WireConfig`]: what `ReadConfig` returns and `WriteConfig` takes.
 //! - [`WireListing`]: what `Browse` returns.
-//! - [`encode_error`] / [`decode_error`]: how a Timeshift failure crosses the bus.
+//! - [`encode_error`] / [`decode_error`]: how errors keep their kind across the bus.
 //! - [`HelperClient`]: the applet's side.
 
 mod client;
@@ -18,13 +16,15 @@ pub use client::HelperClient;
 
 use std::collections::HashMap;
 
+use crate::config::{Config, ConfigInfo};
 use crate::error::{Error, Result};
 use crate::model::{Mode, Snapshot, SnapshotList, Tag, parse_snapshot_name};
 use crate::restore::{Entry, Kind, Listing, Live};
-use crate::settings::{Config, Settings, SettingsInfo, User, parse_lsblk};
+use crate::settings::{User, parse_lsblk};
 use crate::usage::DiskUsage;
 
-/// One snapshot on the bus: `(name, tags, comment)`. Tags are Timeshift's letters (`OB`); an
+/// One snapshot on the bus: `(name, tags, comment)`. Tags are the letters Timeshift's list
+/// showed (`OB`); an
 /// empty comment means none.
 pub type WireSnapshot = (String, String, String);
 
@@ -60,7 +60,7 @@ pub fn to_wire(list: &SnapshotList) -> WireList {
     )
 }
 
-/// The [`SnapshotList`] the helper sent, checked like Timeshift's own output would be.
+/// The [`SnapshotList`] the helper sent, checked again.
 ///
 /// # Errors
 ///
@@ -97,24 +97,22 @@ pub fn from_wire(wire: WireList) -> Result<SnapshotList> {
         mode,
         snapshots,
         warnings,
-        reported_free: None,
         usage: None,
     })
 }
 
 /// Space on the backup device, D-Bus type `a{st}`: bytes by name. `total`, `used` and `free`
-/// come together (`statvfs`), `reported-free` alone (Timeshift's own line); any may be
-/// missing. A dict, so later keys don't change the signature; unknown keys are ignored.
+/// come together (`statvfs`), or none of them. A dict, so later keys don't change the
+/// signature; unknown keys are ignored.
 pub type WireUsage = HashMap<String, u64>;
 
-/// What `ListWithUsage` and `NativeListWithUsage` return, D-Bus type `((sssa(sss)as)a{st})`:
-/// the list as `List` sends it, and the usage.
+/// What `NativeListWithUsage` returns, D-Bus type `((sssa(sss)as)a{st})`: the list and the
+/// usage.
 pub type WireListWithUsage = (WireList, WireUsage);
 
 const USAGE_TOTAL: &str = "total";
 const USAGE_USED: &str = "used";
 const USAGE_FREE: &str = "free";
-const USAGE_REPORTED_FREE: &str = "reported-free";
 
 /// A [`SnapshotList`] with its disk usage, as the helper sends it.
 #[must_use]
@@ -124,9 +122,6 @@ pub fn to_wire_with_usage(list: &SnapshotList) -> WireListWithUsage {
         usage.insert(USAGE_TOTAL.to_owned(), total);
         usage.insert(USAGE_USED.to_owned(), used);
         usage.insert(USAGE_FREE.to_owned(), free);
-    }
-    if let Some(free) = list.reported_free {
-        usage.insert(USAGE_REPORTED_FREE.to_owned(), free);
     }
     (to_wire(list), usage)
 }
@@ -149,32 +144,48 @@ pub fn from_wire_with_usage(wire: WireListWithUsage) -> Result<SnapshotList> {
         }
         _ => None,
     };
-    list.reported_free = get(USAGE_REPORTED_FREE);
     Ok(list)
 }
 
 /// A user on the bus: `(name, home, encrypted_home)`.
 pub type WireUser = (String, String, bool);
 
-/// What `ReadSettings` returns, D-Bus type `(ssa(ssb)b)`: `(settings file, lsblk JSON, users,
-/// timeshift-gtk open)`. The applet parses the file and lsblk's output itself.
-pub type WireSettingsInfo = (String, String, Vec<WireUser>, bool);
+/// A [`Config`] on the bus, D-Bus type `(sas)`: `(backup device UUID, filters)`.
+pub type WireConfig = (String, Vec<String>);
 
-/// [`Settings`] on the bus, D-Bus type `(sbbabauas)`: `(backup device UUID, btrfs mode, include
-/// @home, schedule per level, count per level, filters)`, levels in `Level::ALL` order.
-pub type WireSettings = (String, bool, bool, Vec<bool>, Vec<u32>, Vec<String>);
+/// What `ReadConfig` returns, D-Bus type `(s(sas)sa(ssb)as)`: `(config.toml as read or empty,
+/// the config in effect, lsblk JSON, users, import notes)`. The notes are empty unless the
+/// config was imported from Timeshift's settings.
+pub type WireConfigInfo = (String, WireConfig, String, Vec<WireUser>, Vec<String>);
 
-/// The [`SettingsInfo`] the helper sent.
+#[must_use]
+pub fn config_to_wire(config: &Config) -> WireConfig {
+    (config.backup_device_uuid.clone(), config.filters.clone())
+}
+
+#[must_use]
+pub fn config_from_wire(wire: WireConfig) -> Config {
+    let (backup_device_uuid, filters) = wire;
+    Config {
+        backup_device_uuid,
+        filters,
+    }
+}
+
+/// The [`ConfigInfo`] the helper sent.
 ///
 /// # Errors
 ///
-/// [`Error::InvalidConfig`] for a settings file Apsis can't edit safely, [`Error::Helper`] for
+/// [`Error::InvalidConfig`] for a `config.toml` text that doesn't parse, [`Error::Helper`] for
 /// output that isn't lsblk's.
-pub fn info_from_wire(wire: WireSettingsInfo) -> Result<SettingsInfo> {
-    let (text, lsblk, users, timeshift_gui_open) = wire;
-    Ok(SettingsInfo {
-        config: Config::parse(&text)?,
+pub fn config_info_from_wire(wire: WireConfigInfo) -> Result<ConfigInfo> {
+    let (text, config, lsblk, users, imported) = wire;
+    if !text.is_empty() {
+        Config::parse(&text)?;
+    }
+    Ok(ConfigInfo {
         text,
+        config: config_from_wire(config),
         devices: parse_lsblk(&lsblk)?,
         users: users
             .into_iter()
@@ -184,37 +195,7 @@ pub fn info_from_wire(wire: WireSettingsInfo) -> Result<SettingsInfo> {
                 encrypted_home,
             })
             .collect(),
-        timeshift_gui_open,
-    })
-}
-
-#[must_use]
-pub fn settings_to_wire(settings: &Settings) -> WireSettings {
-    (
-        settings.backup_device_uuid.clone(),
-        settings.btrfs_mode,
-        settings.include_btrfs_home,
-        settings.schedule.to_vec(),
-        settings.counts.to_vec(),
-        settings.exclude.clone(),
-    )
-}
-
-/// The [`Settings`] a caller sent.
-///
-/// # Errors
-///
-/// [`Error::InvalidSettings`] unless there are exactly five schedules and five counts.
-pub fn settings_from_wire(wire: WireSettings) -> Result<Settings> {
-    let (backup_device_uuid, btrfs_mode, include_btrfs_home, schedule, counts, exclude) = wire;
-    let five = || Error::InvalidSettings("expected five schedule levels".to_owned());
-    Ok(Settings {
-        backup_device_uuid,
-        btrfs_mode,
-        include_btrfs_home,
-        schedule: schedule.try_into().map_err(|_| five())?,
-        counts: counts.try_into().map_err(|_| five())?,
-        exclude,
+        imported,
     })
 }
 
@@ -312,25 +293,19 @@ fn non_empty(text: String) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-/// First line of an encoded [`Error::Failed`]; the exit code or `signal` follows, then the output.
-const FAILED_HEADER: &str = "timeshift exit status: ";
 /// An encoded [`Error::DeviceNotFound`]; the device follows.
-const DEVICE_NOT_FOUND_HEADER: &str = "timeshift device not found: ";
+const DEVICE_NOT_FOUND_HEADER: &str = "backup device not found: ";
 /// An encoded [`Error::InvalidInput`]; the reason follows.
 const INVALID_INPUT_HEADER: &str = "refused: ";
 /// An encoded [`Error::Restore`]; the reason follows.
 const RESTORE_HEADER: &str = "restore failed: ";
 
 /// An error as one message for the bus (a D-Bus error's text, or `Finished`'s `message`).
-/// [`Error::Failed`] and [`Error::DeviceNotFound`] keep their details, so [`decode_error`] gives
-/// them back; anything else is its text.
+/// [`Error::DeviceNotFound`], [`Error::InvalidInput`] and [`Error::Restore`] keep their kind, so
+/// [`decode_error`] gives them back; anything else is its text.
 #[must_use]
 pub fn encode_error(error: &Error) -> String {
     match error {
-        Error::Failed { code, output } => {
-            let status = code.map_or_else(|| "signal".to_owned(), |code| code.to_string());
-            format!("{FAILED_HEADER}{status}\n{output}")
-        }
         Error::DeviceNotFound { device } => format!("{DEVICE_NOT_FOUND_HEADER}{device}"),
         Error::InvalidInput(reason) => format!("{INVALID_INPUT_HEADER}{reason}"),
         Error::Restore(reason) => format!("{RESTORE_HEADER}{reason}"),
@@ -353,35 +328,41 @@ pub fn decode_error(message: &str) -> Error {
     if let Some(reason) = message.strip_prefix(RESTORE_HEADER) {
         return Error::Restore(reason.to_owned());
     }
-    let failed = message.strip_prefix(FAILED_HEADER).and_then(|rest| {
-        let (status, output) = rest.split_once('\n').unwrap_or((rest, ""));
-        let code = match status {
-            "signal" => None,
-            code => Some(code.parse().ok()?),
-        };
-        Some(Error::Failed {
-            code,
-            output: output.to_owned(),
-        })
-    });
-    failed.unwrap_or_else(|| Error::Helper(message.to_owned()))
+    Error::Helper(message.to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse_list;
 
-    const DEVICE_LIST: &str = include_str!("../../tests/fixtures/list-rsync-device.txt");
+    /// Three snapshots on a configured device.
+    fn sample() -> SnapshotList {
+        let snapshot = |name: &str| Snapshot {
+            name: name.to_owned(),
+            created: parse_snapshot_name(name).unwrap(),
+            tags: vec![Tag::OnDemand],
+            comment: None,
+        };
+        SnapshotList {
+            device: Some("/dev/sdX1".to_owned()),
+            uuid: Some("00000000-0000-0000-0000-000000000000".to_owned()),
+            mode: Some(Mode::Rsync),
+            snapshots: vec![
+                snapshot("2026-09-19_09-29-57"),
+                snapshot("2026-09-20_10-00-00"),
+                snapshot("2026-09-25_11-28-53"),
+            ],
+            warnings: Vec::new(),
+            usage: None,
+        }
+    }
 
     #[test]
     fn lists_survive_the_bus() {
-        let mut list = parse_list(DEVICE_LIST).unwrap();
+        let mut list = sample();
         list.snapshots[0].tags = vec![Tag::OnDemand, Tag::Boot];
         list.snapshots[1].comment = Some("with \"quotes\" and ünïcode".to_owned());
-        list.warnings = vec!["E: Failed to remove directory".to_owned()];
-        // `List` carries no usage; `ListWithUsage` does (see below).
-        list.reported_free = None;
+        list.warnings = vec!["2026-09-02_09-00-00: incomplete: no info.json".to_owned()];
         assert_eq!(from_wire(to_wire(&list)).unwrap(), list);
 
         let empty = SnapshotList::default();
@@ -390,8 +371,7 @@ mod tests {
 
     #[test]
     fn usage_survives_the_bus() {
-        let mut list = parse_list(DEVICE_LIST).unwrap();
-        assert_eq!(list.reported_free, Some(123_400_000_000));
+        let mut list = sample();
         list.usage = DiskUsage::from_statvfs(1000, 400, 350, 4096);
         assert_eq!(
             from_wire_with_usage(to_wire_with_usage(&list)).unwrap(),
@@ -426,17 +406,16 @@ mod tests {
                 free: 3
             })
         );
-        assert_eq!(later.reported_free, None);
-        assert_eq!(list(&[("reported-free", 42)]).reported_free, Some(42));
+        // An older helper's Timeshift key is just an unknown key now.
+        assert_eq!(list(&[("reported-free", 42)]).usage, None);
     }
 
     #[test]
     fn plain_list_drops_the_usage() {
-        // `List` keeps its old signature: an older applet still reads it.
-        let mut list = parse_list(DEVICE_LIST).unwrap();
+        let mut list = sample();
         list.usage = DiskUsage::from_statvfs(1000, 400, 350, 4096);
         let back = from_wire(to_wire(&list)).unwrap();
-        assert_eq!((back.usage, back.reported_free), (None, None));
+        assert_eq!(back.usage, None);
     }
 
     #[test]
@@ -456,69 +435,65 @@ mod tests {
     }
 
     #[test]
-    fn failures_keep_their_exit_code_and_output() {
-        let cases = [
-            (Some(1), "E: first\nE: last"),
-            (Some(-3), ""),
-            (None, "killed"),
-        ];
-        for (code, output) in cases {
-            let error = Error::Failed {
-                code,
-                output: output.to_owned(),
-            };
-            match decode_error(&encode_error(&error)) {
-                Error::Failed { code: c, output: o } => assert_eq!((c, o.as_str()), (code, output)),
-                other => panic!("{other:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn settings_survive_the_bus() {
-        let settings = Settings {
+    fn configs_survive_the_bus() {
+        let config = Config {
             backup_device_uuid: "uuid".to_owned(),
-            btrfs_mode: true,
-            include_btrfs_home: false,
-            schedule: [true, false, true, false, true],
-            counts: [1, 2, 3, 4, 999],
-            exclude: vec!["+ /root/**".to_owned(), "*.mp3".to_owned()],
+            filters: vec!["+ /root/**".to_owned(), "*.mp3".to_owned()],
         };
-        assert_eq!(
-            settings_from_wire(settings_to_wire(&settings)).unwrap(),
-            settings
-        );
-        let mut short = settings_to_wire(&settings);
-        short.4.pop();
-        assert!(matches!(
-            settings_from_wire(short),
-            Err(Error::InvalidSettings(_))
-        ));
+        assert_eq!(config_from_wire(config_to_wire(&config)), config);
     }
 
     #[test]
-    fn settings_info_is_parsed_on_arrival() {
-        let config = include_str!("../../tests/fixtures/config-rsync.json");
+    fn config_info_is_parsed_on_arrival() {
         let lsblk = include_str!("../../tests/fixtures/lsblk.json");
         let users = vec![("user1".to_owned(), "/home/user1".to_owned(), false)];
-        let info =
-            info_from_wire((config.to_owned(), lsblk.to_owned(), users.clone(), true)).unwrap();
-        assert_eq!(info.text, config);
+        let config = Config {
+            backup_device_uuid: "uuid".to_owned(),
+            filters: Vec::new(),
+        };
+        let wire = (
+            config.to_text(),
+            config_to_wire(&config),
+            lsblk.to_owned(),
+            users.clone(),
+            Vec::new(),
+        );
+        let info = config_info_from_wire(wire).unwrap();
+        assert_eq!(info.saved(), Some(config.clone()));
         assert_eq!(info.devices.len(), 10);
         assert_eq!(info.users[0].home, "/home/user1");
-        assert!(info.timeshift_gui_open);
-        let bad = info_from_wire(("[]".to_owned(), lsblk.to_owned(), users, false));
-        assert!(matches!(bad, Err(Error::InvalidConfig(_))));
+        // No file yet (an import): nothing saved.
+        let imported = (
+            String::new(),
+            config_to_wire(&config),
+            lsblk.to_owned(),
+            users.clone(),
+            vec!["imported".to_owned()],
+        );
+        let info = config_info_from_wire(imported).unwrap();
+        assert_eq!(info.saved(), None);
+        assert_eq!(info.config, config);
+        let bad = (
+            "nope = ".to_owned(),
+            config_to_wire(&config),
+            lsblk.to_owned(),
+            users,
+            Vec::new(),
+        );
+        assert!(matches!(
+            config_info_from_wire(bad),
+            Err(Error::InvalidConfig(_))
+        ));
     }
 
     #[test]
     fn a_missing_disk_survives_the_bus() {
         let error = Error::DeviceNotFound {
-            device: "/dev/sdX1".to_owned(),
+            device: "00000000-0000-0000-0000-000000000000".to_owned(),
         };
         assert!(matches!(
             decode_error(&encode_error(&error)),
-            Error::DeviceNotFound { device } if device == "/dev/sdX1"
+            Error::DeviceNotFound { device } if device.starts_with("0000")
         ));
     }
 
@@ -564,14 +539,10 @@ mod tests {
 
     #[test]
     fn plain_messages_stay_plain() {
-        for message in [
-            "timeshift is not installed",
-            "timeshift exit status: nope\nx",
-            "",
-        ] {
+        for message in ["rsync exited with code 11: no space", "", "refused"] {
             assert!(matches!(decode_error(message), Error::Helper(m) if m == message));
         }
-        let other = Error::NotInstalled;
+        let other = Error::Busy;
         assert_eq!(encode_error(&other), other.to_string());
     }
 }

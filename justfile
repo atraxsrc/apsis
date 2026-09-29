@@ -91,6 +91,27 @@ ext4-image:
 test-ext4:
     APSIS_EXT4_MNT="$(realpath {{ext4-dir}}/mnt)" cargo test -p apsis-core --test native --test restore
 
+# Delete with real mounts inside a snapshot: a bind mount (same filesystem) and the ext4 image
+# (another filesystem, so a loop mount). Makes the folders and prints the mount commands
+# (mounting needs root); `just test-nested-mount` then checks both survive a delete.
+nested-dir := cargo-target-dir / 'nested-mount'
+nested-snap := nested-dir / 'repo' / 'timeshift' / 'snapshots' / '2026-01-01_00-00-00'
+
+nested-mount:
+    test -d {{ext4-dir}}/mnt/lost+found || { echo "mount the ext4 image first (just ext4-image)"; exit 1; }
+    mkdir -p {{nested-snap}}/localhost/bind {{nested-snap}}/localhost/loop {{nested-dir}}/outside
+    printf 'x' > {{nested-snap}}/info.json
+    : > {{nested-snap}}/exclude.list
+    printf 'bind canary\n' > {{nested-dir}}/outside/canary
+    printf 'loop canary\n' > {{ext4-dir}}/mnt/nested-mount-canary
+    @echo "now: sudo mount --bind $(realpath {{nested-dir}}/outside) $(realpath {{nested-snap}}/localhost/bind)"
+    @echo "and: sudo mount --bind $(realpath {{ext4-dir}}/mnt) $(realpath {{nested-snap}}/localhost/loop)"
+    @echo "then: just test-nested-mount"
+
+test-nested-mount:
+    APSIS_NESTED_MOUNT="$(realpath {{nested-dir}}/repo)" cargo test -p apsis-core --test native delete_leaves_real_mounts_inside_alone -- --nocapture
+    @echo "afterwards: sudo umount $(realpath {{nested-snap}}/localhost/bind) $(realpath {{nested-snap}}/localhost/loop)"
+
 # Run the application for testing purposes
 run *args:
     env RUST_BACKTRACE=full cargo run --release -p {{name}} {{args}}

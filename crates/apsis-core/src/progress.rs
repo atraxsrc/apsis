@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! Progress of a long operation (a create or a restore): the percent and time left that
-//! Timeshift and rsync print while they run, read from their output as it arrives.
+//! rsync prints while it runs, read from its output as it arrives.
 //!
-//! Both redraw one terminal line with `\r`, so their stdout is split on `\r` as well as `\n`
-//! ([`Segments`]) before [`parse_timeshift`] or [`parse_rsync`] looks at a piece.
+//! rsync redraws one terminal line with `\r`, so its stdout is split on `\r` as well as `\n`
+//! ([`Segments`]) before [`parse_rsync`] looks at a piece.
 
 use std::io::{self, Read};
 use std::time::{Duration, Instant};
 
-/// How far an operation is. `percent` and `eta_seconds` are `None` until the tool has a real
-/// number: Timeshift prints `??? remaining` before its first estimate.
+/// How far an operation is. `percent` and `eta_seconds` are `None` until there's a real
+/// number.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Progress {
     /// `0.0..=100.0`.
@@ -21,7 +21,7 @@ pub struct Progress {
 }
 
 impl Progress {
-    /// Whether there's a number worth showing: some progress made. `0%` (both tools print it
+    /// Whether there's a number worth showing: some progress made. `0%` (rsync prints it
     /// before anything is copied) is still "estimating".
     #[must_use]
     pub fn has_estimate(&self) -> bool {
@@ -42,27 +42,6 @@ impl Progress {
         }
         self
     }
-}
-
-/// Timeshift's progress line while rsync copies a snapshot (`Main.vala`, 24.01.1):
-/// `"%6.2f%% complete (%s remaining)\r"`, the time `hh:mm:ss` (`format_duration`), or `???`
-/// before any progress. `None` for any other text.
-#[must_use]
-pub fn parse_timeshift(segment: &str) -> Option<Progress> {
-    let text = segment.trim();
-    let (percent, rest) = text.split_once("% complete (")?;
-    let percent = parse_percent(percent)?;
-    let time = rest.strip_suffix(" remaining)")?;
-    let eta_seconds = if time == "???" {
-        None
-    } else {
-        Some(parse_clock(time)?)
-    };
-    Some(Progress {
-        percent: Some(percent),
-        eta_seconds,
-        text: text.to_owned(),
-    })
 }
 
 /// rsync's `--info=progress2` line: `bytes percent% rate time [(xfr#N, to-chk=A/B)]`, e.g.
@@ -233,32 +212,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn timeshift_lines() {
-        let p = parse_timeshift(" 58.23% complete (00:03:12 remaining)").unwrap();
-        assert_eq!((p.percent, p.eta_seconds), (Some(58.23), Some(192)));
-        assert!(p.has_estimate());
-        let p = parse_timeshift("  0.00% complete (??? remaining)").unwrap();
-        assert_eq!((p.percent, p.eta_seconds), (Some(0.0), None));
-        assert!(!p.has_estimate());
-        let p = parse_timeshift("100.00% complete (00:00:00 remaining)").unwrap();
-        assert_eq!(p.eta_seconds, Some(0));
-        let p = parse_timeshift("  1.50% complete (123:04:05 remaining)").unwrap();
-        assert_eq!(p.eta_seconds, Some(123 * 3600 + 4 * 60 + 5));
-        for other in [
-            "",
-            "Estimating system size...",
-            "E: rsync returned an error",
-            "x% complete (00:00:01 remaining)",
-            "101.00% complete (00:00:01 remaining)",
-            "5.00% complete (00:61:00 remaining)",
-            "5.00% complete (soon remaining)",
-            "5.00% complete (00:00:01 left)",
-        ] {
-            assert_eq!(parse_timeshift(other), None, "{other}");
-        }
-    }
-
-    #[test]
     fn rsync_lines() {
         let p = parse_rsync("     50,883,584  42%   11.72MB/s    0:00:05  ").unwrap();
         assert_eq!((p.percent, p.eta_seconds), (Some(42.0), Some(5)));
@@ -309,16 +262,16 @@ mod tests {
 
     #[test]
     fn read_segments_keeps_what_is_not_taken() {
-        let input = &b"Estimating system size...\n 5.00% complete (??? remaining)\r 9.00% \
-complete (00:00:10 remaining)\r    \rE: failed\n"[..];
+        let input = &b"sending incremental file list\n  1,024   5%  1.00kB/s  0:00:10\r  \
+2,048   9%  1.00kB/s  0:00:09\r    \rrsync: failed\n"[..];
         let mut seen = Vec::new();
         let kept = read_segments(input, true, &mut |s| {
-            let progress = parse_timeshift(s);
+            let progress = parse_rsync(s);
             seen.extend(progress.clone());
             progress.is_some()
         })
         .unwrap();
-        assert_eq!(kept, "Estimating system size...\n    \nE: failed\n");
+        assert_eq!(kept, "sending incremental file list\n    \nrsync: failed\n");
         assert_eq!(seen.len(), 2);
         let dropped = read_segments(input, false, &mut |_| false).unwrap();
         assert!(dropped.is_empty());

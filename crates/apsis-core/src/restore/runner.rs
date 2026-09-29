@@ -6,9 +6,9 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 
 use crate::native::runner::stderr_tail;
-use crate::pkexec::find_in_path;
 use crate::progress::read_segments;
-use crate::timeshift::{RunOutput, Runner};
+use crate::runner::find_in_path;
+use crate::runner::{RunOutput, Runner};
 
 /// [`Runner`] for a restore's rsync: stdout is kept whole (the itemized list the plan is read
 /// from), stderr's last lines are kept.

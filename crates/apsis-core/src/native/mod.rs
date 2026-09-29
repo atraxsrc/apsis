@@ -28,6 +28,7 @@
 pub mod distro;
 pub mod exclude;
 pub mod info;
+pub mod prune;
 pub(crate) mod runner;
 
 use std::ffi::OsString;
@@ -45,7 +46,8 @@ use crate::backend::Backend;
 use crate::error::{Error, Result};
 use crate::model::{Mode, Snapshot, SnapshotList, Tag, parse_snapshot_name};
 use crate::progress::{Progress, parse_rsync};
-use crate::timeshift::{Runner, validate_comment};
+use crate::runner::{Runner, validate_comment};
+use crate::usage::mounts_under;
 
 /// Timeshift's folder on the backup device, in rsync mode (`SnapshotRepo.vala:159-168`).
 pub const TIMESHIFT_DIR: &str = "timeshift";
@@ -107,7 +109,11 @@ pub struct NativeRsync<R> {
     clock: Box<dyn Fn() -> Zoned + Send + Sync>,
     log: Box<dyn Fn(&str) + Send + Sync>,
     progress: Box<dyn Fn(Progress) + Send + Sync>,
+    mountinfo: Box<dyn Fn() -> io::Result<String> + Send + Sync>,
 }
+
+/// The mounts a delete checks for, as the kernel lists them for this process.
+const MOUNTINFO: &str = "/proc/self/mountinfo";
 
 impl<R: Runner> NativeRsync<R> {
     /// `runner` runs rsync. The clock is the system's local time; the log goes nowhere.
@@ -118,7 +124,18 @@ impl<R: Runner> NativeRsync<R> {
             clock: Box::new(Zoned::now),
             log: Box::new(|_| {}),
             progress: Box::new(|_| {}),
+            mountinfo: Box::new(|| fs::read_to_string(MOUNTINFO)),
         }
+    }
+
+    /// Reads the mount table from `mountinfo` instead of [`MOUNTINFO`] (for the tests).
+    #[must_use]
+    pub fn with_mountinfo(
+        mut self,
+        mountinfo: impl Fn() -> io::Result<String> + Send + Sync + 'static,
+    ) -> Self {
+        self.mountinfo = Box::new(mountinfo);
+        self
     }
 
     /// Takes the time from `clock` instead (a snapshot's name is its local start time).
@@ -342,6 +359,90 @@ impl<R: Runner> NativeRsync<R> {
         write_synced(&plan.staging.join(INFO_FILE), &info.to_text())
     }
 
+    /// Deletes the snapshot `name`, as root, and only it:
+    ///
+    /// - `name` must be a snapshot name (`YYYY-MM-DD_HH-MM-SS`), so it can't be `snapshots/`
+    ///   itself, `..` or a path;
+    /// - `timeshift/`, `snapshots/` and `<name>/` are each opened with `O_NOFOLLOW`: a symlink
+    ///   anywhere on the way is refused;
+    /// - `<name>/info.json` must be a regular file: a folder that isn't a snapshot is refused;
+    /// - nothing may be mounted at or below `<name>/` (`/proc/self/mountinfo`): a bind mount
+    ///   has the same device number, so the walk alone couldn't tell;
+    /// - the folder is removed with [`prune::remove_at`] (never follows a symlink, never leaves
+    ///   the filesystem);
+    /// - then its links in `snapshots-<tag>/` go, as Timeshift's delete leaves no dangling link;
+    ///   nothing else there is touched.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidSnapshotName`], [`Error::NoSuchSnapshot`], [`Error::InvalidInput`] (the
+    /// refusals above, before anything is deleted), or the delete failed part-way.
+    pub fn delete_snapshot(&self, name: &str) -> Result<()> {
+        use rustix::fs::{AtFlags, FileType, Mode, OFlags, open, openat, statat};
+        use rustix::io::Errno;
+
+        if parse_snapshot_name(name).is_none() {
+            return Err(Error::InvalidSnapshotName(name.to_owned()));
+        }
+        let refuse = |why: &str| Error::InvalidInput(format!("not deleting {name}: {why}"));
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let folder = |errno: Errno, what: &str| match errno {
+            Errno::LOOP | Errno::NOTDIR => refuse(&format!("{what} is a symlink or not a folder")),
+            Errno::NOENT => refuse(&format!("there is no {what}")),
+            other => Error::Io(io::Error::from(other)),
+        };
+        let repo = open(&self.config.repo, flags, Mode::empty())
+            .map_err(|e| folder(e, "backup device folder"))?;
+        let timeshift = openat(&repo, TIMESHIFT_DIR, flags, Mode::empty())
+            .map_err(|e| folder(e, "timeshift/"))?;
+        let snapshots = openat(&timeshift, SNAPSHOTS_DIR, flags, Mode::empty())
+            .map_err(|e| folder(e, "timeshift/snapshots/"))?;
+        let snapshot = match openat(&snapshots, name, flags, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(Errno::NOENT) => return Err(Error::NoSuchSnapshot(name.to_owned())),
+            Err(errno) => return Err(folder(errno, "the snapshot folder")),
+        };
+        let info = statat(&snapshot, INFO_FILE, AtFlags::SYMLINK_NOFOLLOW);
+        if !info.is_ok_and(|st| FileType::from_raw_mode(st.st_mode) == FileType::RegularFile) {
+            return Err(refuse("it has no info.json, so it isn't a snapshot folder"));
+        }
+        drop(snapshot);
+        let path = fs::canonicalize(self.snapshots_dir().join(name))?;
+        let mounts = mounts_under(&(self.mountinfo)()?, &path);
+        if !mounts.is_empty() {
+            let list: Vec<String> = mounts.iter().map(|m| m.display().to_string()).collect();
+            return Err(refuse(&format!(
+                "something is mounted inside it ({}); unmount it first",
+                list.join(", ")
+            )));
+        }
+        prune::remove_at(&snapshots, &self.snapshots_dir(), name)?;
+        self.remove_tag_links(name)?;
+        (self.log)(&format!(
+            "deleted {}",
+            self.snapshots_dir().join(name).display()
+        ));
+        Ok(())
+    }
+
+    /// Removes `snapshots-<tag>/<name>` for each tag folder, where that is a symlink. A tag
+    /// folder that is itself a symlink, and anything that isn't a link, are left alone.
+    fn remove_tag_links(&self, name: &str) -> Result<()> {
+        for tag in SYMLINK_TAGS {
+            let dir = self
+                .timeshift_dir()
+                .join(format!("{SNAPSHOTS_DIR}-{}", tag.word()));
+            if !fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+                continue;
+            }
+            let link = dir.join(name);
+            if fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()) {
+                fs::remove_file(&link)?;
+            }
+        }
+        Ok(())
+    }
+
     /// `create_symlinks` (`SnapshotRepo.vala:929-991`): each tag folder is emptied and
     /// re-created, then every valid snapshot gets `snapshots-<tag>/<name> ->
     /// ../snapshots/<name>` for each of its tags.
@@ -404,7 +505,6 @@ impl<R: Runner> Backend for NativeRsync<R> {
             snapshots,
             warnings,
             // The helper adds what `statvfs` says while the device is mounted.
-            reported_free: None,
             usage: None,
         })
     }
@@ -419,19 +519,9 @@ impl<R: Runner> Backend for NativeRsync<R> {
         self.execute(&plan)
     }
 
-    /// Removes the snapshot's folder, then updates the tag folders.
+    /// Deletes one snapshot: see [`NativeRsync::delete_snapshot`].
     fn delete(&self, name: &str) -> Result<()> {
-        if parse_snapshot_name(name).is_none() {
-            return Err(Error::InvalidSnapshotName(name.to_owned()));
-        }
-        self.check_folders()?;
-        let path = self.snapshots_dir().join(name);
-        if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
-            return Err(Error::NoSuchSnapshot(name.to_owned()));
-        }
-        fs::remove_dir_all(&path)?;
-        (self.log)(&format!("deleted {}", path.display()));
-        self.update_symlinks()
+        self.delete_snapshot(name)
     }
 }
 

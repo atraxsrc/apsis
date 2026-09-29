@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/atraxsrc/apsis"
@@ -18,6 +18,8 @@ rust-embed = "8.11"
 rustix = { version = "1", features = ["fs", "process"] }
 # Timeshift's config: `preserve_order` keeps its fields in the order they were read.
 serde_json = { version = "1", features = ["preserve_order"] }
+# /etc/apsis/config.toml. 0.5 is the version already in the dependency tree (no download).
+toml = "0.5"
 thiserror = "2"
 tokio = { version = "1.52.0", features = ["full"] }
 xdgen = "0.1"

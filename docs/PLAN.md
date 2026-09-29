@@ -412,6 +412,213 @@ original, and the journal shows each call.
 - `just deb-install` for testing on the user's machine (builds the .deb, reinstalls it with
   apt, stops the helper). - done 2026-09-28.
 
+## 0.2.0 Standalone (design approved 2026-09-29, built, tested by the user)
+
+- **Status: built 2026-09-29; the user's 8 real-machine checks passed the same day (old schedule
+  removed, install, import and `w`, list/create at idle priority/delete/bulk delete with
+  Timeshift not running, tag links, real bind and loop mounts inside a snapshot, keep-last-N,
+  restore, disk unplugged). Release 0.2.0 prepared, not committed.** Approved with decisions 1-5 as recommended and
+  the user's delete conditions (see DECISIONS.md). Differences from the text below, found while
+  building:
+  - **config.toml has one ordered `filters` list** (Timeshift's format, home patterns inside)
+    instead of `exclude` + a `[home]` table: rsync takes the first matching filter, so splitting
+    the home patterns out would reorder them against the other filters and change what a
+    snapshot holds. The settings view still shows one home row per user, read from the list.
+  - `WriteConfig` takes the config as `(sas)` (device UUID, filters), not TOML text.
+  - Delete also refuses a snapshot with anything mounted inside it (`/proc/self/mountinfo`),
+    before deleting anything: a bind mount has the same device number, so the no-follow,
+    same-filesystem walk alone would empty it.
+
+**Direction (the user's, 2026-09-29):** Apsis becomes a simple, standalone snapshot and restore
+program. Manual only: no scheduling, no automatic retention; a snapshot is deleted only when
+the user deletes it (one, marked ones, or the keep-last-N preview after `y`). The native rsync
+backend is the only backend; nothing runs `timeshift`. The Phase 5.2 schedule is parked on
+branch `phase-5.2-schedule` (`a2a0629`, not merged, not pushed). No new features: this removes
+code and moves what stays onto Apsis's own config.
+
+### What stays on disk
+
+The backup device keeps Timeshift's rsync layout, unchanged (Phase 5): `timeshift/snapshots/
+<name>/{localhost/,info.json,exclude.list,rsync-log}`, the `snapshots-<tag>/` links, and
+Apsis's `timeshift/apsis-staging/`. Existing snapshots (Timeshift's and native ones) keep
+listing, restoring and deleting. New snapshots stay tagged `ondemand`, so an installed Timeshift
+still reads them, and its own retention never removes them (it never removes `ondemand`).
+
+### Config: `/etc/apsis/config.toml`
+
+Root-owned, 0644, written only by `apsis-helper` (atomically, temp + rename, `.bak` kept, like
+the Phase 4.5 writer), with polkit `configure`. The TOML crate already in `Cargo.lock`
+(`toml` 0.5.11) reads and writes it; no new download.
+
+```toml
+# Written by apsis-helper; change it in Apsis's settings.
+version = 1
+backup_device_uuid = "8cecb045-975d-49d0-bd57-1ec9f6eb77b5"
+exclude = ["/var/lib/libvirt/**", "*.mp3"]
+
+[home]        # per user: "excluded" (default), "hidden" (dot-files only), "all"
+root = "excluded"
+user1 = "all"
+```
+
+- A user not listed is `excluded`, as Timeshift's default (`Main.vala:751-781`). ecryptfs homes
+  are always excluded (Timeshift's own patterns for them stay in the exclude builder).
+- The rsync filters are built exactly as today: `exclude` plus Timeshift's home patterns
+  (`<home>/**`, `+ <home>/.**`, `+ <home>/**`) go in as the "user filters" of
+  `native::exclude::for_backup`, which adds Timeshift's defaults, fstab mounts and so on. So a
+  snapshot made after the switch excludes exactly what one made before it did, and
+  `--link-dest` keeps hard-linking.
+- Checks before writing (as now): the device connected, unencrypted, a Linux filesystem; filters
+  not blank, no control characters, no duplicates; home values one of the three.
+
+**Import, once.** While `config.toml` doesn't exist and `/etc/timeshift/timeshift.json` does,
+`ReadConfig` returns a config built from it (read only): `backup_device_uuid`, the `exclude`
+list split into home modes (the existing `HomeState` reading) and other filters. The settings
+view says so (`imported from Timeshift, w saves it`) and the activity pane lists what was taken
+and what wasn't:
+
+```
+imported from /etc/timeshift/timeshift.json (not saved yet; w saves):
+  device   8cecb045… (sda1, ext4)
+  home     user1: everything, root: excluded
+  filters  4
+  not used schedule and counts (Apsis doesn't schedule), btrfs mode
+```
+
+List and create use that imported config until it's saved (so the first run works without a
+`w`); once `config.toml` exists, `timeshift.json` is never read again. Timeshift in btrfs mode:
+the device is still imported, with a note that btrfs snapshots aren't shown. No `timeshift.json`
+and no config: `no backup device: pick one in settings [s]`.
+
+### Backend
+
+- **One backend, `native::NativeRsync`,** through the helper only. Removed: `TimeshiftCli`, the
+  `--list` parser, `PkexecRunner` and the pkexec fallback (they run `timeshift`), and the
+  applet's backend choice. Without `apsis-helper` the popup says `Apsis needs apsis-helper
+  (install the .deb)` and does nothing else.
+- **List** (with the disk bar from `statvfs` while mounted), **create** (low priority, already on
+  main since `90272f5`: `ionice -c 3 nice -n <to 19>` around rsync; progress from
+  `--info=progress2`), **delete** and bulk delete, **browse/restore** (6a): as now.
+- **Delete becomes native** (it went through Timeshift). Recommended: bring
+  `native::prune::remove_tree` over from the parked branch: it walks with
+  `openat(O_NOFOLLOW | O_DIRECTORY)` and stops at another filesystem, where the current native
+  `delete` uses `std::fs::remove_dir_all`, which doesn't follow symlinks but does empty a mount
+  inside the tree. Only `snapshots/<name>` with a valid name, a real folder (not a symlink), and
+  a name the fresh list has.
+- **Timeshift's lock is no longer checked** (as asked). Consequence: if Timeshift is still
+  installed and runs on the same disk at the same moment, both write there. Apsis builds in
+  `apsis-staging/` and only renames into `snapshots/`, and Timeshift never removes `ondemand`
+  snapshots, so neither loses the other's snapshots; they'd only compete for disk and I/O.
+- **Keep last N** (main's `retention::manual`, opt-in, preview + `y`): the Timeshift rule goes
+  ("a snapshot with another tag is left to Timeshift's retention"). N counts every uncommented
+  snapshot in the list, whatever its tags; commented ones stay pinned and uncounted; the newest
+  is never deleted. `Kept::OtherTags` is removed. **Remind** stays as it is.
+
+### Helper methods (interface stays `io.github.atraxsrc.Apsis.Helper1`)
+
+| method | now | 0.2.0 |
+|---|---|---|
+| `List`, `ListWithUsage` | `timeshift --list` | **removed** |
+| `Create(s)` | `timeshift --create` | **removed** |
+| `NativeList` | native, no usage | **removed** (the applet calls the `WithUsage` form) |
+| `NativeListWithUsage` | native + `statvfs` | kept |
+| `NativeCreate(s)` | native, low priority | kept |
+| `NativeDryRun(s)` | native plan | **removed** with the dry-run setting (decision 2) |
+| `Delete(s)` | `timeshift --delete` | **changed**: native delete (safe walk), same signature and polkit `delete`, `Finished("delete", ..)` as now |
+| `ReadSettings`, `WriteSettings` | `timeshift.json` | **removed** |
+| `ReadConfig() -> (s, s, a(ssb), as)` | - | **replaces ReadSettings**: `(config.toml text or the import, lsblk JSON, users, import notes)`; empty notes = nothing imported. polkit `list` |
+| `WriteConfig(s expected, s config) -> s` | - | **replaces WriteSettings**: writes `config.toml` if it still reads `expected` (`""` = doesn't exist yet), after the checks above. polkit `configure` |
+| `Browse`, `Restore`, `Progress`, `Finished` | | kept |
+
+An older applet still running after the upgrade gets `UnknownMethod` for `List`/`ReadSettings`
+and shows an error until it's re-added to the panel (`just deb-install` already says so).
+
+**polkit actions: all seven kept, none added or changed** (`list`, `create`, `delete`,
+`configure`, `browse`, `restore`, `restore-original`). `create` now only covers `NativeCreate`,
+`configure` only `WriteConfig`.
+
+### Applet
+
+- **Settings view**: `device`, `home` (one row per user), `filters` (+ add), then Apsis's own
+  `keep manual` and `remind`. Removed: `mode` (rsync/btrfs), `@home`, the five schedule rows and
+  counts, `backend`, `dry run`. `w` writes `config.toml`; `keep manual` and `remind` are still
+  saved at once (cosmic-config). The "close Timeshift's own window first" warning goes.
+- `[c]` always creates for real (after the comment prompt), with progress.
+- Errors: Timeshift's `E:` lines, `Ret=`, "timeshift not installed", the `timeshift --list`
+  spinner text and the `Failed { code, output }` mapping go; native errors show as they are.
+- Header: `rsync · 3 snapshots` (no `native ·`).
+- cosmic-config: `native_backend` and `native_dry_run` are no longer read (left in old configs,
+  harmless).
+
+### Files and tests
+
+Removed:
+- `apsis-core/src/timeshift.rs` (`TimeshiftCli`, `Runner` moves to `native/runner.rs` or
+  `lib.rs`), `parse.rs`, `pkexec.rs`; in `settings.rs` everything that edits `timeshift.json`
+  (`Config::edit`, `write`, the string-field rules); in `progress.rs` Timeshift's `% complete`
+  parser; in `usage.rs` Timeshift's `X GB free` line; in `error.rs` `UnrecognisedOutput`,
+  `NotInstalled`, `Failed { code, output }`, `NoSnapshotDevice` (list-first rule),
+  `SettingsChanged` becomes `ConfigChanged`.
+- `apsis-helper`: `state.rs`'s `TimeshiftCli` (the lock and idle exit stay), `settings.rs`'s
+  `Files` writer for `timeshift.json` (the atomic writer stays, for `config.toml`), `native.rs`'s
+  `TIMESHIFT_LOCK`/`timeshift_running`, `usage.rs`'s `ListWithUsage` path.
+- Tests: `tests/parse_list.rs`, `tests/timeshift_cli.rs`, `tests/pkexec.rs`, the Timeshift
+  cases in `tests/progress.rs` and `tests/settings.rs`; fixtures `list-*.txt` (6) and
+  `create-rsync-progress.txt`. The applet's Timeshift/pkexec tests.
+- `docs/TIMESHIFT-CLI.md` (history keeps it; Phase 5's references to Timeshift's source stay in
+  DECISIONS.md).
+
+Added or changed:
+- `apsis-core/src/config.rs`: `Config` (TOML read/write, checks), `import(timeshift_json,
+  users) -> (Config, notes)`, `user_filters()` for the exclude builder. Tests: round trip,
+  defaults, bad values, import from the real `config-rsync.json` fixture (kept) giving the same
+  rsync filter list as today (`exclude.list` fixture), btrfs note.
+- `native/prune.rs` from the branch (with its tests), `Backend::delete` using it.
+- `retention::manual` without the tag rule (tests updated).
+- Helper: `ReadConfig`/`WriteConfig`, native `Delete`; interface test counts 7 methods.
+
+### .deb and install
+
+- `recommends = "timeshift"` goes (it was a Recommends, not a Depends); `rsync`, `dbus`,
+  `polkitd` stay. No maintainer script changes; no files added or removed from the package
+  (the helper, its unit, bus files and policy stay).
+- `postrm purge` removes `/etc/apsis/` (Apsis's config) - new.
+
+### Root-level and destructive, for review
+
+- **Delete is Apsis's own, as root**: `rm` of `snapshots/<name>` through the safe walk, for
+  single, bulk and keep-last-N deletes. Timeshift did this before.
+- **New root-owned file** `/etc/apsis/config.toml` (+ `.bak`), written by the helper; removed on
+  purge.
+- **Timeshift's lock is ignored** (see Backend).
+- **`timeshift.json` is only read, once, for the import**; Apsis never writes it again.
+- **Dropping `Recommends: timeshift`**: if apt installed Timeshift automatically because of it,
+  `apt autoremove` would later offer to remove Timeshift (the package; not its snapshots or
+  settings). Check with `apt-mark showauto | grep timeshift`; `sudo apt-mark manual timeshift`
+  keeps it.
+
+### Decisions for you
+
+1. Delete through `remove_tree` from the parked branch (recommended), or keep
+   `remove_dir_all`?
+2. Drop the dry-run setting and `NativeDryRun` (recommended: with one backend, a default that
+   makes `c` not create is confusing), or keep it (off by default)?
+3. Keep last N: count every uncommented snapshot regardless of tags (recommended), or only
+   `ondemand` ones? Snapshots of another system on the same disk would count too (the list
+   doesn't tell systems apart; rare).
+4. Restores at idle priority too, or only creates (recommended: a restore is something the
+   user waits for)?
+5. Home mode per user as now (recommended; it's what's already built and imported), or one
+   mode for all users?
+
+### Done when
+
+`cargo test`, clippy, fmt; `just test-ext4` (native, restore); on the user's machine: first run
+shows the import and `w` saves `/etc/apsis/config.toml`; list, create (idle, progress), delete,
+bulk delete, keep-last-N and restore work with Timeshift uninstalled (or at least never run: a
+check that nothing executes `timeshift`); existing Timeshift snapshots still list and restore.
+Then README, man page and metainfo for 0.2.0.
+
 ## Phase 7 — Release
 
 - README screenshots, metainfo, `just vendor` tarball, tag `v0.1.0` (user pushes).

@@ -1,6 +1,6 @@
 [package]
 name = "apsis"
-description = "Timeshift-style system snapshots for the COSMIC™ desktop"
+description = "Simple system snapshots and file restore for the COSMIC™ desktop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -33,12 +33,12 @@ copyright = "2026 atraxsrc"
 section = "admin"
 priority = "optional"
 depends = "$auto, rsync, dbus, polkitd, libwayland-client0"
-recommends = "timeshift"
 extended-description = """\
-A COSMIC panel applet whose popup looks like a small terminal. It lists, creates and deletes \
-Timeshift snapshots, edits Timeshift's settings, and follows the COSMIC theme. Includes \
-apsis-helper, a D-Bus activated root service guarded by polkit. The native rsync backend and \
-file-level restore are experimental."""
+A COSMIC panel applet whose popup looks like a small terminal. It creates, lists and deletes \
+rsync system snapshots (in Timeshift's layout, so existing Timeshift snapshots keep working), \
+restores single files from them, and follows the COSMIC theme. Manual only: no schedule, and \
+snapshots are only deleted when you delete them. Includes apsis-helper, a D-Bus activated \
+root service guarded by polkit."""
 changelog = "../../resources/deb/changelog"
 maintainer-scripts = "../../resources/deb/"
 assets = [

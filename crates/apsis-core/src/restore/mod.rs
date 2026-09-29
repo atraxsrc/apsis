@@ -33,7 +33,7 @@ pub use runner::RsyncRunner;
 
 use crate::error::{Error, Result};
 use crate::progress::{Progress, parse_rsync};
-use crate::timeshift::{RunOutput, Runner};
+use crate::runner::{RunOutput, Runner};
 
 /// Most paths one restore takes.
 pub const MAX_PATHS: usize = 1000;

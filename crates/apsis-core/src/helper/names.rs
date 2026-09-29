@@ -12,34 +12,20 @@ pub const OBJECT_PATH: &str = "/io/github/atraxsrc/Apsis/Helper";
 /// The helper's interface. The `1` is its version; a breaking change gets a new interface.
 pub const INTERFACE: &str = "io.github.atraxsrc.Apsis.Helper1";
 
-/// `List() -> (sssa(sss)as)`: see [`super::WireList`]. Kept as it was for older applets;
-/// this applet calls [`METHOD_LIST_WITH_USAGE`].
-pub const METHOD_LIST: &str = "List";
-/// `ListWithUsage() -> ((sssa(sss)as)a{st})`: [`METHOD_LIST`] plus the backup device's disk
-/// usage, see [`super::WireListWithUsage`]. Same polkit action.
-pub const METHOD_LIST_WITH_USAGE: &str = "ListWithUsage";
-/// `Create(s comment)`: returns once the create has started; [`SIGNAL_FINISHED`] follows.
-pub const METHOD_CREATE: &str = "Create";
-/// `Delete(s name)`: returns once the delete has started; [`SIGNAL_FINISHED`] follows.
-pub const METHOD_DELETE: &str = "Delete";
-/// `ReadSettings() -> (ssa(ssb)b)`: see [`super::WireSettingsInfo`].
-pub const METHOD_READ_SETTINGS: &str = "ReadSettings";
-/// `WriteSettings(s expected, (sbbabauas) settings) -> s note`: writes Timeshift's settings if
-/// the file still reads `expected`, then lets Timeshift sync its schedule. `note` is empty, or
-/// says what went wrong after the write. See [`super::WireSettings`].
-pub const METHOD_WRITE_SETTINGS: &str = "WriteSettings";
-/// `NativeList() -> (sssa(sss)as)`: like [`METHOD_LIST`], read by the native backend from the
-/// backup device (mounted read-only) instead of `timeshift --list`.
-pub const METHOD_NATIVE_LIST: &str = "NativeList";
-/// `NativeListWithUsage() -> ((sssa(sss)as)a{st})`: [`METHOD_NATIVE_LIST`] plus the disk
-/// usage, as [`METHOD_LIST_WITH_USAGE`].
+/// `NativeListWithUsage() -> ((sssa(sss)as)a{st})`: the snapshots on the backup device
+/// (mounted read-only for the call) and its disk usage. See [`super::WireListWithUsage`].
 pub const METHOD_NATIVE_LIST_WITH_USAGE: &str = "NativeListWithUsage";
-/// `NativeDryRun(s comment) -> s plan`: what a native create would do, as text. Mounts the
-/// backup device read-only and writes nothing.
-pub const METHOD_NATIVE_DRY_RUN: &str = "NativeDryRun";
-/// `NativeCreate(s comment)`: a native rsync snapshot. Returns once started;
+/// `NativeCreate(s comment)`: a new snapshot (rsync at idle priority). Returns once started;
 /// [`SIGNAL_FINISHED`] with [`OP_CREATE`] follows.
 pub const METHOD_NATIVE_CREATE: &str = "NativeCreate";
+/// `Delete(s name)`: deletes one snapshot folder (and its tag links). Returns once started;
+/// [`SIGNAL_FINISHED`] with [`OP_DELETE`] follows.
+pub const METHOD_DELETE: &str = "Delete";
+/// `ReadConfig() -> (s(sas)sa(ssb)as)`: see [`super::WireConfigInfo`].
+pub const METHOD_READ_CONFIG: &str = "ReadConfig";
+/// `WriteConfig(s expected, (sas) config) -> s note`: writes `/etc/apsis/config.toml` if it
+/// still reads `expected` (empty: there's none yet). See [`super::WireConfig`].
+pub const METHOD_WRITE_CONFIG: &str = "WriteConfig";
 /// `Browse(s snapshot, s path) -> (a(sstxuuussstx)b)`: one folder of a snapshot, each entry
 /// compared with the running system. See [`super::WireListing`].
 pub const METHOD_BROWSE: &str = "Browse";
@@ -53,7 +39,7 @@ pub const METHOD_RESTORE: &str = "Restore";
 pub const SIGNAL_PROGRESS: &str = "Progress";
 /// `Finished(s op, b ok, s message)`, sent only to the caller that started the operation.
 pub const SIGNAL_FINISHED: &str = "Finished";
-/// `op` in [`SIGNAL_FINISHED`] after [`METHOD_CREATE`].
+/// `op` in [`SIGNAL_FINISHED`] after [`METHOD_NATIVE_CREATE`].
 pub const OP_CREATE: &str = "create";
 /// `op` in [`SIGNAL_FINISHED`] after [`METHOD_DELETE`].
 pub const OP_DELETE: &str = "delete";
@@ -64,29 +50,25 @@ pub const OP_RESTORE: &str = "restore";
 pub const ERROR_PREFIX: &str = "io.github.atraxsrc.Apsis.Helper1.Error";
 /// polkit refused, or the password dialog was dismissed.
 pub const ERROR_NOT_AUTHORIZED: &str = "io.github.atraxsrc.Apsis.Helper1.Error.NotAuthorized";
-/// Another list, create or delete is running.
+/// Another operation is running.
 pub const ERROR_BUSY: &str = "io.github.atraxsrc.Apsis.Helper1.Error.Busy";
-/// A comment, snapshot name, setting or restore request the helper refuses.
+/// A comment, snapshot name, config or restore request the helper refuses.
 pub const ERROR_INVALID_INPUT: &str = "io.github.atraxsrc.Apsis.Helper1.Error.InvalidInput";
-/// `timeshift` isn't installed.
-pub const ERROR_NOT_INSTALLED: &str = "io.github.atraxsrc.Apsis.Helper1.Error.NotInstalled";
-/// Timeshift failed; the message is from [`super::encode_error`] or a plain reason.
+/// The operation failed; the message is from [`super::encode_error`] or a plain reason.
 pub const ERROR_FAILED: &str = "io.github.atraxsrc.Apsis.Helper1.Error.Failed";
 /// The backup disk isn't there; the message is from [`super::encode_error`].
 pub const ERROR_DEVICE_NOT_FOUND: &str = "io.github.atraxsrc.Apsis.Helper1.Error.DeviceNotFound";
-/// `WriteSettings`: the settings file changed since the caller read it.
+/// `WriteConfig`: the config file changed since the caller read it.
 pub const ERROR_CHANGED: &str = "io.github.atraxsrc.Apsis.Helper1.Error.Changed";
 
-/// polkit action for [`METHOD_LIST`], [`METHOD_NATIVE_LIST`], their `WithUsage` forms and
-/// [`METHOD_NATIVE_DRY_RUN`]:
-/// allowed for the active local session, no password.
+/// polkit action for [`METHOD_NATIVE_LIST_WITH_USAGE`] and [`METHOD_READ_CONFIG`]: allowed
+/// for the active local session, no password.
 pub const ACTION_LIST: &str = "io.github.atraxsrc.Apsis.list";
-/// polkit action for [`METHOD_CREATE`] and [`METHOD_NATIVE_CREATE`]: `auth_admin_keep`.
+/// polkit action for [`METHOD_NATIVE_CREATE`]: `auth_admin_keep`.
 pub const ACTION_CREATE: &str = "io.github.atraxsrc.Apsis.create";
 /// polkit action for [`METHOD_DELETE`]: `auth_admin_keep`.
 pub const ACTION_DELETE: &str = "io.github.atraxsrc.Apsis.delete";
-/// polkit action for [`METHOD_WRITE_SETTINGS`]: `auth_admin_keep`. ([`METHOD_READ_SETTINGS`]
-/// uses [`ACTION_LIST`].)
+/// polkit action for [`METHOD_WRITE_CONFIG`]: `auth_admin_keep`.
 pub const ACTION_CONFIGURE: &str = "io.github.atraxsrc.Apsis.configure";
 
 /// polkit action for [`METHOD_BROWSE`] and restore dry runs: `auth_admin_keep` (snapshots
@@ -110,7 +92,6 @@ mod tests {
             ERROR_NOT_AUTHORIZED,
             ERROR_BUSY,
             ERROR_INVALID_INPUT,
-            ERROR_NOT_INSTALLED,
             ERROR_FAILED,
             ERROR_DEVICE_NOT_FOUND,
             ERROR_CHANGED,

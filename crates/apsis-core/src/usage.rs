@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Space on the backup device: what `statvfs` says about a mounted filesystem, Timeshift's own
-//! `N snapshots, X GB free` line, and finding where a device is mounted in
+//! Space on the backup device (what `statvfs` says about a mounted filesystem), and reading
 //! `/proc/self/mountinfo`. No syscalls here; `apsis-helper` makes them.
 
 use std::path::{Path, PathBuf};
@@ -57,73 +56,18 @@ impl DiskUsage {
     }
 }
 
-/// The free space in Timeshift's `5 snapshots, 123.4 GB free` line (`SnapshotRepo.vala`,
-/// `format_file_size`: decimal units, one decimal, `B` for small sizes). `None` for any other
-/// line. Timeshift runs in the C locale for Apsis, so it's English with a `.`.
+/// Mount points at `path` or anywhere below it, from the text of `/proc/self/mountinfo`
+/// (field 5, unescaped). A delete refuses a snapshot folder that has any: a bind mount inside
+/// it has the same device number as the folder, so walking the tree can't tell it apart.
 #[must_use]
-pub fn parse_free_line(line: &str) -> Option<u64> {
-    let (count, rest) = line.trim().split_once(" snapshots, ")?;
-    if count.is_empty() || !count.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let size = rest.strip_suffix(" free")?;
-    let (number, unit) = size.split_once(' ')?;
-    let multiplier: u64 = match unit {
-        "B" => 1,
-        "KB" => 1000,
-        "MB" => 1000_u64.pow(2),
-        "GB" => 1000_u64.pow(3),
-        "TB" => 1000_u64.pow(4),
-        "KiB" => 1024,
-        "MiB" => 1024_u64.pow(2),
-        "GiB" => 1024_u64.pow(3),
-        "TiB" => 1024_u64.pow(4),
-        _ => return None,
-    };
-    // `%'0.1f` may group thousands with commas in some locales; there's no grouping in C.
-    let number = number.replace(',', "");
-    let valid = !number.is_empty()
-        && number.bytes().all(|b| b.is_ascii_digit() || b == b'.')
-        && number.bytes().filter(|&b| b == b'.').count() <= 1;
-    if !valid {
-        return None;
-    }
-    let value: f64 = number.parse().ok()?;
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss,
-        reason = "Timeshift rounded it to one decimal already"
-    )]
-    let bytes = (value * multiplier as f64).round() as u64;
-    Some(bytes)
-}
-
-/// Where the block device `rdev` (major, minor) is mounted, from the text of
-/// `/proc/self/mountinfo`. A mount matches by its device number (ext4 and most filesystems) or
-/// when `is_device` says its mount source is the device (btrfs reports an anonymous device
-/// number; the helper compares canonical paths, so `/dev/mapper/x` finds `/dev/dm-0`). Bind
-/// mounts of a subfolder (root other than `/`) are skipped: `statvfs` would be the same, but
-/// the first plain mount is clearer.
-#[must_use]
-pub fn mount_points(
-    mountinfo: &str,
-    rdev: (u32, u32),
-    is_device: impl Fn(&Path) -> bool,
-) -> Vec<PathBuf> {
-    let wanted = format!("{}:{}", rdev.0, rdev.1);
+pub fn mounts_under(mountinfo: &str, path: &Path) -> Vec<PathBuf> {
     mountinfo
         .lines()
         .filter_map(|line| {
             // `36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue`
-            let (fields, after) = line.split_once(" - ")?;
-            let mut fields = fields.split(' ');
-            let device = fields.nth(2)?;
-            let root = fields.next()?;
-            let point = fields.next()?;
-            let mount_source = after.split(' ').nth(1)?;
-            let matches = device == wanted || is_device(Path::new(&unescape(mount_source)));
-            (matches && root == "/").then(|| PathBuf::from(unescape(point)))
+            let (fields, _) = line.split_once(" - ")?;
+            let point = PathBuf::from(unescape(fields.split(' ').nth(4)?));
+            point.starts_with(path).then_some(point)
         })
         .collect()
 }
@@ -192,30 +136,6 @@ mod tests {
         assert!(empty.used_fraction().abs() < f64::EPSILON);
     }
 
-    #[test]
-    fn timeshift_free_lines() {
-        let cases = [
-            ("5 snapshots, 123.4 GB free", Some(123_400_000_000)),
-            ("  0 snapshots, 999 B free  ", Some(999)),
-            ("1 snapshots, 1.2 TB free", Some(1_200_000_000_000)),
-            ("12 snapshots, 512.0 MB free", Some(512_000_000)),
-            ("3 snapshots, 1.5 KB free", Some(1500)),
-            ("3 snapshots, 2.0 GiB free", Some(2 * 1024 * 1024 * 1024)),
-            ("3 snapshots, 1,000 B free", Some(1000)),
-            ("snapshots, 1 GB free", None),
-            ("x snapshots, 1 GB free", None),
-            ("5 snapshots, 1 GB", None),
-            ("5 snapshots, 1 PB free", None),
-            ("5 snapshots, 1.2.3 GB free", None),
-            ("5 snapshots, -1 GB free", None),
-            ("5 snapshots, GB free", None),
-            ("Status : OK", None),
-        ];
-        for (line, expected) in cases {
-            assert_eq!(parse_free_line(line), expected, "{line}");
-        }
-    }
-
     const MOUNTINFO: &str = "\
 22 1 259:2 / / rw,relatime shared:1 - btrfs /dev/nvme0n1p2 rw,ssd,subvol=/@
 23 22 259:2 /@home /home rw,relatime shared:2 - btrfs /dev/nvme0n1p2 rw,subvol=/@home
@@ -225,32 +145,22 @@ mod tests {
 92 22 0:55 / /mnt/pool rw shared:5 - btrfs /dev/sdc1 rw
 ";
 
-    fn source(device: &'static str) -> impl Fn(&Path) -> bool {
-        move |path| path == Path::new(device)
-    }
-
     #[test]
-    fn mounts_are_found_by_device_number() {
-        let points = mount_points(MOUNTINFO, (8, 17), source("/dev/sdb1"));
-        assert_eq!(points, [PathBuf::from("/media/user1/Backup Disk")]);
-        let by_number_only = mount_points(MOUNTINFO, (8, 17), |_| false);
-        assert_eq!(by_number_only, points);
-    }
-
-    #[test]
-    fn btrfs_mounts_are_found_by_source() {
-        // btrfs gives an anonymous device number; the source names the device.
-        let points = mount_points(MOUNTINFO, (8, 33), source("/dev/sdc1"));
-        assert_eq!(points, [PathBuf::from("/mnt/pool")]);
-        let root = mount_points(MOUNTINFO, (259, 2), source("/dev/nvme0n1p2"));
-        assert_eq!(root, [PathBuf::from("/")]);
-    }
-
-    #[test]
-    fn unmounted_devices_have_no_mount_points() {
-        assert!(mount_points(MOUNTINFO, (8, 1), source("/dev/sda1")).is_empty());
-        assert!(mount_points("", (8, 17), source("/dev/sdb1")).is_empty());
-        assert!(mount_points("garbage line\n1 2", (8, 17), source("/dev/sdb1")).is_empty());
+    fn mounts_at_or_below_a_path_are_found() {
+        let under = |path: &str| mounts_under(MOUNTINFO, Path::new(path));
+        assert_eq!(
+            under("/media/user1"),
+            [PathBuf::from("/media/user1/Backup Disk")]
+        );
+        assert_eq!(under("/mnt/pool"), [PathBuf::from("/mnt/pool")]);
+        assert_eq!(
+            under("/mnt"),
+            [PathBuf::from("/mnt/bind"), PathBuf::from("/mnt/pool")]
+        );
+        // Whole components only: /mnt/po isn't /mnt/pool's parent.
+        assert!(under("/mnt/po").is_empty());
+        assert!(under("/srv").is_empty());
+        assert!(mounts_under("garbage line\n1 2", Path::new("/")).is_empty());
     }
 
     #[test]

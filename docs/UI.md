@@ -35,14 +35,15 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
 - Tab makes the details pane active; Tab again, Esc or a click on a row goes back to the list.
   (Enter and a double-click open the snapshot browser since Phase 6a.)
 - Activity pane: the running create/delete with a spinner (accent border while it runs), else the
-  last result, else `idle` (dimmed). A failure shows Timeshift's last lines. Below that, any
-  warnings from the last list (`list: E: Failed to remove directory`) in the theme's warning colour.
-- The `>` line stays the input line (comment, `[y/N]`, and the `timeshift --list` spinner). The
-  key hints are the footer, the last row.
+  last result, else `idle` (dimmed). A failure shows the helper's reason. Below that, any
+  warnings from the last list (`list: 2026-09-02_09-00-00: incomplete: no info.json`) in the
+  theme's warning colour.
+- The `>` line stays the input line (comment, `[y/N]`, and the list's spinner). The key hints
+  are the footer, the last row.
 - Disk line, between the panes and the activity pane: see "Disk usage" below.
 - Progress of a create or a (real) restore replaces the spinner line: see "Progress" below.
 
-## Keep last N manual snapshots
+## Keep last N snapshots
 
 ```
  ╭─ prune preview ─────────────────────────────────╮
@@ -51,21 +52,18 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
  │ keep    09-25 10:00  newest 2                   │
  │ keep    09-24 10:00  newest 2                   │
  │ keep    09-20 10:00 "before upgrade"  comment   │
- │ keep    09-23 10:00  also hourly                │
  ╰─────────────────────────────────────────────────╯
- > remove 2 old manual snapshots? [y/N] _
+ > remove 2 old snapshots? [y/N] _
 ```
 
-- Settings view, `apsis` section: `keep last 10 manual` / `keep manual: all` (off, default).
-  Apsis's own (cosmic-config), saved at once. `space` on/off (10), `+`/`-`/`e` 1 to 999.
-- Rules (`apsis_core::retention::manual`): a snapshot tagged `O` with a comment is pinned: it
-  always stays and doesn't count towards N. The newest N uncommented `O` snapshots stay; of the
-  older ones, one with any other tag stays (Timeshift's retention decides about it; the `timeshift`
-  CLI can't remove one tag), and the newest snapshot of all never goes. The rest are listed
-  oldest first.
+- Settings view, `apsis` section: `keep last 10` / `keep: all` (off, default). Apsis's own
+  (cosmic-config), saved at once. `space` on/off (10), `+`/`-`/`e` 1 to 999.
+- Rules (`apsis_core::retention::manual`): a snapshot with a comment is pinned: it always stays
+  and doesn't count towards N. The newest N uncommented snapshots stay, whatever their tags,
+  and the newest snapshot of all never goes. The rest are listed oldest first.
 - Never automatic: `p` any time, and after a successful create (when its list is in) the same
   preview and question appear by themselves if something is past N. Deleting is the bulk
-  delete: through the helper one at a time (one password), or pkexec.
+  delete: through the helper one at a time (one password).
 - It sees what the list shows, which is every system's snapshots on the device.
 
 ## Reminder
@@ -77,8 +75,8 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
 - Then the panel icon is drawn in the theme's warning colour (same icon, `warning_text_color`)
   and the tooltip adds `· none for over 7 days`.
 - So that it works without opening the popup: in applet mode Apsis lists at start and every
-  6 hours while the popup is closed, **through the helper only** (no helper: nothing, never a
-  pkexec password dialog). A failed background list (disk unplugged) clears the reminder.
+  6 hours while the popup is closed, through the helper (no password; no helper: nothing). A
+  failed background list (disk unplugged) clears the reminder.
 
 ## Progress
 
@@ -88,20 +86,16 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
  ╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
-- For creates (Timeshift and native) and real restores, through `apsis-helper`: its
-  `Progress` signal, at most about twice a second.
-- Before the first `Progress`: the usual `creating snapshot… ⠋`. That's all there ever is
-  through pkexec, or with an older helper still running (it has no such signal): a spinner,
-  no error.
+- For creates and real restores, through `apsis-helper`: its `Progress` signal, at most about
+  twice a second.
+- Before the first `Progress`: the usual `creating snapshot… ⠋`.
 - After the helper's first (number-less) `Progress`, until there's a real number:
-  `creating ⠋ estimating…`. Timeshift estimates the system's size first and prints nothing,
-  then `0.00% complete (??? remaining)`; neither counts as a number. `0%` never does.
+  `creating ⠋ estimating…`. `0%` never counts as a number.
 - With a number: label, a 20-cell `█`/`░` bar in the theme's accent colour (the empty part
   dimmed), the whole percent rounded down, and the time left, rough: `<1 min`, `~3 min`,
-  `~2 h 5 min`. No time while it's unknown (Timeshift's `???`), and for all but the last path
-  of an original-mode restore (one rsync per path, the percent spread over them).
-- Where the numbers come from: Timeshift's own `NN.NN% complete (hh:mm:ss remaining)` line
-  (see TIMESHIFT-CLI.md), and rsync's `--info=progress2` for the native create and restores.
+  `~2 h 5 min`. No time while it's unknown, and for all but the last path of an original-mode
+  restore (one rsync per path, the percent spread over them).
+- Where the numbers come from: rsync's `--info=progress2`.
 - Deletes, bulk deletes and dry runs keep the spinner.
 
 ## Disk usage
@@ -118,20 +112,10 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
 - Filled cells use the accent colour, the theme's warning colour when less than 10% is free,
   and its destructive colour under 5%. All from the theme.
 - Sizes are binary, like lsblk's (`448G`, `4.5G`), whole numbers from 10 up.
-- Where the numbers come from (`apsis-helper`, `ListWithUsage` / `NativeListWithUsage`):
-  - Native backend: `statvfs` on `/run/apsis/backup` while the list has the device mounted.
-  - Timeshift backend: `statvfs` on a mount of the backup device if one exists after the list
-    (looked up by device number or source in `/proc/self/mountinfo`: an automount, or `/` in
-    btrfs mode). Timeshift unmounts its own `/run/timeshift/<pid>/backup` when it exits, so a
-    dedicated backup disk usually has no mount left: then the helper mounts it
-    `ro,nosuid,nodev,noexec` at `/run/apsis/backup` by UUID for the `statvfs` and unmounts it
-    (as for browsing; only a device lsblk shows with a Linux filesystem). Only if that fails
-    (e.g. an encrypted disk) is Timeshift's own `N snapshots, X GB free` line all there is:
-    the line shows `115G free · 9 snapshots` with no bar. The journal says which it was
-    (`disk usage: statvfs of ...`).
-  - pkexec fallback (no helper): the same free-only line, parsed from `timeshift --list`.
-- Unknown usage (no numbers at all, e.g. no device selected or no snapshots yet): no line. No
-  bar is ever drawn from a guess.
+- Where the numbers come from: `apsis-helper`'s `NativeListWithUsage`, `statvfs` on
+  `/run/apsis/backup` while the list has the device mounted.
+- Unknown usage (e.g. no device selected, or the disk not connected): no line. No bar is ever
+  drawn from a guess.
 - Hidden in the settings view (its notes are sized to fit the smallest window without it).
 - Refreshed by every list: after create, delete and bulk delete (they list anyway), and after
   a real restore once the browser is left (Esc) or the popup is opened again. Not while the
@@ -173,18 +157,19 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
 
 | state | shows |
 |---|---|
-| loading | `> timeshift --list` then a spinner character cycling `⠋⠙⠹⠸…` |
+| loading | `reading snapshots…` then a spinner character cycling `⠋⠙⠹⠸…` |
 | empty | `no snapshots yet — press [c] to create one` |
 | running | `creating snapshot… ⠹` / `deleting <label>… ⠹` / `deleting 2/4: <label>… ⠹` in the activity pane, keys disabled except Esc (does not cancel root op) |
-| result | in the activity pane: `snapshot created` / `deleted <label>` / `deleted 4 snapshots` (dimmed), or `create failed: <last stderr line>` (error colour); stays until the next create/delete |
+| result | in the activity pane: `snapshot created` / `deleted <label>` / `deleted 4 snapshots` (dimmed), or `create failed: <reason>` (error colour); stays until the next create/delete |
 | bulk delete stopped | `delete stopped at <label>: <reason>`, `deleted (1): <labels>`, `not deleted (3): <labels>` (error colour); the ones not deleted stay marked, the list refreshes if any was deleted |
-| error | `error:` + Timeshift's last lines (its `E:`/`W:` lines and stderr), `[r]etry` |
+| error | `error:` + the helper's reason, `[r]etry` |
 | disk missing | `backup disk not connected (UUID 1a2b…): plug it in and press r` (list error, or the create/delete result) |
-| not installed | `timeshift not found — install it or wait for the native backend` |
+| no helper | `Apsis needs apsis-helper, which the .deb installs` |
+| no device | `no backup device chosen` / `pick one in settings [s], then press [r]` |
 
 ## Bulk delete
 
-Like Timeshift's window: mark several snapshots, then `d`.
+Mark several snapshots, then `d`.
 
 - space marks or unmarks the selected snapshot and stays on it; `J` marks or unmarks and moves
   down. Marks work in the list and the details pane, not on help, About or settings. A refresh
@@ -192,8 +177,8 @@ Like Timeshift's window: mark several snapshots, then `d`.
 - `d` with marks: `> delete 3 snapshots: <label>, <label>, <label>? [y/N] _`, in list order
   (newest first). Only `y` deletes. Without marks, `d` is the single delete as before.
 - The snapshots go one at a time through the helper (`Delete`, one call each), so polkit asks for
-  the password once (`auth_admin_keep`) and the next calls use the cached answer. Without the
-  helper each pkexec call asks again. Activity: `deleting 2/4: <label>… ⠹`. No list runs between
+  the password once (`auth_admin_keep`) and the next calls use the cached answer. Activity:
+  `deleting 2/4: <label>… ⠹`. No list runs between
   steps; one runs at the end.
 - All deleted: `deleted 4 snapshots`, marks cleared. A failure stops it there:
   `delete stopped at <label>: <reason>`, then `deleted (1): ...` and `not deleted (3): ...`
@@ -264,7 +249,7 @@ password (polkit `browse`, cached a few minutes).
 - Symbolic icon `io.github.atraxsrc.Apsis-symbolic` (an orbit with its two apsides), tinted by
   the theme. The popup header shows it in the accent colour before `~/apsis`.
 - Tooltip: `Apsis - last snapshot 3h ago` or `Apsis - no snapshots`, plus ` · 483G free` when
-  the last list knew the free space (statvfs, else Timeshift's own line).
+  the last list knew the free space (statvfs).
 - Left click: the popup. Right click: a small menu (a standard COSMIC applet menu, not the
   terminal look):
 
@@ -281,71 +266,62 @@ password (polkit `browse`, cached a few minutes).
   one of popup and menu is open at a time, so Close only ever has the menu to close. Esc closes
   the menu too.
 
-## Settings view (Phase 4.5)
+## Settings view (0.2.0)
 
-`s`, the `[s]ettings` hint, or **Settings…** in the right-click menu shows Timeshift's settings
-in the left pane (title `settings`, `settings (unsaved)` with changes). The right pane explains
-the selected row. Needs `apsis-helper`: it reads and writes `/etc/timeshift/timeshift.json`.
+`s`, the `[s]ettings` hint, or **Settings…** in the right-click menu shows the settings in the
+left pane (title `settings`, `settings (unsaved)` with changes). The right pane explains the
+selected row. Needs `apsis-helper`: it reads `/etc/apsis/config.toml` (or, before it exists,
+imports Timeshift's `/etc/timeshift/timeshift.json`, only reading it) and writes
+`config.toml`.
 
 The explanation wraps and is never cut off. In the popup the details pane is sized once, to
 the tallest row's details (at least as high as a list), and the settings list beside it
 stretches to the same height, so the popup doesn't change height while moving between rows. A
 window's panes keep the window's height, so the notes are short enough to fit its smallest size
-(640 x 440). A layout test (`APSIS_LAYOUT_TEST=1`) checks every row both ways. A home row lists the three options, one line each:
-`excluded`, `hidden files only` (app settings, not documents), `everything` (a full restore
-rolls documents back too).
+(640 x 440). A layout test (`APSIS_LAYOUT_TEST=1`) checks every row both ways. A home row lists
+the three options, one line each: `excluded`, `hidden files only` (app settings, not
+documents), `everything` (a full restore rolls documents back too).
 
 ```
  ╭─ settings (unsaved) ──────────────────────────╮ ╭─ details ────────────────────╮
  │ ▸ device    sdb1  ext4  931.5G  Backup        │ │ path   /dev/sdb1             │
- │   mode      rsync                             │ │ type   ext4                  │
- │   schedule  [ ] monthly  keep 2               │ │ ...                          │
- │             [x] daily    keep 5               │ │                              │
- │   home      root       everything             │ │                              │
+ │   home      root       everything             │ │ type   ext4                  │
+ │             user1      hidden files only      │ │ ...                          │
  │   filters   + /root/**                        │ │                              │
+ │             /var/lib/libvirt/**               │ │                              │
  │             + add filter…                     │ │                              │
+ │   apsis     keep: all                         │ │                              │
+ │             remind after 7 days               │ │                              │
  ╰───────────────────────────────────────────────╯ ╰──────────────────────────────╯
  [space]change  [+]  [-]  [a]dd  [x]remove  [w]rite  [r]eload                [esc]
 ```
 
-- Rows: device (space picks the next device that can hold snapshots), mode (rsync/btrfs; btrfs
-  only when a btrfs filesystem exists), `@home` (btrfs mode), the five schedules (space on/off,
-  `+`/`-` or `e` for the count), home folders per user (rsync mode; space cycles excluded /
-  hidden files only / everything, as Timeshift's Users tab), the filters (`x` removes), and
-  `+ add filter…` (`a` anywhere).
-- `> add filter: _` and `> keep daily: _` use the `>` line; Enter sets, Esc cancels. A bad value
-  stays in the prompt with the reason in the activity pane.
-- `w` checks the changes, then the helper writes them (password once, cached like create). The
-  activity pane shows `writing settings ⠹`, then the result; the settings are read back and the
-  list refreshed. `r` reads them again, dropping changes.
-- Esc with unsaved changes warns once; the second Esc drops them.
-- If Timeshift's own window is open, the activity pane warns: it saves its settings over these
-  when it closes.
+- Rows: `device` (space picks the next unencrypted Linux filesystem that can hold snapshots),
+  `home` per user (space cycles excluded / hidden files only / everything, Timeshift's
+  patterns, kept in the filter list), the `filters` in order (home patterns dimmed; `x`
+  removes a filter), `+ add filter…` (`a` anywhere), then Apsis's own `keep` and `remind`
+  (per user, saved at once to cosmic-config, not by `w`; `+`/`-` or `e` change the number).
+- **Import.** While there's no `config.toml`, the view shows what was read from Timeshift's
+  settings, marked unsaved, and the activity pane lists it, in the warning colour:
+
+  ```
+  imported from /etc/timeshift/timeshift.json (not saved yet; w saves)
+    device   8cecb045… (sda1, ext4)
+    home     root: everything, user1: hidden files only
+    filters  2
+    not used schedule and counts (Apsis doesn't schedule)
+  ```
+
+  Without `timeshift.json` the view starts empty: `device  none selected`.
+- `> add filter: _` and `> keep (0 = off): _` use the `>` line; Enter sets, Esc cancels. A bad
+  value stays in the prompt with the reason in the activity pane.
+- `w` checks the changes (a changed device must be connected and plain; filters not blank or
+  repeated), then the helper writes them (password once, cached like create). The activity pane
+  shows `writing settings ⠹`, then `settings written to /etc/apsis/config.toml`; the settings
+  are read back and the list refreshed. `r` reads them again, dropping changes.
+- Esc with unsaved changes warns once; the second Esc drops them (an import stays an import).
 - Keys that act on snapshots (`c`, `d`) do nothing here.
-
-## Native backend (Phase 5)
-
-The settings view ends with Apsis's own section, `apsis`. It's saved to Apsis's cosmic-config
-as soon as it changes (not by `w`, which only writes Timeshift's file):
-
-```
- │   apsis     backend: timeshift                │
-```
-
-- `backend`: space switches between `timeshift` (default) and `native rsync`, then lists again.
-  With native on, a `dry run` row follows: `[x] dry run` (on by default). The header summary
-  reads `native · rsync · 3 snapshots`.
-- Native lists read the backup disk directly (no `timeshift`), through `apsis-helper`, with no
-  password. Snapshots Timeshift counts as incomplete, and a native create's leftovers, show as
-  list warnings in the activity pane.
-- `[c]` with dry run on: the activity pane shows `native dry run… ⠹`, then the plan appears in
-  the left pane (title `dry run`): the snapshot name, the folders, the whole `exclude.list`, the
-  `--link-dest` snapshot, the rsync argv, `info.json`, the rename and the tag links. Nothing is
-  written. Esc goes back to the list. The same plan is in `journalctl -u apsis-helper`.
-- `[c]` with dry run off: a real native create (password once, cached, like Timeshift's). The
-  activity pane shows `creating snapshot… ⠹` as usual.
-- `[d]` still deletes through Timeshift, which removes native snapshots like its own.
-- Without `apsis-helper`: `the native backend needs apsis-helper (sudo just install)`.
+- Without `apsis-helper`: `settings need apsis-helper (install the .deb)`.
 
 ## Window mode
 
@@ -373,8 +349,8 @@ shows in the panel settings.
 Shown inside the popup, like help and details; Esc goes back to the list.
 
 ```
- Apsis 0.1.0
- Timeshift-style system snapshots for the COSMIC™ desktop
+ Apsis 0.2.0
+ Simple system snapshots and file restore for the COSMIC™ desktop
 
  license   GPL-3.0-only
  source    https://github.com/atraxsrc/apsis

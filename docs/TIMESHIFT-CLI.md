@@ -1,5 +1,10 @@
 # Timeshift CLI contract
 
+> **Historical (since 0.2.0).** Apsis no longer runs `timeshift`: it takes, lists and deletes
+> snapshots itself, in Timeshift's on-disk layout (see ARCHITECTURE.md). This file describes
+> the command line 0.1.x wrapped; its fixtures were removed with that code and are in git
+> history (`9295449` and earlier).
+
 Verified 2026-09-25 against `timeshift --help` and real output from **Timeshift v24.01.1** (rsync mode)
 on the user's machine. Redacted copies of that output are the fixtures in
 `crates/apsis-core/tests/fixtures/`. Re-check this file if Timeshift is upgraded.

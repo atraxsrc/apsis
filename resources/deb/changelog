@@ -1,3 +1,11 @@
+apsis (0.2.0-1) noble; urgency=medium
+
+  * New upstream release, see CHANGELOG.md: Apsis is standalone and no longer
+    needs Timeshift; own settings in /etc/apsis/config.toml (imported once from
+    Timeshift's); no longer recommends timeshift.
+
+ -- atraxsrc <92285717+atraxsrc@users.noreply.github.com>  Tue, 29 Sep 2026 12:00:00 +1000
+
 apsis (0.1.2-1) noble; urgency=medium
 
   * New upstream release, see CHANGELOG.md: bulk delete, readable delete

@@ -6,9 +6,9 @@ use std::io::{self, BufRead, BufReader};
 use std::process::{Child, ChildStderr, Command, Stdio};
 use std::thread;
 
-use crate::pkexec::find_in_path;
 use crate::progress::read_segments;
-use crate::timeshift::{RunOutput, Runner};
+use crate::runner::find_in_path;
+use crate::runner::{RunOutput, Runner};
 
 /// Lines of stderr kept.
 const STDERR_LINES: usize = 20;
@@ -172,11 +172,21 @@ mod tests {
         assert_eq!(lines, ["19", "idle"]);
     }
 
+    /// The child keeps this thread's niceness unchanged. Compared with the thread's own value,
+    /// not a fixed number: the test process can be reniced from outside (a desktop scheduler),
+    /// even to 19, which once made a `!= 19` check fail. Retried if it changes meanwhile.
     #[test]
     fn normal_priority_is_left_alone() {
-        let lines = priorities(&QuietRunner::new(path()));
-        assert_ne!(lines[0], "19");
-        assert_ne!(lines[1], "idle");
+        for _ in 0..5 {
+            let before = rustix::process::getpriority_process(None).unwrap();
+            let lines = priorities(&QuietRunner::new(path()));
+            let after = rustix::process::getpriority_process(None).unwrap();
+            if before == after {
+                assert_eq!(lines[0], before.to_string());
+                return;
+            }
+        }
+        panic!("this thread's niceness kept changing");
     }
 
     #[test]

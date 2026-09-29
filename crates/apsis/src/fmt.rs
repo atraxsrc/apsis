@@ -128,25 +128,17 @@ pub fn size_short(bytes: u64) -> String {
     }
 }
 
-/// The disk line's text: `448G used · 483G free · 9 snapshots` from `statvfs`, or only
-/// `483G free · 9 snapshots` when Timeshift's free line is all there is. `None` when neither
-/// is known: nothing is shown then.
+/// The disk line's text: `448G used · 483G free · 9 snapshots` from `statvfs`. `None` when
+/// the usage isn't known: nothing is shown then.
 #[must_use]
-pub fn disk_text(
-    usage: Option<DiskUsage>,
-    reported_free: Option<u64>,
-    count: usize,
-) -> Option<String> {
+pub fn disk_text(usage: Option<DiskUsage>, count: usize) -> Option<String> {
     let noun = if count == 1 { "snapshot" } else { "snapshots" };
-    match (usage, reported_free) {
-        (Some(usage), _) => Some(format!(
-            "{} used · {} free · {count} {noun}",
-            size_short(usage.used),
-            size_short(usage.free)
-        )),
-        (None, Some(free)) => Some(format!("{} free · {count} {noun}", size_short(free))),
-        (None, None) => None,
-    }
+    let usage = usage?;
+    Some(format!(
+        "{} used · {} free · {count} {noun}",
+        size_short(usage.used),
+        size_short(usage.free)
+    ))
 }
 
 /// How many of a bar's `cells` are filled for `fraction` used, and how many are empty.
@@ -208,20 +200,6 @@ pub fn device_name(device: &str) -> &str {
     device.rsplit('/').next().unwrap_or(device)
 }
 
-/// The last `n` non-blank lines of `text`, trimmed on the right.
-#[must_use]
-pub fn tail(text: &str, n: usize) -> Vec<String> {
-    let lines: Vec<&str> = text
-        .lines()
-        .map(str::trim_end)
-        .filter(|l| !l.is_empty())
-        .collect();
-    lines[lines.len().saturating_sub(n)..]
-        .iter()
-        .map(|l| (*l).to_owned())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,14 +243,11 @@ mod tests {
             free: 518_617_202_688,
         };
         assert_eq!(
-            disk_text(Some(usage), Some(1), 9).as_deref(),
+            disk_text(Some(usage), 9).as_deref(),
             Some("448G used · 483G free · 9 snapshots")
         );
-        assert_eq!(
-            disk_text(None, Some(123_400_000_000), 1).as_deref(),
-            Some("115G free · 1 snapshot")
-        );
-        assert_eq!(disk_text(None, None, 3), None);
+        assert!(disk_text(Some(usage), 1).unwrap().ends_with("1 snapshot"));
+        assert_eq!(disk_text(None, 3), None);
     }
 
     #[test]
@@ -362,12 +337,5 @@ mod tests {
     fn short_uuid_keeps_four_characters() {
         assert_eq!(short_uuid("1a2b1234-0000-0000-0000-000000000000"), "1a2b…");
         assert_eq!(short_uuid("1a2b"), "1a2b");
-    }
-
-    #[test]
-    fn tail_keeps_last_non_blank_lines() {
-        assert_eq!(tail("a\n\nb  \nc\n\n", 2), ["b", "c"]);
-        assert_eq!(tail("a\n", 5), ["a"]);
-        assert!(tail("", 3).is_empty());
     }
 }

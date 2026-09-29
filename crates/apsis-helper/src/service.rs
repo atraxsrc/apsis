@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The D-Bus interface: `List` and `ListWithUsage`, `Create`, `Delete`, `ReadSettings`,
-//! `WriteSettings`, the native backend's `NativeList`, `NativeListWithUsage`, `NativeDryRun`
-//! and `NativeCreate`, file-level restore's `Browse` and `Restore`, and the `Finished` signal.
-//! Nothing else.
+//! The D-Bus interface: `NativeListWithUsage`, `NativeCreate`, `Delete`, `ReadConfig`,
+//! `WriteConfig`, file-level restore's `Browse` and `Restore`, and the `Progress` and
+//! `Finished` signals. Nothing else.
 //!
 //! Every call is logged with its result on stderr, which systemd puts in the journal
 //! (`journalctl -u apsis-helper`). Comments are cut to [`LOGGED_COMMENT_CHARS`].
@@ -17,8 +16,8 @@ use apsis_core::helper::names::{
     ACTION_RESTORE_ORIGINAL, OBJECT_PATH, OP_CREATE, OP_DELETE, OP_RESTORE,
 };
 use apsis_core::helper::{
-    WireList, WireListWithUsage, WireListing, WireSettings, WireSettingsInfo, encode_error,
-    listing_to_wire, settings_from_wire, to_wire, to_wire_with_usage,
+    WireConfig, WireConfigInfo, WireListWithUsage, WireListing, config_from_wire, encode_error,
+    listing_to_wire, to_wire_with_usage,
 };
 use apsis_core::progress::Throttle;
 use apsis_core::restore::{Destination, Request, SnapPath, check_paths};
@@ -43,11 +42,11 @@ const LOGGED_COMMENT_CHARS: usize = 40;
 
 /// The helper object at [`OBJECT_PATH`].
 pub struct Helper {
-    state: Arc<State<DirectRunner>>,
+    state: Arc<State>,
 }
 
 impl Helper {
-    pub fn new(state: Arc<State<DirectRunner>>) -> Self {
+    pub fn new(state: Arc<State>) -> Self {
         Self { state }
     }
 }
@@ -61,12 +60,11 @@ pub enum HelperError {
     NotAuthorized(String),
     Busy(String),
     InvalidInput(String),
-    NotInstalled(String),
     /// The backup disk isn't there; the message is from [`encode_error`].
     DeviceNotFound(String),
-    /// `WriteSettings`: the settings file changed since the caller read it.
+    /// `WriteConfig`: the config file changed since the caller read it.
     Changed(String),
-    /// The message is from [`encode_error`] (exit code and Timeshift's last lines).
+    /// The message is from [`encode_error`].
     Failed(String),
 }
 
@@ -80,8 +78,7 @@ impl From<Error> for HelperError {
             | Error::NoSuchSnapshot(_)
             | Error::InvalidSettings(_)
             | Error::InvalidInput(_) => Self::InvalidInput(error.to_string()),
-            Error::SettingsChanged => Self::Changed(error.to_string()),
-            Error::NotInstalled => Self::NotInstalled(error.to_string()),
+            Error::ConfigChanged => Self::Changed(error.to_string()),
             Error::DeviceNotFound { .. } => Self::DeviceNotFound(encode_error(&error)),
             _ => Self::Failed(encode_error(&error)),
         }
@@ -90,66 +87,10 @@ impl From<Error> for HelperError {
 
 #[interface(name = "io.github.atraxsrc.Apsis.Helper1")]
 impl Helper {
-    /// Lists snapshots (polkit: `list`, no password for the active session). Kept for older
-    /// applets; see `ListWithUsage`.
-    async fn list(
-        &self,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(connection)] connection: &Connection,
-    ) -> Result<WireList, HelperError> {
-        Ok(to_wire(
-            &self.timeshift_list(&header, connection, false).await?,
-        ))
-    }
-
-    /// `List`, plus the backup device's disk usage: `statvfs` if the device is mounted
-    /// somewhere, and the free space Timeshift printed (polkit: `list`).
-    async fn list_with_usage(
-        &self,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(connection)] connection: &Connection,
-    ) -> Result<WireListWithUsage, HelperError> {
-        Ok(to_wire_with_usage(
-            &self.timeshift_list(&header, connection, true).await?,
-        ))
-    }
-
-    /// Starts an on-demand snapshot (polkit: `create`) and returns; `Finished("create", ..)`
-    /// follows.
-    async fn create(
-        &self,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(connection)] connection: &Connection,
-        comment: String,
-    ) -> Result<(), HelperError> {
-        let _call = self.state.call();
-        let caller = caller(&header)?;
-        let label = format!("create {} for {caller}", logged_comment(&comment));
-        let started = async {
-            // The applet checked it too; the helper doesn't rely on that.
-            validate_comment(&comment)?;
-            self.refuse_if_running()?;
-            authorize(connection, &caller, ACTION_CREATE, true).await?;
-            self.state.begin()
-        }
-        .await;
-        self.start(
-            connection,
-            caller,
-            OP_CREATE,
-            label,
-            started,
-            move |running, progress| {
-                progress.started();
-                running
-                    .create(&comment, &mut |p| progress.report(p))
-                    .map(|()| String::new())
-            },
-        )
-    }
-
     /// Starts deleting snapshot `name` (polkit: `delete`) and returns; `Finished("delete", ..)`
-    /// follows.
+    /// follows. The backup device is mounted read-write for the delete only; the name must be
+    /// one the list has, and the folder a plain snapshot folder (see
+    /// `NativeRsync::delete_snapshot`).
     async fn delete(
         &self,
         #[zbus(header)] header: Header<'_>,
@@ -175,24 +116,20 @@ impl Helper {
             OP_DELETE,
             label,
             started,
-            move |running, _| running.delete(&name).map(|()| String::new()),
+            move |_running, _| {
+                let (backend, _mounted) =
+                    native::open(&DirectRunner, Access::ReadWrite, log_lines)?;
+                if !backend.list()?.snapshots.iter().any(|s| s.name == name) {
+                    return Err(Error::NoSuchSnapshot(name.clone()));
+                }
+                backend.delete_snapshot(&name).map(|()| String::new())
+            },
         )
     }
 
-    /// Lists snapshots with the native backend: reads each snapshot's `info.json` from the
-    /// backup device, mounted read-only (polkit: `list`, no password for the active session).
-    async fn native_list(
-        &self,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(connection)] connection: &Connection,
-    ) -> Result<WireList, HelperError> {
-        Ok(to_wire(
-            &self.native_snapshot_list(&header, connection).await?,
-        ))
-    }
-
-    /// `NativeList`, plus `statvfs` of the backup device while it's mounted for the list
-    /// (polkit: `list`).
+    /// The snapshots on the backup device (each one's `info.json`, the device mounted
+    /// read-only for the call), plus its `statvfs` (polkit: `list`, no password for the active
+    /// session).
     async fn native_list_with_usage(
         &self,
         #[zbus(header)] header: Header<'_>,
@@ -203,42 +140,8 @@ impl Helper {
         ))
     }
 
-    /// What a native create would do, as text, also logged (polkit: `list`: the backup device
-    /// is mounted read-only and nothing is written).
-    async fn native_dry_run(
-        &self,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(connection)] connection: &Connection,
-        comment: String,
-    ) -> Result<String, HelperError> {
-        let _call = self.state.call();
-        let caller = caller(&header)?;
-        let label = format!("native dry run {} for {caller}", logged_comment(&comment));
-        let result = async {
-            validate_comment(&comment)?;
-            authorize(connection, &caller, ACTION_LIST, false).await?;
-            let running = self.state.begin()?;
-            blocking(move || {
-                let _running = running;
-                let (backend, _mounted) =
-                    native::open(&DirectRunner, Access::ReadOnly, true, log_lines)?;
-                Ok(backend.plan(&comment)?.to_string())
-            })
-            .await
-        }
-        .await;
-        match &result {
-            Ok(plan) => {
-                log(&format!("{label}: ok"));
-                log_lines(plan);
-            }
-            Err(error) => log(&format!("{label}: {}", describe_error(error))),
-        }
-        Ok(result?)
-    }
-
-    /// Starts a native rsync snapshot (polkit: `create`) and returns; `Finished("create", ..)`
-    /// follows. Refused while Timeshift runs.
+    /// Starts a snapshot (polkit: `create`) and returns; `Finished("create", ..)` follows.
+    /// rsync runs at idle I/O priority and nice 19.
     async fn native_create(
         &self,
         #[zbus(header)] header: Header<'_>,
@@ -251,7 +154,6 @@ impl Helper {
         let started = async {
             validate_comment(&comment)?;
             self.refuse_if_running()?;
-            refuse_if_timeshift_runs()?;
             authorize(connection, &caller, ACTION_CREATE, true).await?;
             self.state.begin()
         }
@@ -263,11 +165,9 @@ impl Helper {
             label,
             started,
             move |_running, progress| {
-                // Checked again: the password dialog may have taken a while.
-                refuse_if_timeshift_runs()?;
                 progress.started();
                 let (backend, _mounted) =
-                    native::open(&DirectRunner, Access::ReadWrite, false, log_lines)?;
+                    native::open(&DirectRunner, Access::ReadWrite, log_lines)?;
                 let progress = progress.clone();
                 let backend = backend.with_progress(move |p| progress.report(p));
                 backend.create(&comment).map(|()| String::new())
@@ -275,13 +175,14 @@ impl Helper {
         )
     }
 
-    /// Timeshift's settings file, the block devices and the users, for the settings view
-    /// (polkit: `list`, no password for the active session).
-    async fn read_settings(
+    /// Apsis's config (or, before it's saved, the import from Timeshift's settings), the block
+    /// devices and the users, for the settings view (polkit: `list`, no password for the active
+    /// session).
+    async fn read_config(
         &self,
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &Connection,
-    ) -> Result<WireSettingsInfo, HelperError> {
+    ) -> Result<WireConfigInfo, HelperError> {
         let _call = self.state.call();
         let caller = caller(&header)?;
         let result = async {
@@ -289,69 +190,59 @@ impl Helper {
             blocking(|| settings::info(&Files::system(), &DirectRunner)).await
         }
         .await;
-        if let Err(error) = &result {
-            log(&format!(
-                "read settings for {caller}: {}",
+        match &result {
+            Ok(info) if !info.4.is_empty() => {
+                log(&format!(
+                    "read config for {caller}: imported from Timeshift's settings"
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => log(&format!(
+                "read config for {caller}: {}",
                 describe_error(error)
-            ));
+            )),
         }
         Ok(result?)
     }
 
-    /// Writes Timeshift's settings (polkit: `configure`) if the file still reads `expected`,
-    /// keeping the previous file as `.bak`. Then lists once: every Timeshift run syncs its
-    /// cron jobs with the settings on exit. Returns once done; the text says if that list
-    /// failed (the settings are written either way).
-    async fn write_settings(
+    /// Writes `/etc/apsis/config.toml` (polkit: `configure`) if it still reads `expected`
+    /// (empty: there's none yet), keeping the previous file as `.bak`. Returns once done; the
+    /// text is a note, empty when all went well.
+    async fn write_config(
         &self,
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &Connection,
         expected: String,
-        settings: WireSettings,
+        config: WireConfig,
     ) -> Result<String, HelperError> {
         let _call = self.state.call();
         let caller = caller(&header)?;
-        let label = format!("write settings for {caller}");
+        let label = format!("write config for {caller}");
         let result = async {
-            let settings = settings_from_wire(settings)?;
+            let config = config_from_wire(config);
             self.refuse_if_running()?;
             authorize(connection, &caller, ACTION_CONFIGURE, true).await?;
             let running = self.state.begin()?;
             blocking(move || {
-                if !Files::system().write(&DirectRunner, &expected, &settings)? {
-                    return Ok(Written::Unchanged);
-                }
-                // The backup device may have changed: list the one the settings name now.
-                running.forget_device();
-                Ok(match running.list() {
-                    Ok(_) => Written::Synced,
-                    Err(error) => Written::ListFailed(format!(
-                        "written, but timeshift --list afterwards failed: {error}"
-                    )),
-                })
+                let _running = running;
+                Files::system().write(&DirectRunner, &expected, &config)
             })
             .await
         }
         .await;
-        let note = match result {
-            Ok(Written::Unchanged) => {
-                log(&format!("{label}: unchanged"));
-                String::new()
-            }
-            Ok(Written::Synced) => {
-                log(&format!("{label}: written, schedule synced"));
-                String::new()
-            }
-            Ok(Written::ListFailed(note)) => {
-                log(&format!("{label}: {note}"));
-                note
+        match result {
+            Ok(written) => {
+                log(&format!(
+                    "{label}: {}",
+                    if written { "written" } else { "unchanged" }
+                ));
+                Ok(String::new())
             }
             Err(error) => {
                 log(&format!("{label}: {}", describe_error(&error)));
-                return Err(error.into());
+                Err(error.into())
             }
-        };
-        Ok(note)
+        }
     }
 
     /// One folder of snapshot `snapshot`, each entry compared with the running system (polkit:
@@ -398,8 +289,7 @@ impl Helper {
     /// `Finished("restore", ok, text)` follows, the text being the plan or the result.
     ///
     /// polkit: a dry run `browse`; folder mode `restore` (cached); original mode
-    /// `restore-original` (asked every time). Refused while another operation runs, and a real
-    /// restore while Timeshift runs.
+    /// `restore-original` (asked every time). Refused while another operation runs.
     async fn restore(
         &self,
         #[zbus(header)] header: Header<'_>,
@@ -431,9 +321,6 @@ impl Helper {
                 (false, Destination::Original) => ACTION_RESTORE_ORIGINAL,
             };
             self.refuse_if_running()?;
-            if !dry_run {
-                refuse_if_timeshift_runs()?;
-            }
             authorize(connection, &caller, action, true).await?;
             let running = self.state.begin()?;
             let request = Request {
@@ -458,10 +345,6 @@ impl Helper {
             started,
             move |_running, progress| {
                 let (request, uid) = job.ok_or_else(|| Error::Helper("not started".to_owned()))?;
-                if !request.dry_run {
-                    // Checked again: the password dialog may have taken a while.
-                    refuse_if_timeshift_runs()?;
-                }
                 if !request.dry_run {
                     progress.started();
                 }
@@ -495,45 +378,6 @@ impl Helper {
 }
 
 impl Helper {
-    /// `timeshift --list`, then (`with_usage`) the device's disk usage: from a mount of it
-    /// if there is one (Timeshift has unmounted its own by then), else from a brief read-only
-    /// mount, else only Timeshift's free line. Logged, with where the usage came from.
-    async fn timeshift_list(
-        &self,
-        header: &Header<'_>,
-        connection: &Connection,
-        with_usage: bool,
-    ) -> Result<SnapshotList, HelperError> {
-        let _call = self.state.call();
-        let caller = caller(header)?;
-        let device = self.state.snapshot_device();
-        let label = format!(
-            "list for {caller} (device {})",
-            device.as_deref().unwrap_or("from Timeshift's config")
-        );
-        let result = async {
-            authorize(connection, &caller, ACTION_LIST, false).await?;
-            let running = self.state.begin()?;
-            let usage_label = label.clone();
-            blocking(move || {
-                let mut list = running.list()?;
-                if with_usage {
-                    let (usage, source) = usage::of_timeshift_list(&DirectRunner, &list);
-                    list.usage = usage;
-                    log(&format!("{usage_label}: disk usage: {source}"));
-                }
-                Ok(list)
-            })
-            .await
-        }
-        .await;
-        match &result {
-            Ok(list) => log(&format!("{label}: {}", describe_list(list))),
-            Err(error) => log(&format!("{label}: {}", describe_error(error))),
-        }
-        Ok(result?)
-    }
-
     /// The native list, with `statvfs` of [`native::MOUNT_POINT`] while it's mounted, logged.
     async fn native_snapshot_list(
         &self,
@@ -542,14 +386,13 @@ impl Helper {
     ) -> Result<SnapshotList, HelperError> {
         let _call = self.state.call();
         let caller = caller(header)?;
-        let label = format!("native list for {caller}");
+        let label = format!("list for {caller}");
         let result = async {
             authorize(connection, &caller, ACTION_LIST, false).await?;
             let running = self.state.begin()?;
             blocking(move || {
                 let _running = running;
-                let (backend, _mounted) =
-                    native::open(&DirectRunner, Access::ReadOnly, false, log_lines)?;
+                let (backend, _mounted) = native::open(&DirectRunner, Access::ReadOnly, log_lines)?;
                 let mut list = backend.list()?;
                 list.usage = usage::of_mount_point(Path::new(native::MOUNT_POINT));
                 Ok(list)
@@ -582,10 +425,8 @@ impl Helper {
         caller: UniqueName<'static>,
         op: &'static str,
         label: String,
-        started: apsis_core::Result<Running<DirectRunner>>,
-        work: impl FnOnce(&Running<DirectRunner>, &ProgressSink) -> apsis_core::Result<String>
-        + Send
-        + 'static,
+        started: apsis_core::Result<Running>,
+        work: impl FnOnce(&Running, &ProgressSink) -> apsis_core::Result<String> + Send + 'static,
     ) -> Result<(), HelperError> {
         let running = match started {
             Ok(running) => running,
@@ -669,8 +510,7 @@ impl ProgressSink {
     }
 
     /// A first update with no numbers: tells the caller progress will come (the applet shows
-    /// "estimating…" instead of a bare spinner). Timeshift prints nothing while it estimates
-    /// the system's size.
+    /// "estimating…" until rsync has a number).
     pub fn started(&self) {
         self.report(Progress {
             percent: None,
@@ -692,16 +532,6 @@ impl ProgressSink {
     }
 }
 
-/// How a `WriteSettings` went.
-enum Written {
-    /// The settings were already so; nothing was written.
-    Unchanged,
-    /// Written, and the list after it (which syncs Timeshift's cron jobs) worked.
-    Synced,
-    /// Written, but that list failed; the text says how.
-    ListFailed(String),
-}
-
 fn log(line: &str) {
     eprintln!("apsis-helper: {line}");
 }
@@ -711,27 +541,14 @@ fn log_lines(text: &str) {
     text.lines().for_each(log);
 }
 
-/// [`Error::Busy`] while a Timeshift holds its lock (see [`native::timeshift_running`]).
-fn refuse_if_timeshift_runs() -> apsis_core::Result<()> {
-    match native::timeshift_running() {
-        Some(pid) => {
-            log(&format!("timeshift is running (PID {pid})"));
-            Err(Error::Busy)
-        }
-        None => Ok(()),
-    }
-}
-
 /// `ok, 5 snapshots` (plus the free space and the warnings, when known).
 fn describe_list(list: &SnapshotList) -> String {
     let mut text = format!("ok, {} snapshots", list.snapshots.len());
-    match (list.usage, list.reported_free) {
-        (Some(usage), _) => text.push_str(&format!(
+    if let Some(usage) = list.usage {
+        text.push_str(&format!(
             ", {} of {} bytes free (statvfs)",
             usage.free, usage.total
-        )),
-        (None, Some(free)) => text.push_str(&format!(", {free} bytes free (timeshift)")),
-        (None, None) => {}
+        ));
     }
     if !list.warnings.is_empty() {
         text.push_str(&format!("; warnings: {}", list.warnings.join(" | ")));
@@ -739,8 +556,7 @@ fn describe_list(list: &SnapshotList) -> String {
     text
 }
 
-/// One journal line for an error: `refused: ...` when nothing ran, else `failed: ...` with the
-/// exit code and Timeshift's last lines.
+/// One journal line for an error: `refused: ...` when nothing ran, else `failed: ...`.
 fn describe_error(error: &Error) -> String {
     match error {
         Error::NotAuthorized
@@ -750,12 +566,9 @@ fn describe_error(error: &Error) -> String {
         | Error::InvalidSettings(_)
         | Error::InvalidConfig(_)
         | Error::InvalidInput(_)
-        | Error::SettingsChanged => format!("refused: {error}"),
-        Error::Failed { code, output } => {
-            let code = code.map_or_else(|| "none (signal)".to_owned(), |c| c.to_string());
-            let output: Vec<&str> = output.lines().collect();
-            format!("failed, exit code {code}: {}", output.join(" | "))
-        }
+        | Error::NoSuchSnapshot(_)
+        | Error::NoSnapshotDevice
+        | Error::ConfigChanged => format!("refused: {error}"),
         other => format!("failed: {other}"),
     }
 }
@@ -809,7 +622,7 @@ async fn authorize(
     }
 }
 
-/// Runs blocking Timeshift work off the async runtime.
+/// Runs blocking work (rsync, mounts, file I/O) off the async runtime.
 async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> apsis_core::Result<T> + Send + 'static,
 ) -> apsis_core::Result<T> {
@@ -823,11 +636,9 @@ mod tests {
     use apsis_core::helper::decode_error;
     use apsis_core::helper::names::{
         ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
-        ERROR_NOT_AUTHORIZED, ERROR_NOT_INSTALLED, INTERFACE, METHOD_BROWSE, METHOD_CREATE,
-        METHOD_DELETE, METHOD_LIST, METHOD_LIST_WITH_USAGE, METHOD_NATIVE_CREATE,
-        METHOD_NATIVE_DRY_RUN, METHOD_NATIVE_LIST, METHOD_NATIVE_LIST_WITH_USAGE,
-        METHOD_READ_SETTINGS, METHOD_RESTORE, METHOD_WRITE_SETTINGS, SIGNAL_FINISHED,
-        SIGNAL_PROGRESS,
+        ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_BROWSE, METHOD_DELETE, METHOD_NATIVE_CREATE,
+        METHOD_NATIVE_LIST_WITH_USAGE, METHOD_READ_CONFIG, METHOD_RESTORE, METHOD_WRITE_CONFIG,
+        SIGNAL_FINISHED, SIGNAL_PROGRESS,
     };
     use zbus::object_server::Interface;
 
@@ -837,18 +648,13 @@ mod tests {
     fn interface_matches_the_shared_names() {
         assert_eq!(Helper::name().as_str(), INTERFACE);
         let mut xml = String::new();
-        Helper::new(State::new(DirectRunner)).introspect_to_writer(&mut xml, 0);
+        Helper::new(State::new()).introspect_to_writer(&mut xml, 0);
         for method in [
-            METHOD_LIST,
-            METHOD_LIST_WITH_USAGE,
-            METHOD_CREATE,
-            METHOD_DELETE,
-            METHOD_READ_SETTINGS,
-            METHOD_WRITE_SETTINGS,
-            METHOD_NATIVE_LIST,
             METHOD_NATIVE_LIST_WITH_USAGE,
-            METHOD_NATIVE_DRY_RUN,
             METHOD_NATIVE_CREATE,
+            METHOD_DELETE,
+            METHOD_READ_CONFIG,
+            METHOD_WRITE_CONFIG,
             METHOD_BROWSE,
             METHOD_RESTORE,
         ] {
@@ -870,20 +676,14 @@ mod tests {
         ] {
             assert!(xml.contains(arg), "{arg}\n{xml}");
         }
-        // Nothing else: exactly twelve methods and two signals.
-        assert_eq!(xml.matches("<method ").count(), 12, "{xml}");
+        // Nothing else: exactly seven methods and two signals.
+        assert_eq!(xml.matches("<method ").count(), 7, "{xml}");
         assert_eq!(xml.matches("<signal ").count(), 2, "{xml}");
-        // List returns the list with its warnings, unchanged for older applets; the
-        // `WithUsage` forms add the disk usage.
-        assert!(xml.contains("type=\"(sssa(sss)as)\""), "{xml}");
-        assert_eq!(
-            xml.matches("type=\"((sssa(sss)as)a{st})\"").count(),
-            2,
-            "{xml}"
-        );
-        // The settings types.
-        assert!(xml.contains("type=\"(ssa(ssb)b)\""), "{xml}");
-        assert!(xml.contains("type=\"(sbbabauas)\""), "{xml}");
+        // The list with its warnings and the disk usage.
+        assert!(xml.contains("type=\"((sssa(sss)as)a{st})\""), "{xml}");
+        // The config types.
+        assert!(xml.contains("type=\"(s(sas)sa(ssb)as)\""), "{xml}");
+        assert!(xml.contains("type=\"(sas)\""), "{xml}");
         // Browse's listing, and Restore's paths.
         assert!(xml.contains("type=\"(a(sstxuuussstx)b)\""), "{xml}");
         assert!(xml.contains("type=\"as\""), "{xml}");
@@ -922,10 +722,6 @@ mod tests {
                 ERROR_INVALID_INPUT,
             ),
             (
-                HelperError::NotInstalled(String::new()),
-                ERROR_NOT_INSTALLED,
-            ),
-            (
                 HelperError::DeviceNotFound(String::new()),
                 ERROR_DEVICE_NOT_FOUND,
             ),
@@ -938,20 +734,9 @@ mod tests {
     }
 
     #[test]
-    fn failures_reach_the_client_with_timeshift_output() {
-        let HelperError::Failed(message) = HelperError::from(Error::Failed {
-            code: Some(1),
-            output: "E: first\nE: second".to_owned(),
-        }) else {
-            panic!("not Failed")
-        };
-        assert!(matches!(
-            decode_error(&message),
-            Error::Failed { code: Some(1), output } if output == "E: first\nE: second"
-        ));
-
+    fn a_missing_disk_reaches_the_client_as_such() {
         let HelperError::DeviceNotFound(message) = HelperError::from(Error::DeviceNotFound {
-            device: "/dev/sdX1".to_owned(),
+            device: "00000000-0000-0000-0000-000000000000".to_owned(),
         }) else {
             panic!("not DeviceNotFound")
         };
@@ -967,7 +752,7 @@ mod tests {
             Error::InvalidComment("too long"),
             Error::InvalidSnapshotName("x".to_owned()),
             Error::NoSuchSnapshot("2001-01-01_00-00-00".to_owned()),
-            Error::InvalidSettings("keep 1 to 999".to_owned()),
+            Error::InvalidSettings("choose a backup device".to_owned()),
             Error::InvalidInput("/proc/x: never restored".to_owned()),
         ] {
             assert!(matches!(
@@ -988,13 +773,10 @@ mod tests {
         );
         assert!(logged.ends_with("…\""));
 
-        let failed = Error::Failed {
-            code: Some(1),
-            output: "E: Device busy\nE: Failed to remove directory".to_owned(),
-        };
+        let failed = Error::Native("rsync exited with code 11: No space left".to_owned());
         assert_eq!(
             describe_error(&failed),
-            "failed, exit code 1: E: Device busy | E: Failed to remove directory"
+            "failed: rsync exited with code 11: No space left"
         );
         assert_eq!(
             describe_error(&Error::Busy),
@@ -1003,17 +785,12 @@ mod tests {
 
         let mut list = SnapshotList::default();
         assert_eq!(describe_list(&list), "ok, 0 snapshots");
-        list.warnings = vec!["E: Failed to remove directory".to_owned()];
+        list.warnings = vec!["x: incomplete: no info.json".to_owned()];
         assert_eq!(
             describe_list(&list),
-            "ok, 0 snapshots; warnings: E: Failed to remove directory"
+            "ok, 0 snapshots; warnings: x: incomplete: no info.json"
         );
         list.warnings.clear();
-        list.reported_free = Some(123_400_000_000);
-        assert_eq!(
-            describe_list(&list),
-            "ok, 0 snapshots, 123400000000 bytes free (timeshift)"
-        );
         list.usage = apsis_core::DiskUsage::from_statvfs(1000, 400, 350, 1000);
         assert_eq!(
             describe_list(&list),

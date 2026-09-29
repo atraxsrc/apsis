@@ -4,27 +4,31 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-only</project_license>
   <name>Apsis</name>
-  <summary>Timeshift-style system snapshots for the COSMIC™ desktop</summary>
+  <summary>Simple system snapshots and file restore for the COSMIC™ desktop</summary>
   <developer id="io.github.atraxsrc">
     <name>atraxsrc</name>
   </developer>
   <description>
     <p>
-      Apsis is a panel applet for the COSMIC desktop that lists, creates and deletes system
-      snapshots through Timeshift. Its popup looks like a small terminal, works with the
-      keyboard or the mouse, and follows the live COSMIC theme.
+      Apsis is a panel applet for the COSMIC desktop that creates, lists and deletes system
+      snapshots on a backup disk with rsync, and restores single files from them. Its popup
+      looks like a small terminal, works with the keyboard or the mouse, and follows the live
+      COSMIC theme.
     </p>
     <ul>
-      <li>Snapshot list with tags, comments and a details pane</li>
-      <li>Create and delete snapshots, with one password prompt per few minutes through a small polkit-guarded helper</li>
-      <li>Timeshift settings: backup device, schedules, home folders and filters</li>
-      <li>Vim-style keys and a command line, or the mouse</li>
-      <li>Also opens as a resizable window from the app launcher</li>
-      <li>Experimental: a native rsync backend that creates Timeshift-compatible snapshots, with a dry run first</li>
-      <li>Experimental: browse a snapshot's files and restore them to a folder in your home, or back to their original place</li>
+      <li>Snapshots with rsync: later ones only copy what changed and hard-link the rest, at idle I/O priority</li>
+      <li>Snapshot list with comments and a details pane, and a bar of the backup disk's free space</li>
+      <li>Create and delete snapshots, one or several at a time, with one password prompt per few minutes through a small polkit-guarded helper</li>
+      <li>Browse a snapshot's files and restore them to a folder in your home, or back to their original place</li>
+      <li>Optional: keep the last N snapshots (preview, then confirm), and a reminder when the last snapshot is old</li>
+      <li>Settings: backup disk, home folders and filters</li>
+      <li>Vim-style keys and a command line, or the mouse; also opens as a resizable window from the app launcher</li>
     </ul>
     <p>
-      Timeshift must be installed and set up. Full-system restore is left to Timeshift.
+      Snapshots use Timeshift's on-disk layout, so snapshots Timeshift made keep working, but
+      Apsis doesn't need or run Timeshift. Manual only: there is no schedule, and snapshots are
+      only deleted when you delete them. Encrypted (LUKS) backup disks and full-system restore
+      aren't supported.
     </p>
   </description>
   <icon type="stock">io.github.atraxsrc.Apsis</icon>
@@ -64,6 +68,21 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.2.0" date="2026-09-29">
+      <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.2.0</url>
+      <description>
+        <p>Apsis is standalone: it takes rsync snapshots itself and no longer needs Timeshift.</p>
+        <ul>
+          <li>Snapshots, delete and file restore without Timeshift; existing Timeshift snapshots keep working</li>
+          <li>Its own settings in /etc/apsis/config.toml, imported once from Timeshift's settings</li>
+          <li>rsync runs at idle I/O priority</li>
+          <li>Keep the last N snapshots (preview, then confirm) and a reminder when the last snapshot is old</li>
+          <li>A bar of the backup disk's free space, and progress with the time left</li>
+          <li>Removed: Timeshift's schedule and mode settings</li>
+          <li>Upgrading: open the settings once and press w to import</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.2" date="2026-09-27">
       <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.1.2</url>
       <description>

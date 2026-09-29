@@ -1052,6 +1052,62 @@ Append-only. Newest at the bottom. Format: date — decision — why.
     niceness 19); it passed 30+ times alone and in two more full runs. Guess, not verified:
     the OS scheduler reniced the test process. Left as is for now.
 
+- 2026-09-29 - **New direction: 0.2.0 standalone, manual only** (the user's). Apsis drops
+  Timeshift: the native rsync backend is the only backend, nothing runs `timeshift`, no
+  schedule, no automatic retention. The Phase 5.2 native schedule is parked on branch
+  `phase-5.2-schedule` (`a2a0629`, not pushed, not merged); main stays at `9295449` (keep last
+  N, reminder and low-priority rsync from `90272f5` fit the new plan). Design in PLAN.md,
+  "0.2.0 Standalone", approved with decisions 1-5 as recommended, plus the user's delete
+  conditions: a snapshot name only, resolved under `timeshift/snapshots/` with no symlink on
+  the way, with an `info.json`, never `snapshots/` itself; no-follow, same-filesystem removal;
+  its tag links removed and nothing else; read-write mount only for the delete, under the lock,
+  one journal line per snapshot. `config.toml` written atomically, 0644, `.bak` kept, and an
+  encrypted or non-plain device refused as before; a first run without `timeshift.json` starts
+  empty.
+- 2026-09-29 - **0.2.0 standalone: built** (not committed; nothing run as root by Claude).
+  - **Filters stay one ordered list** in `config.toml`, home patterns included (the design had
+    a `[home]` table): rsync takes the first matching filter, so `*.mp3` before
+    `+ /home/you/**` leaves MP3s out of a home that is otherwise kept, and after it keeps them.
+    A table would lose that order. Test: an imported config builds exactly the rsync filters
+    Timeshift's list does.
+  - **Delete refuses a snapshot with a mount inside** (`/proc/self/mountinfo`, any mount point
+    at or below its canonical path), before deleting anything. The no-follow walk
+    (`prune::remove_at`, from the parked branch) stops at another filesystem, but a bind mount
+    of a folder on the same filesystem has the same `st_dev`, so the walk alone would empty it.
+    The walk opens `timeshift/`, `snapshots/` and `<name>/` with `openat(O_NOFOLLOW)` from the
+    backup mount, so no symlink on the way is followed. `just nested-mount` prepares a real
+    bind mount and a loop mount (the ext4 image) inside a snapshot for the opt-in test.
+  - **Delete leaves the other tag links alone**: only `snapshots-<tag>/<name>` symlinks go
+    (as Timeshift's delete); create still rebuilds all links, as Timeshift's create does.
+  - **Removed**: `TimeshiftCli`, the `--list` parser, `PkexecRunner` and the pkexec fallback,
+    Timeshift's lock check, the `timeshift.json` editor, Timeshift's progress and free-space
+    parsers, the dry-run setting and `NativeDryRun`, the schedule, mode and backend rows. Helper
+    methods: `NativeListWithUsage`, `NativeCreate`, `Delete` (native now), `ReadConfig`,
+    `WriteConfig`, `Browse`, `Restore`; the seven polkit actions are unchanged.
+  - **Keep last N** ignores tags now (Timeshift's schedule tags counted like any snapshot's).
+  - Without the helper the applet shows `Apsis needs apsis-helper, which the .deb installs`.
+  - `timeshift` is no longer recommended by the .deb; purge removes `/etc/apsis/`.
+  - The `toml` crate (0.5.11) was already in `Cargo.lock`; no download.
+
+- 2026-09-29 - **0.2.0 tested and prepared for release.** The user's 8 real-machine checks
+  passed (old schedule unit removed, `just deb-install`, the import shown and saved with `w`,
+  list/create/delete/bulk delete with Timeshift not running, rsync at nice 19 and idle I/O, tag
+  links, a real bind and loop mount inside a snapshot left alone, keep-last-N, restore, disk
+  unplugged). Release prep: version 0.2.0, README, man page, UI.md, SECURITY.md (0.2.x
+  supported), ARCHITECTURE.md, metainfo and CHANGELOG. TIMESHIFT-CLI.md is kept, marked
+  historical, because CLAUDE.md lists it.
+  - **New tagline**: "Simple system snapshots and file restore for the COSMIC™ desktop" in the
+    README, metainfo summary, desktop entries, app comment and the collection drafts in
+    RELEASE.md, since the old one said "Timeshift-style". `CLAUDE.md` still has the old listing
+    line; it's the user's file, so left for the user.
+  - The CHANGELOG's 0.2.0 section also covers `36c094f` and `90272f5` (disk bar, progress,
+    keep last N, reminder, low-priority rsync), which were never in a release.
+  - **`normal_priority_is_left_alone` fixed** (the failure noted on 2026-09-29 came back once,
+    again right after clippy): it asserted the child isn't at nice 19, but the test process
+    itself can be reniced from outside. Nothing in Apsis sets a priority in-process (checked).
+    It now compares the child's niceness with the spawning thread's own, retried if that
+    changes meanwhile. Two full runs pass after it.
+
 ## Open
 
 - ~~App ID~~ - resolved 2026-09-25, see above.
