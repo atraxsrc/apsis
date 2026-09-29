@@ -92,41 +92,7 @@ pub fn short_uuid(uuid: &str) -> String {
     truncate(uuid, 5)
 }
 
-/// A device size the way lsblk prints it: `931.5G`, `512M`, binary units.
-#[must_use]
-pub fn size(bytes: u64) -> String {
-    const UNITS: [&str; 6] = ["B", "K", "M", "G", "T", "P"];
-    #[allow(clippy::cast_precision_loss, reason = "one decimal shown")]
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    let text = format!("{value:.1}");
-    let text = text.strip_suffix(".0").unwrap_or(&text);
-    format!("{text}{}", UNITS[unit])
-}
-
-/// [`size`] without the decimal from 10 up: `448G`, `4.5G`. For the disk line, where the
-/// numbers sit side by side.
-#[must_use]
-pub fn size_short(bytes: u64) -> String {
-    let text = size(bytes);
-    let split = text
-        .find(|c: char| c.is_ascii_alphabetic())
-        .unwrap_or(text.len());
-    let (number, unit) = text.split_at(split);
-    match number.parse::<f64>() {
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "a displayed size under 1024"
-        )]
-        Ok(value) if value >= 10.0 => format!("{}{unit}", value.round() as u64),
-        _ => text,
-    }
-}
+pub use apsis_core::status::{size, size_short};
 
 /// The disk line's text: `448G used · 483G free · 9 snapshots` from `statvfs`. `None` when
 /// the usage isn't known: nothing is shown then.
@@ -179,19 +145,34 @@ pub fn percent(percent: f64) -> String {
     format!("{whole}%")
 }
 
-/// Time left, roughly: `<1 min`, `~3 min`, `~2 h`, `~2 h 5 min`.
+/// A time span to the second, for the time left and the time elapsed: `42s`, `3m 12s`,
+/// `1h 02m` (seconds are dropped from an hour up).
 #[must_use]
-pub fn eta(seconds: u64) -> String {
-    if seconds < 60 {
-        return "<1 min".to_owned();
+pub fn duration(seconds: u64) -> String {
+    match (seconds / 3600, seconds / 60 % 60, seconds % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, s) => format!("{m}m {s:02}s"),
+        (h, m, _) => format!("{h}h {m:02}m"),
     }
-    // To the nearest minute.
-    let minutes = (seconds + 30) / 60;
-    match (minutes / 60, minutes % 60) {
-        (0, m) => format!("~{m} min"),
-        (h, 0) => format!("~{h} h"),
-        (h, m) => format!("~{h} h {m} min"),
-    }
+}
+
+/// One line of the panel overview: `2026-09-19 08:00  D   pre-nvidia`, the comment cut to
+/// `comment_chars`.
+#[must_use]
+pub fn overview_row(snapshot: &Snapshot, comment_chars: usize) -> String {
+    let row = format!(
+        "{}  {:<3} {}",
+        when(snapshot.created),
+        tag_letters(&snapshot.tags),
+        truncate(&quoted_comment(snapshot), comment_chars),
+    );
+    row.trim_end().to_owned()
+}
+
+/// How many snapshots the overview leaves out of its `shown` rows, if any.
+#[must_use]
+pub fn older_count(total: usize, shown: usize) -> Option<usize> {
+    total.checked_sub(shown).filter(|&more| more > 0)
 }
 
 /// `sdX1` for `/dev/sdX1`: the device's name without the folder.
@@ -276,14 +257,45 @@ mod tests {
     }
 
     #[test]
-    fn eta_is_rough() {
-        assert_eq!(eta(0), "<1 min");
-        assert_eq!(eta(59), "<1 min");
-        assert_eq!(eta(60), "~1 min");
-        assert_eq!(eta(192), "~3 min");
-        assert_eq!(eta(3569), "~59 min");
-        assert_eq!(eta(3590), "~1 h");
-        assert_eq!(eta(2 * 3600 + 5 * 60), "~2 h 5 min");
+    fn overview_rows_are_date_tags_and_a_short_comment() {
+        let mut snapshot = Snapshot {
+            name: "2026-09-19_08-00-00".to_owned(),
+            created: date(2026, 9, 19).at(8, 0, 0, 0),
+            tags: vec![Tag::Daily],
+            comment: None,
+        };
+        assert_eq!(overview_row(&snapshot, 14), "2026-09-19 08:00  D");
+        snapshot.comment = Some("pre-nvidia".to_owned());
+        assert_eq!(
+            overview_row(&snapshot, 14),
+            "2026-09-19 08:00  D   \"pre-nvidia\""
+        );
+        snapshot.comment = Some("before the big kernel update".to_owned());
+        assert!(overview_row(&snapshot, 14).ends_with('…'));
+        snapshot.tags = vec![Tag::OnDemand, Tag::Boot];
+        assert!(overview_row(&snapshot, 14).starts_with("2026-09-19 08:00  OB  "));
+    }
+
+    #[test]
+    fn older_snapshots_are_counted_only_when_there_are_some() {
+        assert_eq!(older_count(9, 5), Some(4));
+        assert_eq!(older_count(6, 5), Some(1));
+        assert_eq!(older_count(5, 5), None);
+        assert_eq!(older_count(0, 5), None);
+    }
+
+    #[test]
+    fn durations_are_to_the_second_and_drop_seconds_from_an_hour() {
+        assert_eq!(duration(0), "0s");
+        assert_eq!(duration(42), "42s");
+        assert_eq!(duration(59), "59s");
+        assert_eq!(duration(60), "1m 00s");
+        assert_eq!(duration(68), "1m 08s");
+        assert_eq!(duration(192), "3m 12s");
+        assert_eq!(duration(3599), "59m 59s");
+        assert_eq!(duration(3600), "1h 00m");
+        assert_eq!(duration(2 * 3600 + 5 * 60 + 9), "2h 05m");
+        assert_eq!(duration(7325), "2h 02m");
     }
 
     #[test]

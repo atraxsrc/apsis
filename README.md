@@ -6,27 +6,33 @@
 
 <p align="center">Simple system snapshots and file restore for the COSMIC™ desktop.</p>
 
-A panel applet with a small terminal-style popup to create, list and delete system snapshots,
-and to restore single files from them. It works with keyboard or mouse and follows your COSMIC
-theme.
+A panel applet and a window, both terminal-style, to create, list and delete system snapshots
+and to restore single files from them. The panel popup is a read-only overview (last snapshot,
+backup disk, the newest snapshots); the window does the work. It works with keyboard or mouse
+and follows your COSMIC theme.
 
-> **Status:** 0.2.0. Apsis is standalone: it takes rsync snapshots itself and doesn't need
+> **Status:** 0.3.0. Apsis is standalone: it takes rsync snapshots itself and doesn't need
 > Timeshift. It uses Timeshift's on-disk layout, so snapshots Timeshift made keep working in
 > Apsis (and the other way round). Manual only: there is no schedule, and a snapshot is only
 > deleted when you delete it.
 
-<p align="center"><img src="docs/screenshot.png" width="560" alt="Apsis popup: snapshot list, details pane and activity pane"></p>
-<p align="center"><img src="docs/screenshot1.png" width="560" alt="Apsis popup: snapshot list, details pane and activity pane"></p>
+<p align="center"><img src="docs/screenshot.png" width="560" alt="Apsis, 0.1: snapshot list, details pane and activity pane"></p>
+<p align="center"><img src="docs/screenshot1.png" width="560" alt="Apsis, 0.1: snapshot list, details pane and activity pane"></p>
 
-<p align="center"><sub>The screenshots are from 0.1 and predate the disk usage line under the panes.</sub></p>
+<p align="center"><sub>The screenshots are from 0.1. They show the old all-in-one popup; that view is now the window, and the popup is an overview.</sub></p>
 
 ## Features
 
 - **Snapshots with rsync**: the first one copies the system to your backup disk, later ones only
   copy what changed and hard-link the rest, so each looks complete but costs only the changes.
   rsync runs at idle I/O priority, so the desktop stays responsive.
-- **Snapshot list** in the panel popup: date, tags and comment, with a details pane, and the age
-  of the last snapshot in the panel button's tooltip.
+- **Snapshot list** in the window: date, tags and comment, with a details pane. The panel
+  popup shows the newest few, read-only.
+- **Status at a glance**: the panel button's tooltip shows `last`, `next` (manual only, for now)
+  and `disk`. An optional panel label (a setting) shows the age of the newest snapshot and the
+  share of the backup disk in use.
+- **Four rooms** in the window: snapshots, create, schedule (keep and remind) and log, with an
+  `apsis` strip on top; switch with `1`-`4` or click the dock.
 - **Create and delete**, with a comment, and `[y/N]` before a delete. Delete several at once.
   Creates and restores show a progress bar with the time left.
 - **Disk usage line** under the list: a bar of the backup disk's used and free space, in the
@@ -46,8 +52,8 @@ theme.
 - **Keyboard first**: vim-style keys (`j`/`k`, `c`reate, `d`elete, `s`ettings, `?` help) and a
   `>` input line, or just use the mouse.
 - **Follows the COSMIC theme** live: colours, corner radius, font. No hard-coded colours.
-- **Window mode**: the app launcher's **Apsis** entry opens the same view in a resizable window
-  (`apsis --window`).
+- **The window**: the app launcher's **Apsis** entry, or `o` in the panel popup, opens
+  it (`apsis --window`; `--settings` and `--about` open it on those views).
 - **One password prompt** per few minutes, not per action, through a small polkit-guarded
   helper.
 
@@ -122,8 +128,9 @@ Apsis's own. Your snapshots stay where they are.
 ### First run
 
 1. **Add the applet to the panel:** *COSMIC Settings → Desktop → Panel → Configure panel
-   applets*, then add **Apsis**. Its icon (an orbit) appears in the panel; click it.
-   **Or use it as a window:** open **Apsis** from the app launcher. Same view, same keys.
+   applets*, then add **Apsis**. Its icon (an orbit) appears in the panel; click it for the
+   overview, then press `o` to open the window. **Or** open **Apsis** from the app launcher.
+   The steps below are in the window.
 2. **Pick a backup disk.** Open the settings (`s`), press `space` on `device` until your backup
    disk shows, then `w` to save (your password is asked). An external disk or a second
    partition is best; a snapshot on the same disk won't help if that disk dies.
@@ -134,7 +141,7 @@ Apsis's own. Your snapshots stay where they are.
 
 | to... | do this |
 |---|---|
-| see your snapshots | click the panel icon. The newest is at the top; the right pane shows details |
+| see your snapshots | click the panel icon for the overview, or open the window. The newest is at the top; the right pane shows details |
 | create a snapshot | press `c`, type a comment (e.g. `before driver update`), press Enter |
 | delete a snapshot | select it, press `d`, type `y`, press Enter (anything else cancels) |
 | delete several | mark each with `space` (or `J` to mark and move down), press `d`, type `y`, press Enter. The password is asked once; they're deleted one by one and it stops at the first failure, saying which were deleted |
@@ -151,7 +158,7 @@ original place: that asks every time, on purpose.
 
 ### Keys
 
-Every `[key]` hint at the bottom of the popup is also a button, every row can be clicked, and
+Every `[key]` hint at the bottom of the window is also a button, every row can be clicked, and
 `?` shows this list inside Apsis.
 
 | where | key | does | mouse |
@@ -171,6 +178,7 @@ Every `[key]` hint at the bottom of the popup is also a button, every row can be
 | settings | `a` / `x` | add filter / remove selected filter | `[a]dd` / `[x]remove` |
 | settings | `w` / `r` | write the settings / reload, dropping changes | `[w]rite` / `[r]eload` |
 | anywhere | `Esc` | cancel, go back, clear marks, then close | `[esc]` |
+| panel popup | `o` / `r` / `Esc` | open the window / refresh / close (read-only) | `[o]pen apsis` / `[r]efresh` / `[esc]` |
 
 ### Restoring a file
 

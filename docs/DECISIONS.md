@@ -1108,6 +1108,123 @@ Append-only. Newest at the bottom. Format: date — decision — why.
     It now compares the child's niceness with the spawning thread's own, retried if that
     changes meanwhile. Two full runs pass after it.
 
+- 2026-09-29 - **UI polish, phase 1: status model.** `apsis_core::status` adds `ApsisStatus`
+  (last, remind, disk), `Due`, `DiskStatus`, `Severity`; `apsis::status::StatusView` is the one
+  formatter for the panel label, tooltip and icon severity (the strip and popup will reuse it).
+  Inputs are the existing `remind_days` setting and the `SnapshotList` (snapshots, device,
+  `usage`); no new helper call. Disk thresholds (`DISK_LOW` 10%, `DISK_CRITICAL` 5%) and
+  `size`/`size_short` moved from `apsis` into core; the bar's `Space` uses the same constants.
+  Icon: warning for a due reminder or free < 10%, destructive for free < 5% (the worse wins);
+  colour on the icon only. New setting `show_label` (off by default, settings row `panel
+  label`, horizontal panels only) shows `12h · 62%` beside the icon.
+  Conflicts with `docs/APSIS-UI-PROMPT.md` (the contract is untouched):
+  - Section 12 has `next: Option<NextSnapshot>`. The scheduler was dropped (5.2), so there is
+    no `next`; the tooltip has no `next` line. The task's `remind` and `Due` are not in the
+    contract's struct; added.
+  - `DiskStatus::Mounted { device, used, total }` became `{ device, usage: DiskUsage }`, so the
+    percent and the warning limits match the disk bar and `df` (share of usable space, `used +
+    free`, not `total`, which counts blocks kept back for root). `used_pct` rounds up like `df`.
+  - The contract writes an unknown side as an em-dash; the global rule bans them, so it is `-`
+    (`12h · -`, `- · 62%`, `- · -`).
+  - The tooltip changed from `Apsis - last snapshot 3h ago · 483G free` to the contract's
+    lowercase `last` / `disk` lines. Low space reads `disk  28G free  (under 10%)`.
+  - With no backup device set the reminder stays off and the disk reads `not connected`
+    (today's behaviour, since there is nothing to judge by). A failed list gives
+    `Apsis` + `disk  not connected`.
+  - `PLAN.md` has no UI polish phase yet; this slice is logged here only.
+  - Build note: in this session cargo could not update its git cache (`~/.cargo` is read-only
+    and `~/.gitconfig` is blocked in the sandbox), so tests and clippy ran with a scratch
+    `CARGO_HOME` and `HOME` under the session's scratchpad. Nothing in the repo changed for it.
+
+- 2026-09-29 - **Direction: the panel is an overview, the window does the work.** From the
+  user's mockups (`panel.jpg`, `app.jpg`, in their Downloads, not in the repo). Decided:
+  - The panel popup is **read-only**: time (last, next), disk bar, recent snapshots, and a way
+    to open the window (`o`). No create, delete, restore or settings there. This changes
+    `APSIS-UI-PROMPT.md` section 5 (popup with list, activity and key hints); the contract is
+    not edited, this entry overrides it.
+  - The window (`apsis --window`, Layout D of the contract) is where create, delete, browse and
+    restore happen: apsis strip on top, snapshots and details, activity, four rooms.
+  - `next` is `manual only` everywhere for now (tooltip line added). Scheduling stays on the
+    roadmap; when it returns, `next` and the mockups' last/next timeline can follow.
+  - Mockup differences kept out: per-row cyan dots and `idle` labels (the contract forbids status
+    dots), the timeline slider (needs `next`), the literal cyan (live COSMIC accent instead) and
+    uppercase `TIME` / `DISK` (lowercase pane titles).
+  - Open: whether the popup can show a running job depends on the helper exposing its state;
+    not checked yet.
+
+- 2026-09-29 - **UI polish, phase 2: the apsis strip in the window.** `StatusView::strip()`
+  gives the strip's text (`Strip`, `DiskStrip`); `AppModel::strip()` lays it out as an `apsis`
+  pane above the split, `--window` only and not in the settings view. The window drops its
+  old disk line (the popup keeps it until slice 4). Reuses `pane()`, `disk_bar()` and
+  `Space`; colours are theme roles only (accent labels, warning and destructive phrases).
+  - The pane is drawn as an inactive one (dim title), like details; the mockups' all-accent
+    panes are a chrome change for the window-chrome slice, not done here.
+  - The mockup's `sda1` line puts the device beside the sizes; device is accent, sizes text.
+  - The layout test that checked the disk line in both modes is now popup-only; a new one
+    checks the strip against the smallest window.
+
+- 2026-09-29 - **UI polish, phase 3: the activity line.** Most of it existed (`36c094f`:
+  helper `Progress`, percent, time left). Now: `creating snapshot · 58% · 3m 12s left` and a
+  bar that fills the rest of the line; `creating snapshot · working · 1m 08s elapsed ⠹` while
+  there is no number (elapsed from `run_started`, set in `run()`, cleared when the job ends);
+  `restoring · ...` for a real restore. `fmt::eta` (`~3 min`) became `fmt::duration`
+  (`3m 12s`, `42s`, `1h 02m`), used for both time left and elapsed. The disk bar and the
+  progress bar are one widget, `bar(fraction, class)`; `disk_bar` picks the colour by `Space`.
+  The line is shared, so the popup's activity pane changed wording too (its layout did not).
+  Deviations from the contract, section 8:
+  - No `2.1G / 3.2G`: rsync's progress line has bytes copied but no reliable total.
+  - Failure stays `create failed: <reason>`, not `create failed · open log`: there is no log
+    room until the rooms slice.
+  - Done stays `snapshot created`, not `created <name>`: the new snapshot's name is not known
+    until the refreshed list arrives, and matching it would be a guess.
+  - Delete progress untouched (no percent). Disk used does not tick while busy: the strip
+    stays as the last list showed it.
+
+- 2026-09-29 - **UI polish, phase 4: the panel popup is a read-only overview.**
+  `AppModel::read_only` (true for the panel applet, false for the window and for the test
+  model) gates the keys and swaps the popup's content for `overview()`: `~/apsis $ status`, an
+  `apsis` pane (the strip's two columns stacked, via the shared `strip_columns`), the newest 5
+  snapshots as plain rows (`fmt::overview_row`, `fmt::older_count`), and hints `[o]pen apsis
+  [r]efresh [esc]`. 400 px wide (`OVERVIEW_WIDTH`), 388 px high in the layout test. Only `o`,
+  `r` and Esc work there; the window's state machine is untouched, so its ~120 tests still cover
+  it. The old popup code paths stay because the window uses them.
+  - `o` and the menu start a new process, `apsis --window` (`--settings`, `--about` from the
+    menu), from `current_exe()` with a ` (deleted)` suffix cut (a package upgrade under a
+    running panel), through the existing detached `spawn`. `main.rs` treats those flags as
+    window mode; `init` opens the window on that view (`startup_overlay`).
+  - Menu: `Open Apsis` added; `Settings…` and `About Apsis` now open the window on that view
+    instead of the popup.
+  - Look: same pane widget and theme roles as the window (no new colours), no per-row dots,
+    `idle` labels or timeline (see the direction entry above). The pane titles stay dim, as in
+    the window strip.
+  - Not done: a running create is not shown in the popup (it runs in another process; the helper
+    would have to expose its state: roadmap). Several windows can be opened by pressing `o`
+    repeatedly; the helper's single lock still serialises root work. README and its screenshots
+    still describe the old popup; left for the copy pass.
+  - Sandbox note: these tests and clippy ran with the scratch `CARGO_HOME`/`HOME`, as before.
+
+- 2026-09-29 - **UI polish, phase 5: rooms and the dock in the window.** `Room` (snapshots,
+  create, schedule, log), `AppModel::room`, `1 2 3 4` (`KeyAction::Room`) and clicks
+  (`Message::Room`), a dock of four accent-outlined cells with the selected row's fill on the
+  active one (`dock`, `dock_cell`), and `[1-4]rooms` in the footer. Window only; hidden in the
+  settings view and the browser.
+  - **Create** keeps the list and swaps the details pane for a create form. The text is still
+    typed on the `>` line (one input, one focus; a second `text_input` would need its own focus
+    handling); the pane mirrors it. `2` = `c` plus the room.
+  - **Schedule** has no scheduler behind it (dropped, roadmap). It holds what exists: `next
+    manual only`, keep-last-N and remind (`ApsisChoice::stepped`, saved through `set_backend`).
+    This departs from the contract (enable tags + keep N); the tags come back with a scheduler.
+  - **Log** is a new in-memory list (200 lines, this session only, not written to disk): the
+    status line's changes and failed lists, recorded in a wrapper around `update` (`handle` is
+    the old body) rather than at ~25 call sites. The contract's "helper / rsync / timeshift
+    output" is not there: the helper does not stream its output to the applet.
+  - Esc: prompt, then room, then marks, then window. Rooms are ignored while a job runs.
+  - The layout test caught the schedule room's notes squeezing the dock to 0 px at 640 x 440;
+    the room scrolls now, and the test asserts the dock's height.
+  - `create failed · open log` (phase 3 deviation) can now be done: the log room exists. Not
+    done here; the copy pass.
+  - Sandbox note: as before, tests and clippy ran with a scratch `CARGO_HOME` and `HOME`.
+
 ## Open
 
 - ~~App ID~~ - resolved 2026-09-25, see above.
@@ -1139,3 +1256,58 @@ Append-only. Newest at the bottom. Format: date — decision — why.
   snapshots on the device, not just this one's. Proposed: copy that exactly (it's what
   Timeshift itself will do on its next run anyway). (4) Retention after a native on-demand
   create, as Timeshift's `--create` does: proposed yes, once the schedule is Apsis's.
+
+## 2026-09-29 - UI polish slice 6: theme audit and copy pass
+
+- **Theme audit: clean.** No literal colours in `crates/apsis/src`. Every colour comes from
+  `theme.cosmic()` (accent, divider, background, warning, destructive); the only derived ones are
+  alpha fades of those (selected row 0.15, marked row 0.07, dim text 0.7).
+- **Known, not fixed: translucent theme tints the active pane.** A pane is a border-coloured fill
+  with the theme background fill on top. With a theme whose background has alpha below 1 (seen in
+  the window with a custom RON theme), the accent shows through the whole active pane. Changing the
+  theme fixed it for the user. Forcing the inner fill to alpha 1.0 would hide it but also make the
+  panel's panes opaque, so it waits for the libcosmic fix (the `text_tint` issue).
+- **Copy pass:** `i18n/en/apsis.ftl` needed no changes; the tagline is the deliberate 0.2.0 one.
+  One string outside the ftl file is rough: the leftover-staging warning in
+  `apsis-core/src/native/mod.rs` shows the raw staging path (`.../timeshift/apsis-staging`) in the
+  activity pane. Left as is (tests may match it); reword when convenient.
+
+## 2026-09-29 - The panel popup is a read-only overview (user decision)
+
+- **Target.** The popup shows the apsis strip (last / due / disk bar), a read-only list of the
+  newest few snapshots, the activity line (progress from jobs started in the window), and one
+  way to open the window: Enter, or a click on the title or a row (the window opens with that
+  snapshot selected). Esc closes. The right-click menu keeps Refresh, Close and "Remove or move
+  applet...". Settings and About live in the window. Error and setup states (disk not connected,
+  first run, create failed) show one muted line plus "open apsis".
+- **Doc changes:** `APSIS-UI-PROMPT.md` sections 5 and 11 got dated update notes (the popup no
+  longer has `s`, the four-cell dock or details on Enter).
+- **Today's popup (checked in `app.rs`):** read-only already (`read_only` for `Mode::Applet`).
+  Keys: `o` opens the window, `r` refreshes, Esc closes; everything else is ignored, Enter too.
+  Buttons: `[o]pen apsis`, `[r]efresh`, `[esc]`. Rows and the title are not clickable. Nothing
+  creates, deletes, marks, restores or opens settings. Right-click menu: Open Apsis, Refresh,
+  Settings..., About Apsis, Remove or move applet..., Close.
+- **Gaps** are listed as slices in the session report (Enter, click title, click row with
+  `--select`, one-line states, activity line across processes, menu trim, About in the window).
+
+## 2026-09-29 - 0.3.0 release prep
+
+- **Version 0.3.0**, not 0.2.1: the popup lost create, delete and settings, and the window,
+  status model and panel label are new. `v0.2.0` is already tagged. Bumped in `Cargo.toml`,
+  `Cargo.lock` (three apsis crates), metainfo, `resources/deb/changelog`, the man page, `CHANGELOG.md`
+  and `SECURITY.md` (0.3.x supported).
+- **Staging warning reworded** in `apsis-core/src/native/mod.rs`: one plain line ("leftover from an
+  interrupted snapshot, safe to delete") however many leftovers; the path goes to stderr, which
+  is the helper's journal (`journalctl -u apsis-helper`). The core crate has no i18n (`fl!` is
+  the applet's), so the line is a plain English string like the other list warnings.
+- **Screenshots to retake** (none were invented): `docs/screenshot.png` and `docs/screenshot1.png`
+  (0.1 all-in-one popup; used by README, the metainfo `<screenshot>` and the collection entries,
+  which point at the `v0.1.0` copy). Wanted: the window (strip, snapshots, details, activity,
+  dock), the panel popup overview, and the panel button with the label on. Then point the URLs at
+  `v0.3.0`.
+- **Left as is, flagged:** `CLAUDE.md` still has the old "Timeshift-style" listing line (the
+  user's file); `UI.md`'s right-click menu section still lists Settings and About (they change
+  with the read-only-popup slices); the window's `schedule` room name is kept although there is
+  no scheduler (the pane says so).
+- **Not run in the sandbox:** `cargo test`, `clippy` (cargo can't write `~/.cargo`); `cargo fmt
+  --check` and gitleaks passed. The user runs the first two.

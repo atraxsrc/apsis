@@ -6,6 +6,7 @@ mod config;
 mod fmt;
 mod i18n;
 mod settings_view;
+mod status;
 mod tallest;
 
 use app::Mode;
@@ -35,10 +36,13 @@ fn in_panel() -> bool {
     )
 }
 
-/// `--window` opens a window. So does starting outside the panel (the app launcher, a terminal,
+/// `--window` opens a window; so do `--settings` and `--about`, which open it on that view (the
+/// panel's overview starts them). So does starting outside the panel (the app launcher, a terminal,
 /// `just run`), where the panel button would be a tiny square on its own.
 fn mode(mut args: impl Iterator<Item = std::ffi::OsString>, in_panel: bool) -> Mode {
-    if !in_panel || args.any(|arg| arg == "--window") {
+    if !in_panel
+        || args.any(|arg| matches!(arg.to_str(), Some("--window" | "--settings" | "--about")))
+    {
         Mode::Window
     } else {
         Mode::Applet
@@ -61,6 +65,13 @@ mod tests {
     #[test]
     fn window_flag_opens_a_window_even_in_the_panel() {
         assert_eq!(mode_for(&["--window"], true), Mode::Window);
+    }
+
+    #[test]
+    fn settings_and_about_open_the_window_too() {
+        assert_eq!(mode_for(&["--settings"], true), Mode::Window);
+        assert_eq!(mode_for(&["--about"], true), Mode::Window);
+        assert_eq!(mode_for(&["--other"], true), Mode::Applet);
     }
 
     #[test]

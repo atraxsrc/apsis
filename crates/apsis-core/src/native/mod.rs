@@ -489,14 +489,15 @@ impl<R: Runner> Backend for NativeRsync<R> {
                 comment: Some(info.comments).filter(|c| !c.is_empty()),
             });
         }
-        if let Ok(entries) = fs::read_dir(self.staging_dir()) {
-            for entry in entries.flatten() {
-                warnings.push(format!(
-                    "{}: left over from an interrupted native create, in {}",
-                    entry.file_name().to_string_lossy(),
-                    self.staging_dir().display()
-                ));
-            }
+        // One line however many there are; the folder's path goes to the journal, not the pane.
+        if let Ok(mut entries) = fs::read_dir(self.staging_dir())
+            && entries.next().is_some()
+        {
+            eprintln!(
+                "apsis: leftover from an interrupted snapshot in {}",
+                self.staging_dir().display()
+            );
+            warnings.push("leftover from an interrupted snapshot, safe to delete".to_owned());
         }
         Ok(SnapshotList {
             device: self.config.device.clone(),

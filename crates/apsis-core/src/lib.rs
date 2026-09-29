@@ -15,6 +15,7 @@ pub mod restore;
 pub mod retention;
 mod runner;
 pub mod settings;
+pub mod status;
 pub mod usage;
 
 pub use backend::Backend;
@@ -22,4 +23,5 @@ pub use error::{Error, Result};
 pub use model::{Mode, Snapshot, SnapshotList, Tag, parse_snapshot_name};
 pub use progress::Progress;
 pub use runner::{MAX_COMMENT_CHARS, RunOutput, Runner, find_in_path, validate_comment};
+pub use status::{ApsisStatus, DiskStatus, Due, Severity};
 pub use usage::DiskUsage;

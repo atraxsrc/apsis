@@ -1023,10 +1023,11 @@ fn a_leftover_staging_folder_is_reported() {
         let list = backend.list().unwrap();
         assert!(list.snapshots.is_empty(), "{kind}");
         assert_eq!(list.warnings.len(), 1, "{kind}");
-        assert!(
-            list.warnings[0].contains("interrupted native create"),
+        assert_eq!(
+            list.warnings[0], "leftover from an interrupted snapshot, safe to delete",
             "{kind}"
         );
+        assert!(!list.warnings[0].contains("apsis-staging"), "{kind}");
     }
 }
 

@@ -2,8 +2,11 @@ app-title = Apsis
 app-comment = Simple system snapshots and file restore for the COSMIC™ desktop
 app-keywords =
 
-tooltip-last = Apsis - last snapshot { $ago }
-tooltip-none = Apsis - no snapshots
+tooltip-last = last  { $ago }
+tooltip-last-stale = last  { $ago }  (over { $days } days)
+tooltip-last-none = last  none yet
+tooltip-last-none-stale = last  none yet  (over { $days } days)
+tooltip-next-manual = next  manual only
 
 waiting = reading snapshots…
 not-loaded = press [r] to list snapshots
@@ -53,6 +56,7 @@ help-mark-down = mark or unmark, then move down
 help-delete = delete the marked (or the selected) snapshots (confirm with y)
 help-refresh = refresh the list
 help-settings = settings: backup device, home folders, filters
+help-rooms = window rooms: snapshots, create, schedule (up/down, space, + -), log
 help-help = show or hide this help
 help-escape = cancel, go back, clear marks, close the popup
 help-settings-change = settings: change the selected row
@@ -61,6 +65,7 @@ help-settings-filters = settings: add a filter, remove the selected one
 help-settings-write = settings: write them (asks for your password)
 help-settings-reload = settings: read them again, dropping changes
 
+menu-open = Open Apsis
 menu-refresh = Refresh
 menu-settings = Settings…
 menu-about = About Apsis
@@ -173,15 +178,20 @@ live-present = folder exists on the running system (contents not compared)
 live-changed = differs from the running system
 live-changed-file = differs: size { $size } here, { $live_size } now; modified { $time } here, { $live_time } now
 
-# Disk usage line under the panes, and the panel tooltip's free space
+# Disk usage line under the panes, and the panel tooltip's disk line
 disk-label = disk
-tooltip-free = { $text } · { $free } free
+tooltip-disk = disk  { $used } / { $total }  { $free } free
+tooltip-disk-low = disk  { $free } free  (under { $pct }%)
+tooltip-disk-not-connected = disk  not connected
+tooltip-disk-unknown = disk  unknown
 
-# Progress of a create or restore in the activity pane: `creating ██████░░░░ 58% ~3 min left`
-progress-creating = creating
+# Progress of a create or restore in the activity pane, before the bar:
+# `creating snapshot · 58% · 3m 12s left`, or `creating snapshot · working · 1m 08s elapsed`
+progress-creating = creating snapshot
 progress-restoring = restoring
-progress-estimating = estimating…
-progress-left = { $time } left
+progress-percent = { $label } · { $percent }
+progress-percent-left = { $label } · { $percent } · { $time } left
+progress-working = { $label } · working · { $elapsed } elapsed
 
 # Keep last N snapshots (settings, prune preview) and the reminder
 settings-apsis-saved = saved
@@ -192,7 +202,10 @@ settings-keep-manual-off = keep: all
 settings-keep-manual-note = Saved at once. Keeps the newest N snapshots without a comment; [p] previews which older ones go and deletes them after y (also offered after a create). Commented ones are pinned: they stay and don't count.
 settings-remind = remind after { $days } days
 settings-remind-off = remind: off
+settings-panel-label = panel label: on
+settings-panel-label-off = panel label: off
 settings-remind-note = Saved at once. When the newest snapshot is older than this, the panel icon turns the warning colour and the tooltip says so.
+settings-panel-label-note = Saved at once. Shows the age of the newest snapshot and the share of the backup disk in use (12h · 62%) beside the panel icon. Horizontal panels only.
 pane-prune = prune preview
 prune-delete = delete  { $name }
 prune-keep-recent = keep    { $name }  newest { $count }
@@ -202,4 +215,35 @@ prompt-prune = remove { $count } old snapshots? [y/N]
 prune-off = keep is off: set it in settings [s]
 prune-nothing = nothing to prune: keeping the last { $keep }
 help-prune = old snapshots past "keep": preview, then y
-tooltip-stale = { $text } · none for over { $days } days
+
+# The apsis pane above the panes in the window: time on the left, backup disk on the right
+pane-apsis = apsis
+strip-label-last = last
+strip-label-next = next
+strip-next-manual = manual only
+strip-last-none = none yet
+strip-over = (over { $days } days)
+strip-under = (under { $pct }%)
+strip-used-free = { $pct }% used · { $free } free
+strip-disk-not-connected = not connected
+strip-disk-unknown = unknown
+overview-more = +{ $count } older
+
+# The window's rooms (dock cells), their panes, and their text
+room-snapshots = snapshots
+room-create = create
+room-schedule = schedule
+room-log = log
+pane-create = create
+pane-schedule = schedule
+pane-log = log
+create-label-comment = comment
+create-label-tag = tag
+create-comment-none = press [c] to write one
+create-tag = O on-demand
+create-unavailable = No backup disk to create on.
+schedule-label-keep = keep
+schedule-label-remind = remind
+schedule-note = There is no scheduler yet: Apsis creates a snapshot when you ask. Keep and remind are saved at once.
+log-empty = nothing yet
+log-error = error

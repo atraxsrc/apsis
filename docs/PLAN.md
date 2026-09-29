@@ -626,3 +626,17 @@ Then README, man page and metainfo for 0.2.0.
 - **Status: prep done 2026-09-26** (libcosmic pinned by `Cargo.lock`, CI, SECURITY.md, README, metainfo,
   CHANGELOG, collection drafts). Left for the user: see the checklist in `docs/RELEASE.md`
   (vendor tarball, tag, release, collection PR).
+
+## UI polish (contract: `docs/APSIS-UI-PROMPT.md`; decisions in `DECISIONS.md`, 2026-09-29)
+
+The panel popup is a read-only overview; the window does the work. One slice at a time.
+
+1. **Status model** - done: `ApsisStatus`, panel tooltip (`last`, `next  manual only`, `disk`),
+   icon colour, optional panel label.
+2. Strip in the window (time | disk), from `StatusView` - done.
+3. Activity bar in the window: percent and time left - done.
+4. Popup becomes the read-only overview, plus `open apsis` - done.
+5. Window chrome: the four rooms; create beside the list - done.
+6. Copy pass, then theme audit (no hardcoded colours) - done 2026-09-29, see `DECISIONS.md`.
+
+Roadmap, not scheduled: a scheduler (`next` in time, the last/next timeline), undock.

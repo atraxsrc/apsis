@@ -1,3 +1,11 @@
+apsis (0.3.0-1) noble; urgency=medium
+
+  * New upstream release, see CHANGELOG.md: read-only panel overview, window
+    with four rooms and an apsis strip, status tooltip and optional panel
+    label, disk warning colours, progress with time left.
+
+ -- atraxsrc <92285717+atraxsrc@users.noreply.github.com>  Tue, 29 Sep 2026 18:00:00 +1000
+
 apsis (0.2.0-1) noble; urgency=medium
 
   * New upstream release, see CHANGELOG.md: Apsis is standalone and no longer

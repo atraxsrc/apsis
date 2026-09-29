@@ -15,6 +15,8 @@ pub struct Config {
     /// Tooltip and panel icon remind when the last snapshot is older than this many days.
     /// 0 = off.
     pub remind_days: u32,
+    /// Show `12h · 62%` beside the panel icon (horizontal panels only). Off by default.
+    pub show_label: bool,
 }
 
 impl Default for Config {
@@ -23,6 +25,7 @@ impl Default for Config {
             demo: String::new(),
             keep_manual: 0,
             remind_days: crate::settings_view::DEFAULT_REMIND_DAYS,
+            show_label: false,
         }
     }
 }
@@ -33,6 +36,7 @@ impl Config {
         crate::settings_view::ApsisChoice {
             keep_manual: self.keep_manual,
             remind_days: self.remind_days,
+            show_label: self.show_label,
         }
     }
 }

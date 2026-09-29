@@ -11,9 +11,9 @@
   <description>
     <p>
       Apsis is a panel applet for the COSMIC desktop that creates, lists and deletes system
-      snapshots on a backup disk with rsync, and restores single files from them. Its popup
-      looks like a small terminal, works with the keyboard or the mouse, and follows the live
-      COSMIC theme.
+      snapshots on a backup disk with rsync, and restores single files from them. Its panel popup
+      is a read-only overview and its window does the work; both look like a small terminal,
+      work with the keyboard or the mouse, and follow the live COSMIC theme.
     </p>
     <ul>
       <li>Snapshots with rsync: later ones only copy what changed and hard-link the rest, at idle I/O priority</li>
@@ -63,11 +63,26 @@
   </keywords>
   <screenshots>
     <screenshot type="default">
-      <caption>The popup: snapshot list, details and activity</caption>
+      <caption>Snapshot list, details and activity (0.1; a new screenshot is due)</caption>
       <image type="source" width="1538" height="1036">https://raw.githubusercontent.com/atraxsrc/apsis/v0.1.0/docs/screenshot.png</image>
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.3.0" date="2026-09-29">
+      <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.3.0</url>
+      <description>
+        <p>A cleaner look and a status you can read at a glance.</p>
+        <ul>
+          <li>The panel popup is a read-only overview: last snapshot, backup disk bar, newest snapshots</li>
+          <li>The window has four rooms: snapshots, create, schedule and log, with an apsis strip on top</li>
+          <li>The panel tooltip shows last, next and disk; the icon and an optional panel label show the state</li>
+          <li>The disk bar turns to the warning and critical colours when space runs low</li>
+          <li>Progress with the time left while a snapshot is created or restored</li>
+          <li>Every colour now comes from the COSMIC theme</li>
+          <li>A clearer message for a leftover from an interrupted snapshot</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-09-29">
       <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.2.0</url>
       <description>

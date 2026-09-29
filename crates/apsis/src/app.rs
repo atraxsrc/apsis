@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::rc::Rc;
 use std::sync::LazyLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use apsis_core::config::{Config as ApsisConfig, ConfigInfo};
 use apsis_core::helper::HelperClient;
@@ -13,8 +13,10 @@ use apsis_core::restore::{
 };
 use apsis_core::retention::{self, Kept, ManualPlan};
 use apsis_core::settings::HomeState;
+use apsis_core::status::{DISK_CRITICAL, DISK_LOW};
 use apsis_core::{
-    DiskUsage, MAX_COMMENT_CHARS, Progress, Snapshot, SnapshotList, validate_comment,
+    ApsisStatus, DiskUsage, MAX_COMMENT_CHARS, Progress, Severity, Snapshot, SnapshotList,
+    validate_comment,
 };
 use cosmic::applet::{menu_button, padded_control};
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
@@ -38,7 +40,8 @@ use crate::browser::{self, Browser, Load};
 use crate::config::Config;
 use crate::fl;
 use crate::fmt;
-use crate::settings_view::{ApsisChoice, Counted, Row, Section, SettingsView};
+use crate::settings_view::{ApsisChoice, Counted, Row, Section, SettingsView, Step};
+use crate::status::{DiskStrip, StatusView, Strip};
 use crate::tallest::Tallest;
 
 /// Popup width in logical pixels (UI.md: ~720, room for the list and details side by side).
@@ -57,6 +60,12 @@ const _: () = assert!(
 const WINDOW_RESIZE_BORDER: f64 = 8.0;
 /// If the window never reports focus, it becomes resizable this long after starting anyway.
 const WINDOW_SHOWN_FALLBACK: Duration = Duration::from_millis(1500);
+/// The read-only overview's width: a narrow card, not the window's 720.
+const OVERVIEW_WIDTH: f32 = 400.0;
+/// Newest snapshots the overview lists.
+const OVERVIEW_ROWS: usize = 5;
+/// Longest comment on an overview row (the date and tags come first).
+const OVERVIEW_COMMENT_CHARS: usize = 14;
 /// Width of the right-click menu.
 const MENU_WIDTH: f32 = 240.0;
 /// Height of one snapshot row: monotext line height (20) plus vertical padding.
@@ -99,14 +108,8 @@ const SHORT_INPUT_WIDTH: f32 = 48.0;
 /// Advance of one monotext cell (14 px text; monospace fonts are about 0.6 em wide), for how
 /// many block characters fit in the disk bar. A slightly wider font only clips the bar's end.
 const MONO_CELL_WIDTH: f32 = 14.0 * 0.6;
-/// Cells in the activity pane's progress bar.
-const PROGRESS_CELLS: usize = 20;
 /// Height of one monotext line.
 const LINE_HEIGHT: f32 = 20.0;
-/// Below this share of free space the disk bar turns the warning colour, and below
-/// [`DISK_CRITICAL`] the destructive one.
-const DISK_LOW: f64 = 0.10;
-const DISK_CRITICAL: f64 = 0.05;
 /// How often the panel lists in the background (through the helper only) for the reminder.
 const BACKGROUND_LIST_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -189,6 +192,17 @@ pub struct AppModel {
     /// The running create's or restore's last `Progress` from the helper. `None` until the
     /// first one.
     progress: Option<Progress>,
+    /// When the running create or restore started, for `working · 1m 08s elapsed`.
+    run_started: Option<Instant>,
+    /// The panel's popup: an overview that shows the last list and changes nothing. Only
+    /// `apsis --window` creates, deletes, restores and edits settings.
+    read_only: bool,
+    /// The window's room: the dock's active cell.
+    room: Room,
+    /// The schedule room's selected row: 0 keep, 1 remind.
+    schedule_row: usize,
+    /// What happened this session, oldest first.
+    log: Vec<LogEntry>,
     spinner: usize,
     /// Index into the displayed (newest first) snapshots.
     selected: usize,
@@ -311,6 +325,43 @@ pub enum Operation {
     Restore(Request),
 }
 
+/// The window's rooms (the dock under the activity pane). `1 2 3 4` jump to them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Room {
+    /// The snapshot list and its details: home.
+    Snapshots,
+    /// The list, with the create form where the details are.
+    Create,
+    /// Keep and remind (there is no scheduler yet).
+    Schedule,
+    /// What happened this session.
+    Log,
+}
+
+impl Room {
+    const ALL: [Self; 4] = [Self::Snapshots, Self::Create, Self::Schedule, Self::Log];
+
+    fn label(self) -> String {
+        match self {
+            Self::Snapshots => fl!("room-snapshots"),
+            Self::Create => fl!("room-create"),
+            Self::Schedule => fl!("room-schedule"),
+            Self::Log => fl!("room-log"),
+        }
+    }
+}
+
+/// One line of the log room: when, what, and whether it was a failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LogEntry {
+    time: String,
+    text: String,
+    error: bool,
+}
+
+/// Most lines the log room keeps.
+const LOG_LINES: usize = 200;
+
 /// How the last create or delete went, shown in the activity pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Status {
@@ -356,15 +407,11 @@ impl Edge {
 /// The activity pane's first line while a create or restore reports progress.
 #[derive(Debug, Clone, PartialEq)]
 enum ProgressLine {
-    /// Progress will come, but there's no number yet: `creating ⠋ estimating…`.
-    Estimating(String),
-    /// `creating ██████░░░░ 58% ~3 min left`: the label, filled and empty cells, the rest.
-    Bar {
-        label: String,
-        filled: usize,
-        empty: usize,
-        tail: String,
-    },
+    /// Progress will come, but there's no number yet:
+    /// `creating snapshot · working · 1m 08s elapsed ⠋`.
+    Working(String),
+    /// `creating snapshot · 58% · 3m 12s left`, then a bar for `fraction` in the rest of the line.
+    Bar { text: String, fraction: f64 },
 }
 
 /// How a line in the activity pane looks.
@@ -452,6 +499,10 @@ pub enum KeyAction {
     Prune,
     /// Tab: the details pane of the selected snapshot.
     FocusDetails,
+    /// `o`: open the Apsis window (the panel's overview only).
+    OpenWindow,
+    /// `1 2 3 4`: the window's rooms.
+    Room(Room),
 }
 
 /// Messages emitted by the application and its widgets.
@@ -470,6 +521,13 @@ pub enum Message {
     MenuPanelSettings,
     /// Menu: closes it, like Esc.
     MenuClose,
+    /// Opens the Apsis window in its own process (`apsis --window`, or with `--settings` or
+    /// `--about`), and closes the popup.
+    OpenWindow(Option<&'static str>),
+    /// A click on a dock cell.
+    Room(Room),
+    /// A click on `[-]`, `[+]` or `[on]` in the schedule room.
+    Schedule(Counted, Step),
     /// The repository link in the About view.
     OpenRepository,
     PopupClosed(Id),
@@ -557,6 +615,11 @@ impl cosmic::Application for AppModel {
             loading: false,
             running: None,
             progress: None,
+            run_started: None,
+            read_only: mode == Mode::Applet,
+            room: Room::Snapshots,
+            schedule_row: 0,
+            log: Vec::new(),
             prompt: Prompt::Command,
             status: None,
             spinner: 0,
@@ -582,7 +645,17 @@ impl cosmic::Application for AppModel {
                 app.loading = true;
                 background_list()
             }
-            Mode::Window => app.open_window(),
+            Mode::Window => {
+                let open = app.open_window();
+                match startup_overlay(std::env::args_os().skip(1)) {
+                    Some(Overlay::Settings) => Task::batch([open, app.open_settings_popup()]),
+                    Some(overlay) => {
+                        app.overlay = overlay;
+                        open
+                    }
+                    None => open,
+                }
+            }
         };
         (app, task)
     }
@@ -591,27 +664,26 @@ impl cosmic::Application for AppModel {
         Some(Message::PopupClosed(id))
     }
 
-    /// The panel button, with a tooltip saying how old the newest snapshot is. Left click opens
-    /// the popup, right click the menu. The button itself only reacts to the left button.
+    /// The panel button: the icon (in the warning or destructive colour when the reminder is due
+    /// or the disk is low), the optional `12h · 62%` label beside it on a horizontal panel, and
+    /// a tooltip with the last snapshot and the disk. Left click opens the popup, right click
+    /// the menu. The button itself only reacts to the left button.
     ///
     /// In window mode, the popup's UI instead.
     fn view(&self) -> Element<'_, Self::Message> {
         if self.mode == Mode::Window {
             return self.surface();
         }
-        let button = if self
-            .remind_days_over(jiff::Zoned::now().datetime())
-            .is_some()
-        {
-            // The reminder: the same icon in the theme's warning colour.
-            let (width, height) = self.core.applet.suggested_size(true);
-            let icon = icon::icon(self.icon.clone())
-                .class(theme::Svg::Custom(Rc::new(warning_svg)))
-                .width(Length::Fixed(f32::from(width)))
-                .height(Length::Fixed(f32::from(height)));
-            self.core.applet.button_from_element(icon, true)
-        } else {
+        let status = self.status_view();
+        let severity = status.severity();
+        let button = if self.config.show_label && self.core.applet.is_horizontal() {
+            self.label_button(&status)
+        } else if severity == Severity::None {
             self.core.applet.icon_button_from_handle(self.icon.clone())
+        } else {
+            self.core
+                .applet
+                .button_from_element(self.panel_icon(severity), true)
         }
         .on_press(Message::TogglePopup);
         let button = widget::mouse_area(button).on_right_release(Message::ToggleMenu);
@@ -619,7 +691,7 @@ impl cosmic::Application for AppModel {
             .applet
             .applet_tooltip(
                 button,
-                self.tooltip(),
+                status.tooltip(),
                 self.popup.is_some() || self.menu.is_some(),
                 Message::Surface,
                 None,
@@ -632,13 +704,18 @@ impl cosmic::Application for AppModel {
         if self.menu == Some(id) {
             return self.menu_view();
         }
+        let (content, width) = if self.read_only {
+            (self.overview(), OVERVIEW_WIDTH)
+        } else {
+            (self.surface(), POPUP_WIDTH)
+        };
         self.core
             .applet
-            .popup_container(self.surface())
+            .popup_container(content)
             .limits(
                 Limits::NONE
-                    .min_width(POPUP_WIDTH)
-                    .max_width(POPUP_WIDTH)
+                    .min_width(width)
+                    .max_width(width)
                     .min_height(1.0)
                     .max_height(1000.0),
             )
@@ -672,8 +749,29 @@ impl cosmic::Application for AppModel {
         Subscription::batch(subscriptions)
     }
 
-    #[allow(clippy::too_many_lines, reason = "one arm per message")]
+    /// Every message goes through `handle`; what it left in the activity pane's status, or a
+    /// list that failed, is also written to the log room.
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
+        let status = self.status.clone();
+        let list_failed = matches!(self.listing, Listing::Failed(_));
+        let task = self.handle(message);
+        self.log_changes(status.as_ref(), list_failed);
+        task
+    }
+
+    /// The applet's transparent surfaces; a window keeps the default opaque background.
+    fn style(&self) -> Option<cosmic::iced::theme::Style> {
+        match self.mode {
+            Mode::Applet => Some(cosmic::applet::style()),
+            Mode::Window => None,
+        }
+    }
+}
+
+// Update helpers.
+impl AppModel {
+    #[allow(clippy::too_many_lines, reason = "one arm per message")]
+    fn handle(&mut self, message: Message) -> Task<cosmic::Action<Message>> {
         match message {
             Message::UpdateConfig(config) => self.config = config,
             Message::Surface(action) => {
@@ -685,6 +783,14 @@ impl cosmic::Application for AppModel {
                 let open = self.open_popup(Overlay::None);
                 return Task::batch([open, self.start_list()]);
             }
+            Message::OpenWindow(flag) => return self.launch_window(flag),
+            Message::Room(room) => return self.go_room(room),
+            Message::Schedule(counted, step) => return self.step_setting(counted, step),
+            Message::MenuAbout if self.read_only => return self.launch_window(Some("--about")),
+            Message::MenuSettings if self.read_only => {
+                return self.launch_window(Some("--settings"));
+            }
+            Message::Escape if self.read_only => return self.toggle_popup(),
             Message::MenuAbout => return self.open_popup(Overlay::About),
             Message::MenuSettings => return self.open_settings_popup(),
             Message::OpenSettings => return self.on_key(KeyAction::Settings),
@@ -839,17 +945,6 @@ impl cosmic::Application for AppModel {
         Task::none()
     }
 
-    /// The applet's transparent surfaces; a window keeps the default opaque background.
-    fn style(&self) -> Option<cosmic::iced::theme::Style> {
-        match self.mode {
-            Mode::Applet => Some(cosmic::applet::style()),
-            Mode::Window => None,
-        }
-    }
-}
-
-// Update helpers.
-impl AppModel {
     /// Window mode: the main window is the popup. Lists at once, and focuses the `>` line so
     /// typing works straight away (command keys work without it too, see [`key_action`]).
     fn open_window(&mut self) -> Task<cosmic::Action<Message>> {
@@ -882,6 +977,21 @@ impl AppModel {
             Mode::Applet => destroy_popup(id),
             Mode::Window => window::close(id),
         }
+    }
+
+    /// Starts `apsis --window` (or `--settings`, `--about`) as its own process, and closes the
+    /// popup and the menu: the work happens in the window.
+    fn launch_window(&mut self, flag: Option<&'static str>) -> Task<cosmic::Action<Message>> {
+        let command = window_command(std::env::current_exe().ok(), flag);
+        let close_menu = self.close_menu();
+        let close_popup = match self.popup.take() {
+            Some(popup) => {
+                self.reset_popup_state();
+                destroy_popup(popup)
+            }
+            None => Task::none(),
+        };
+        Task::batch([close_menu, close_popup, spawn(command)])
     }
 
     fn toggle_popup(&mut self) -> Task<cosmic::Action<Message>> {
@@ -945,9 +1055,14 @@ impl AppModel {
             .core
             .applet
             .get_popup_settings(parent, id, None, None, None);
+        let width = if self.read_only {
+            OVERVIEW_WIDTH
+        } else {
+            POPUP_WIDTH
+        };
         settings.positioner.size_limits = Limits::NONE
-            .min_width(POPUP_WIDTH)
-            .max_width(POPUP_WIDTH)
+            .min_width(width)
+            .max_width(width)
             .min_height(1.0)
             .max_height(1080.0);
         let open = close.chain(Task::batch([get_popup(settings), focus_input()]));
@@ -1023,6 +1138,15 @@ impl AppModel {
     }
 
     fn on_key(&mut self, action: KeyAction) -> Task<cosmic::Action<Message>> {
+        // The panel's overview only looks: refresh, open the window, close.
+        if self.read_only {
+            return match action {
+                KeyAction::Escape => self.toggle_popup(),
+                KeyAction::Refresh => self.start_list(),
+                KeyAction::OpenWindow => self.launch_window(None),
+                _ => Task::none(),
+            };
+        }
         // UI.md: while a create or delete runs, only Esc works (and doesn't cancel it).
         if self.running.is_some() && action != KeyAction::Escape {
             return Task::none();
@@ -1040,6 +1164,14 @@ impl AppModel {
             Overlay::Browse => return self.browse_key(action),
             Overlay::RestorePlan => return self.plan_key(action),
             _ => {}
+        }
+        if let KeyAction::Room(room) = action {
+            return self.go_room(room);
+        }
+        if self.room == Room::Schedule
+            && let Some(task) = self.schedule_key(action)
+        {
+            return task;
         }
         let count = self.snapshots().len();
         let target = match action {
@@ -1118,7 +1250,11 @@ impl AppModel {
             | KeyAction::Back
             | KeyAction::Into
             | KeyAction::MarkDown
-            | KeyAction::Restore => None,
+            | KeyAction::Restore
+            // Only the panel's overview opens a window; the window has it already.
+            | KeyAction::OpenWindow
+            // Handled above, before the list keys.
+            | KeyAction::Room(_) => None,
         };
         let Some(index) = target else {
             return Task::none();
@@ -1426,6 +1562,7 @@ impl AppModel {
         self.running = Some(operation.clone());
         self.status = None;
         self.progress = None;
+        self.run_started = Some(Instant::now());
         self.spinner = 0;
         if let Operation::Restore(request) = operation {
             return with_progress(move |mut progress| async move {
@@ -1448,6 +1585,7 @@ impl AppModel {
     ) -> Task<cosmic::Action<Message>> {
         self.running = None;
         self.progress = None;
+        self.run_started = None;
         if let Operation::DeleteMany { names, done } = operation
             && result.is_ok()
             && done + 1 < names.len()
@@ -1673,6 +1811,7 @@ impl AppModel {
     ) -> Task<cosmic::Action<Message>> {
         self.running = None;
         self.progress = None;
+        self.run_started = None;
         let mut tasks = Vec::new();
         match (request.dry_run, result) {
             (true, Ok(plan)) => {
@@ -1733,7 +1872,8 @@ impl AppModel {
             cosmic_config::Config::new(<Self as cosmic::Application>::APP_ID, Config::VERSION)
                 .and_then(|context| {
                     self.config.set_keep_manual(&context, choice.keep_manual)?;
-                    self.config.set_remind_days(&context, choice.remind_days)
+                    self.config.set_remind_days(&context, choice.remind_days)?;
+                    self.config.set_show_label(&context, choice.show_label)
                 });
         self.status = Some(match saved {
             Ok(_) => Status::Info(fl!("settings-apsis-saved")),
@@ -1787,6 +1927,10 @@ impl AppModel {
             // Esc also unfocused the `>` line.
             return focus_input();
         }
+        if self.room != Room::Snapshots {
+            self.room = Room::Snapshots;
+            return focus_input();
+        }
         if !self.marked.is_empty() {
             self.marked.clear();
             return focus_input();
@@ -1797,6 +1941,89 @@ impl AppModel {
                 self.close_surface(popup)
             }
             None => Task::none(),
+        }
+    }
+
+    /// A dock cell or `1 2 3 4`: the room's content replaces the details (create) or both
+    /// panes (schedule, log). Create also starts the comment prompt, as `c` does.
+    fn go_room(&mut self, room: Room) -> Task<cosmic::Action<Message>> {
+        if self.mode != Mode::Window || self.running.is_some() {
+            return Task::none();
+        }
+        self.room = room;
+        if matches!(
+            self.overlay,
+            Overlay::Details | Overlay::Help | Overlay::About
+        ) {
+            self.overlay = Overlay::None;
+        }
+        if room == Room::Create && self.prompt == Prompt::Command {
+            return self.on_key(KeyAction::Create);
+        }
+        focus_input()
+    }
+
+    /// Keys in the schedule room: up and down pick keep or remind, space turns it on or off,
+    /// `+` and `-` change it. `None` for any other key: it acts as everywhere else.
+    fn schedule_key(&mut self, action: KeyAction) -> Option<Task<cosmic::Action<Message>>> {
+        let counted = if self.schedule_row == 0 {
+            Counted::KeepManual
+        } else {
+            Counted::Remind
+        };
+        match action {
+            KeyAction::Up | KeyAction::First => self.schedule_row = 0,
+            KeyAction::Down | KeyAction::Last => self.schedule_row = 1,
+            KeyAction::Toggle => return Some(self.step_setting(counted, Step::Toggle)),
+            KeyAction::More => return Some(self.step_setting(counted, Step::More)),
+            KeyAction::Less => return Some(self.step_setting(counted, Step::Less)),
+            _ => return None,
+        }
+        Some(Task::none())
+    }
+
+    /// Steps keep or remind and saves it, if that changed anything.
+    fn step_setting(&mut self, counted: Counted, step: Step) -> Task<cosmic::Action<Message>> {
+        self.schedule_row = match counted {
+            Counted::KeepManual => 0,
+            Counted::Remind => 1,
+        };
+        let choice = self.config.backend().stepped(counted, step);
+        if choice == self.config.backend() {
+            return Task::none();
+        }
+        self.set_backend(choice)
+    }
+
+    /// Writes to the log room what a message left in the status line, and a list that failed.
+    fn log_changes(&mut self, before: Option<&Status>, list_failed: bool) {
+        let mut new = Vec::new();
+        if let Some(status) = &self.status
+            && Some(status) != before
+        {
+            new.push(match status {
+                Status::Info(text) => (text.clone(), false),
+                Status::Error(text) => (text.clone(), true),
+            });
+        }
+        if let Listing::Failed(error) = &self.listing
+            && !list_failed
+        {
+            new.push((error_summary(error, self.known_uuid.as_deref()), true));
+        }
+        if new.is_empty() {
+            return;
+        }
+        let time = jiff::Zoned::now().strftime("%H:%M:%S").to_string();
+        for (text, error) in new {
+            self.log.push(LogEntry {
+                time: time.clone(),
+                text,
+                error,
+            });
+        }
+        if self.log.len() > LOG_LINES {
+            self.log.drain(..self.log.len() - LOG_LINES);
         }
     }
 
@@ -1904,44 +2131,50 @@ impl AppModel {
             .collect()
     }
 
-    /// The reminder's days when it's due at `now`: it's on, a list showed a backup device,
-    /// and the newest snapshot is older than that (or there's none). `None` otherwise.
-    fn remind_days_over(&self, now: jiff::civil::DateTime) -> Option<u32> {
-        let days = self.config.remind_days;
-        let Listing::Loaded(list) = &self.listing else {
-            return None;
-        };
-        if days == 0 || list.device.is_none() {
-            return None;
-        }
-        let limit = now
-            .checked_sub(jiff::Span::new().days(i64::from(days)))
-            .ok()?;
-        let newest = list.snapshots.iter().map(|s| s.created).max();
-        newest.is_none_or(|created| created < limit).then_some(days)
+    /// What the panel shows, from the last list and the reminder setting. The one place the
+    /// panel label, tooltip and icon colour come from.
+    fn status_view(&self) -> StatusView {
+        self.status_view_at(jiff::Zoned::now().datetime())
     }
 
-    fn tooltip(&self) -> String {
+    fn status_view_at(&self, now: jiff::civil::DateTime) -> StatusView {
         match &self.listing {
             Listing::Loaded(list) => {
-                let text = match list.snapshots.first() {
-                    Some(newest) => fl!(
-                        "tooltip-last",
-                        ago = fmt::ago(newest.created, jiff::Zoned::now().datetime())
-                    ),
-                    None => fl!("tooltip-none"),
-                };
-                let text = match self.remind_days_over(jiff::Zoned::now().datetime()) {
-                    Some(days) => fl!("tooltip-stale", text = text, days = days.to_string()),
-                    None => text,
-                };
-                match list.usage.map(|u| u.free) {
-                    Some(free) => fl!("tooltip-free", text = text, free = fmt::size_short(free)),
-                    None => text,
-                }
+                StatusView::Loaded(ApsisStatus::from_list(list, self.config.remind_days, now))
             }
-            Listing::NotLoaded | Listing::Failed(_) => fl!("app-title"),
+            Listing::Failed(_) => StatusView::Failed,
+            Listing::NotLoaded => StatusView::Unloaded,
         }
+    }
+
+    /// The panel icon, coloured by the theme's warning or destructive role.
+    fn panel_icon(&self, severity: Severity) -> icon::Icon {
+        let (width, height) = self.core.applet.suggested_size(true);
+        let class: fn(&Theme) -> iced_svg::Style = match severity {
+            Severity::None => plain_svg,
+            Severity::Warning => warning_svg,
+            Severity::Critical => critical_svg,
+        };
+        icon::icon(self.icon.clone())
+            .class(theme::Svg::Custom(Rc::new(class)))
+            .width(Length::Fixed(f32::from(width)))
+            .height(Length::Fixed(f32::from(height)))
+    }
+
+    /// The panel button with the label beside the icon. Only the icon takes a warning colour.
+    fn label_button(&self, status: &StatusView) -> widget::Button<'_, Message> {
+        let (_, height) = self.core.applet.suggested_size(true);
+        let (major, minor) = self.core.applet.suggested_padding(true);
+        let content = widget::row::with_children(vec![
+            self.panel_icon(status.severity()).into(),
+            monotext(status.label()).into(),
+        ])
+        .spacing(6)
+        .align_y(Alignment::Center);
+        widget::button::custom(content)
+            .padding([0, major])
+            .height(Length::Fixed(f32::from(height + 2 * minor)))
+            .class(theme::Button::AppletIcon)
     }
 }
 
@@ -1952,40 +2185,393 @@ impl AppModel {
     fn surface(&self) -> Element<'_, Message> {
         // The details pane is active after Enter or a double-click; otherwise the left pane is.
         let details_active = self.overlay == Overlay::Details;
-        let panes = widget::row::with_children(vec![
-            pane(
-                self.body_title(),
-                !details_active,
-                Length::FillPortion(3),
-                self.body(),
+        let panes: Element<'_, Message> = match (self.mode, self.room) {
+            (Mode::Window, Room::Schedule) => pane(
+                fl!("pane-schedule"),
+                true,
+                Length::Fill,
+                self.schedule_body(),
             ),
-            pane(
-                fl!("pane-details"),
-                details_active,
-                // A fixed width lets the row size the details pane first, so the list beside it
-                // can stretch to its height (see `settings_details_grow`).
-                if self.settings_details_grow() {
-                    Length::Fixed(POPUP_DETAILS_WIDTH)
+            (Mode::Window, Room::Log) => pane(fl!("pane-log"), true, Length::Fill, self.log_body()),
+            (mode, room) => {
+                let right = if mode == Mode::Window && room == Room::Create {
+                    pane(
+                        fl!("pane-create"),
+                        matches!(self.prompt, Prompt::Comment(_)),
+                        Length::FillPortion(2),
+                        self.create_body(),
+                    )
                 } else {
-                    Length::FillPortion(2)
-                },
-                self.details(),
-            ),
-        ])
-        .spacing(PANE_SPACING)
-        // A popup's panes are as high as their content (see `settings_details_grow`); a
-        // window's fill it.
-        .height(match self.mode {
-            Mode::Applet => Length::Shrink,
-            Mode::Window => Length::Fill,
-        });
-        let mut children = vec![self.header(), panes.into()];
-        children.extend(self.disk_line());
-        children.extend([self.activity(), self.prompt(), self.hints()]);
+                    pane(
+                        fl!("pane-details"),
+                        details_active,
+                        // A fixed width lets the row size the details pane first, so the list
+                        // beside it can stretch to its height (see `settings_details_grow`).
+                        if self.settings_details_grow() {
+                            Length::Fixed(POPUP_DETAILS_WIDTH)
+                        } else {
+                            Length::FillPortion(2)
+                        },
+                        self.details(),
+                    )
+                };
+                widget::row::with_children(vec![
+                    pane(
+                        self.body_title(),
+                        !details_active,
+                        Length::FillPortion(3),
+                        self.body(),
+                    ),
+                    right,
+                ])
+                .spacing(PANE_SPACING)
+                // A popup's panes are as high as their content (see `settings_details_grow`); a
+                // window's fill it.
+                .height(match mode {
+                    Mode::Applet => Length::Shrink,
+                    Mode::Window => Length::Fill,
+                })
+                .into()
+            }
+        };
+        let mut children = vec![self.header()];
+        children.extend(self.strip());
+        children.push(panes);
+        // The window has the strip; the popup keeps the disk line until it becomes the overview.
+        if self.mode == Mode::Applet {
+            children.extend(self.disk_line());
+        }
+        children.extend([self.activity(), self.prompt()]);
+        children.extend(self.dock());
+        children.push(self.hints());
         widget::column::with_children(children)
             .spacing(6)
             .padding([10.0, POPUP_PADDING])
             .into()
+    }
+
+    /// The `apsis` pane above the panes, window only: time on the left (`last`, `next`), the
+    /// backup disk on the right (device and sizes, the bar, used and free). From
+    /// [`StatusView::strip`], so it says what the panel tooltip says. Not in the settings view,
+    /// whose notes are sized to fit the smallest window without it.
+    fn strip(&self) -> Option<Element<'_, Message>> {
+        if self.mode != Mode::Window || self.overlay == Overlay::Settings {
+            return None;
+        }
+        let (time, disk) = strip_columns(self.status_view().strip());
+        Some(pane(
+            fl!("pane-apsis"),
+            false,
+            Length::Fill,
+            widget::row::with_children(vec![
+                container(time).width(Length::FillPortion(1)).into(),
+                container(disk).width(Length::FillPortion(1)).into(),
+            ])
+            .spacing(24),
+        ))
+    }
+
+    /// The panel popup: a read-only overview in the same terminal look, narrower than the
+    /// window. `~/apsis $ status`, the `apsis` pane (time, then disk), the newest snapshots, and
+    /// the keys that work here.
+    fn overview(&self) -> Element<'_, Message> {
+        let (time, disk) = strip_columns(self.status_view().strip());
+        let apsis = pane(
+            fl!("pane-apsis"),
+            false,
+            Length::Fill,
+            widget::column::with_children(vec![time, disk]).spacing(6),
+        );
+        let snapshots = pane(
+            fl!("pane-snapshots"),
+            false,
+            Length::Fill,
+            self.overview_snapshots(),
+        );
+        let refresh = if matches!(self.listing, Listing::Failed(_)) {
+            "[r]etry"
+        } else {
+            "[r]efresh"
+        };
+        let hints = widget::row::with_children(vec![
+            hint("[o]pen apsis", Some(Message::OpenWindow(None))),
+            hint(refresh, (!self.loading).then_some(Message::Refresh)),
+            widget::space::horizontal().into(),
+            hint("[esc]", Some(Message::Escape)),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center);
+        widget::column::with_children(vec![self.overview_header(), apsis, snapshots, hints.into()])
+            .spacing(6)
+            .padding([10.0, POPUP_PADDING])
+            .into()
+    }
+
+    /// `~/apsis $ status                 rsync · 9 snapshots`
+    fn overview_header(&self) -> Element<'_, Message> {
+        let summary = match &self.listing {
+            Listing::Loaded(list) => fmt::summary(list.mode, list.snapshots.len()),
+            Listing::NotLoaded | Listing::Failed(_) => String::new(),
+        };
+        widget::row::with_children(vec![
+            icon::icon(self.icon.clone())
+                .size(HEADER_ICON_SIZE)
+                .class(theme::Svg::Custom(Rc::new(accent_svg)))
+                .into(),
+            monotext("~/apsis").class(theme::Text::Accent).into(),
+            monotext("$ status").into(),
+            widget::space::horizontal().into(),
+            monotext(summary)
+                .class(theme::Text::Custom(dim_text))
+                .into(),
+        ])
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+    }
+
+    /// The overview's newest snapshots as plain rows (no selection, nothing to click), or what
+    /// the list says when there are none: no device, empty, failed, waiting.
+    fn overview_snapshots(&self) -> Element<'_, Message> {
+        match &self.listing {
+            Listing::Loaded(list) if !list.snapshots.is_empty() => {
+                let mut rows: Vec<Element<'_, Message>> = list
+                    .snapshots
+                    .iter()
+                    .take(OVERVIEW_ROWS)
+                    .map(|snapshot| {
+                        monotext(fmt::overview_row(snapshot, OVERVIEW_COMMENT_CHARS))
+                            .wrapping(Wrapping::None)
+                            .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
+                            .into()
+                    })
+                    .collect();
+                if let Some(more) = fmt::older_count(list.snapshots.len(), OVERVIEW_ROWS) {
+                    rows.push(
+                        monotext(fl!("overview-more", count = more.to_string()))
+                            .class(theme::Text::Custom(dim_text))
+                            .into(),
+                    );
+                }
+                widget::column::with_children(rows)
+                    .spacing(2)
+                    .padding([4, 6])
+                    .into()
+            }
+            Listing::Loaded(list) if list.device.is_none() => {
+                lines([fl!("no-device"), fl!("no-device-hint")])
+            }
+            Listing::Loaded(_) => lines([fl!("empty")]),
+            Listing::Failed(error) => error_view(error, self.known_uuid.as_deref()),
+            Listing::NotLoaded if self.loading => lines([fl!("waiting")]),
+            Listing::NotLoaded => lines([fl!("not-loaded")]),
+        }
+    }
+
+    /// The dock, window only: four outlined cells in the accent colour; the active room's cell
+    /// has the selected row's fill. Not in the settings view or the browser, which have their own
+    /// footers and need the room.
+    fn dock(&self) -> Option<Element<'_, Message>> {
+        if self.mode != Mode::Window || !matches!(self.overlay, Overlay::None | Overlay::Details) {
+            return None;
+        }
+        let cells: Vec<Element<'_, Message>> = Room::ALL
+            .into_iter()
+            .map(|room| {
+                let active = self.room == room;
+                widget::mouse_area(
+                    container(
+                        monotext(room.label())
+                            .class(theme::Text::Accent)
+                            .width(Length::Fill)
+                            .align_x(Alignment::Center),
+                    )
+                    .width(Length::Fill)
+                    .padding([3, 8])
+                    .class(theme::Container::custom(move |theme| {
+                        dock_cell(theme, active)
+                    })),
+                )
+                .on_press(Message::Room(room))
+                .interaction(mouse::Interaction::Pointer)
+                .into()
+            })
+            .collect();
+        Some(
+            widget::row::with_children(cells)
+                .spacing(PANE_SPACING)
+                .into(),
+        )
+    }
+
+    /// The create room's form, beside the list: what will be made, and the two keys. The text
+    /// itself is typed on the `>` line (one input, one focus); this shows it as it goes.
+    fn create_body(&self) -> Element<'_, Message> {
+        let label = |text: String| {
+            monotext(text)
+                .class(theme::Text::Accent)
+                .width(Length::Fixed(MONO_CELL_WIDTH * 9.0))
+        };
+        let value = match &self.prompt {
+            Prompt::Comment(comment) => format!("{comment}▏"),
+            _ => fl!("create-comment-none"),
+        };
+        let mut children: Vec<Element<'_, Message>> = vec![
+            widget::row::with_children(vec![
+                label(fl!("create-label-comment")).into(),
+                monotext(value)
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .width(Length::Fill)
+                    .into(),
+            ])
+            .spacing(8)
+            .into(),
+            widget::row::with_children(vec![
+                label(fl!("create-label-tag")).into(),
+                monotext(fl!("create-tag")).into(),
+            ])
+            .spacing(8)
+            .into(),
+        ];
+        let asking = matches!(self.prompt, Prompt::Comment(_));
+        children.push(
+            widget::row::with_children(if asking {
+                vec![
+                    hint("[enter]create", Some(Message::Submit)),
+                    hint("[esc]cancel", Some(Message::Escape)),
+                ]
+            } else {
+                vec![hint(
+                    "[c]reate",
+                    self.can_create().then_some(Message::StartCreate),
+                )]
+            })
+            .spacing(8)
+            .into(),
+        );
+        if !asking && !self.can_create() {
+            children.push(
+                monotext(fl!("create-unavailable"))
+                    .class(theme::Text::Custom(dim_text))
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .into(),
+            );
+        }
+        widget::column::with_children(children)
+            .spacing(6)
+            .padding([4, 6])
+            .into()
+    }
+
+    /// The schedule room: `next`, and the two settings there are (keep and remind), with their
+    /// buttons. There is no scheduler yet.
+    fn schedule_body(&self) -> Element<'_, Message> {
+        let choice = self.config.backend();
+        let label = |text: String| {
+            monotext(text)
+                .class(theme::Text::Accent)
+                .width(Length::Fixed(MONO_CELL_WIDTH * 8.0))
+        };
+        let dim = |text: String| {
+            monotext(text)
+                .class(theme::Text::Custom(dim_text))
+                .wrapping(Wrapping::WordOrGlyph)
+        };
+        let setting = |row: usize, counted: Counted, name: String, text: String, on: bool| {
+            let mark = if self.schedule_row == row { "▸" } else { " " };
+            widget::row::with_children(vec![
+                monotext(mark).class(theme::Text::Accent).into(),
+                label(name).into(),
+                monotext(text).width(Length::Fill).into(),
+                hint("[-]", Some(Message::Schedule(counted, Step::Less))),
+                hint("[+]", Some(Message::Schedule(counted, Step::More))),
+                hint(
+                    if on { "[off]" } else { "[on]" },
+                    Some(Message::Schedule(counted, Step::Toggle)),
+                ),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into()
+        };
+        let keep = match choice.keep_manual {
+            0 => fl!("settings-keep-manual-off"),
+            count => fl!("settings-keep-manual", count = count.to_string()),
+        };
+        let remind = match choice.remind_days {
+            0 => fl!("settings-remind-off"),
+            days => fl!("settings-remind", days = days.to_string()),
+        };
+        let content = widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                monotext(" ").into(),
+                label(fl!("strip-label-next")).into(),
+                monotext(fl!("strip-next-manual")).into(),
+            ])
+            .spacing(8)
+            .into(),
+            setting(
+                0,
+                Counted::KeepManual,
+                fl!("schedule-label-keep"),
+                keep,
+                choice.keep_manual > 0,
+            ),
+            dim(fl!("settings-keep-manual-note")).into(),
+            setting(
+                1,
+                Counted::Remind,
+                fl!("schedule-label-remind"),
+                remind,
+                choice.remind_days > 0,
+            ),
+            dim(fl!("settings-remind-note")).into(),
+            dim(fl!("schedule-note")).into(),
+        ])
+        .spacing(6)
+        .padding([4, 6]);
+        // Scrolls in a small window rather than pushing the dock and footer out of it.
+        widget::scrollable(content)
+            .direction(Direction::Vertical(thin_scrollbar()))
+            .height(Length::Fill)
+            .into()
+    }
+
+    /// The log room: what happened this session, newest first. A failure is marked by the word
+    /// `error` in the error colour; the rest is text.
+    fn log_body(&self) -> Element<'_, Message> {
+        if self.log.is_empty() {
+            return lines([fl!("log-empty")]);
+        }
+        let rows = self.log.iter().rev().map(|entry| {
+            let mut parts: Vec<Element<'_, Message>> = vec![
+                monotext(entry.time.clone())
+                    .class(theme::Text::Custom(dim_text))
+                    .into(),
+            ];
+            if entry.error {
+                parts.push(
+                    monotext(fl!("log-error"))
+                        .class(theme::Text::Custom(error_text))
+                        .into(),
+                );
+            }
+            parts.push(
+                monotext(entry.text.clone())
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .width(Length::Fill)
+                    .into(),
+            );
+            widget::row::with_children(parts).spacing(8).into()
+        });
+        widget::scrollable(
+            widget::column::with_children(rows.collect::<Vec<_>>())
+                .spacing(2)
+                .padding([4, 6]),
+        )
+        .direction(Direction::Vertical(thin_scrollbar()))
+        .height(Length::Fill)
+        .into()
     }
 
     /// ` ~/apsis $ ls --snapshots                 rsync · 3 snapshots`
@@ -2244,6 +2830,10 @@ impl AppModel {
     /// The progress line for a running create or real restore, once the helper has sent a
     /// `Progress` (see [`AppModel::progress`]). `None` otherwise: the spinner line.
     fn progress_line(&self) -> Option<ProgressLine> {
+        self.progress_line_at(Instant::now())
+    }
+
+    fn progress_line_at(&self, now: Instant) -> Option<ProgressLine> {
         let label = match &self.running {
             Some(Operation::Create(_)) => fl!("progress-creating"),
             Some(Operation::Restore(request)) if !request.dry_run => fl!("progress-restoring"),
@@ -2253,24 +2843,36 @@ impl AppModel {
         let percent = match progress.percent {
             Some(percent) if progress.has_estimate() => percent,
             _ => {
-                let spinner = SPINNER[self.spinner];
-                return Some(ProgressLine::Estimating(format!(
-                    "{label} {spinner} {}",
-                    fl!("progress-estimating")
+                let elapsed = self.run_started.map_or(0, |started| {
+                    now.saturating_duration_since(started).as_secs()
+                });
+                return Some(ProgressLine::Working(format!(
+                    "{} {}",
+                    fl!(
+                        "progress-working",
+                        label = label,
+                        elapsed = fmt::duration(elapsed)
+                    ),
+                    SPINNER[self.spinner]
                 )));
             }
         };
-        let (filled, empty) = fmt::bar_cells(percent / 100.0, PROGRESS_CELLS);
-        let mut tail = fmt::percent(percent);
-        if let Some(eta) = progress.eta_seconds {
-            tail.push_str("  ");
-            tail.push_str(&fl!("progress-left", time = fmt::eta(eta)));
-        }
+        let text = match progress.eta_seconds {
+            Some(eta) => fl!(
+                "progress-percent-left",
+                label = label,
+                percent = fmt::percent(percent),
+                time = fmt::duration(eta)
+            ),
+            None => fl!(
+                "progress-percent",
+                label = label,
+                percent = fmt::percent(percent)
+            ),
+        };
         Some(ProgressLine::Bar {
-            label,
-            filled,
-            empty,
-            tail,
+            text,
+            fraction: percent / 100.0,
         })
     }
 
@@ -2287,22 +2889,13 @@ impl AppModel {
     /// last create/delete, then the last list's warnings.
     fn activity(&self) -> Element<'_, Message> {
         let first: Element<'_, Message> = match self.progress_line() {
-            Some(ProgressLine::Estimating(text)) => monotext(text).into(),
-            Some(ProgressLine::Bar {
-                label,
-                filled,
-                empty,
-                tail,
-            }) => widget::row::with_children(vec![
-                monotext(format!("{label} ")).into(),
-                monotext("█".repeat(filled))
-                    .class(theme::Text::Custom(accent_text))
-                    .into(),
-                monotext("░".repeat(empty))
-                    .class(theme::Text::Custom(dim_text))
-                    .into(),
-                monotext(format!(" {tail}")).into(),
+            Some(ProgressLine::Working(text)) => monotext(text).into(),
+            Some(ProgressLine::Bar { text, fraction }) => widget::row::with_children(vec![
+                monotext(text).wrapping(Wrapping::None).into(),
+                bar(fraction, theme::Text::Custom(accent_text)),
             ])
+            .spacing(12)
+            .align_y(Alignment::Center)
             .into(),
             None => {
                 let (text, tone) = self.activity_line();
@@ -2413,7 +3006,7 @@ impl AppModel {
             "[r]efresh"
         };
         let idle = !self.loading && self.running.is_none();
-        widget::row::with_children(vec![
+        let mut keys = vec![
             hint(
                 "[c]reate",
                 self.can_create().then_some(Message::StartCreate),
@@ -2425,12 +3018,21 @@ impl AppModel {
             hint(refresh, idle.then_some(Message::Refresh)),
             hint("[s]ettings", Some(Message::OpenSettings)),
             hint("[?]help", Some(Message::ToggleHelp)),
-            widget::space::horizontal().into(),
-            hint("[esc]", Some(Message::Escape)),
-        ])
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .into()
+        ];
+        // The dock's keys, as plain text: each cell is clickable, and `1 2 3 4` do the same.
+        if self.mode == Mode::Window {
+            keys.push(
+                monotext("[1-4]rooms")
+                    .class(theme::Text::Custom(dim_text))
+                    .into(),
+            );
+        }
+        keys.push(widget::space::horizontal().into());
+        keys.push(hint("[esc]", Some(Message::Escape)));
+        widget::row::with_children(keys)
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into()
     }
 
     /// The footer in the settings view: `[space]change [+] [-] [a]dd [x]remove [w]rite
@@ -2609,6 +3211,9 @@ impl AppModel {
     /// The right-click menu: a standard COSMIC applet menu, not the terminal look.
     fn menu_view(&self) -> Element<'_, Message> {
         let content = widget::column::with_children(vec![
+            menu_button(body(fl!("menu-open")))
+                .on_press(Message::OpenWindow(None))
+                .into(),
             menu_button(body(fl!("menu-refresh")))
                 .on_press(Message::MenuRefresh)
                 .into(),
@@ -2844,6 +3449,10 @@ fn settings_row_text(view: &SettingsView, row: Row) -> (String, bool) {
             0 => (fl!("settings-remind-off"), true),
             days => (fl!("settings-remind", days = days.to_string()), false),
         },
+        Row::PanelLabel => match view.backend.show_label {
+            false => (fl!("settings-panel-label-off"), true),
+            true => (fl!("settings-panel-label"), false),
+        },
     }
 }
 
@@ -2905,6 +3514,7 @@ fn settings_row_details(view: &SettingsView, row: Row) -> Element<'static, Messa
         Row::AddFilter => fl!("settings-add-note"),
         Row::KeepManual => fl!("settings-keep-manual-note"),
         Row::Remind => fl!("settings-remind-note"),
+        Row::PanelLabel => fl!("settings-panel-label-note"),
     };
     let mut rows: Vec<Element<'_, Message>> = pairs
         .into_iter()
@@ -2942,15 +3552,91 @@ fn home_state_name(state: HomeState) -> String {
     }
 }
 
-/// The disk bar: as many monospace cells as fit the space left in the line, filled (`█`) in
-/// the accent, warning or destructive colour by [`Space`], the rest `░`, dimmed.
+/// The strip's two columns as widgets: time (`last`, `next`) and disk (device and sizes, the
+/// bar, used and free). The window puts them side by side, the popup's overview stacks them.
+fn strip_columns(strip: Strip) -> (Element<'static, Message>, Element<'static, Message>) {
+    let label = |text: String| {
+        monotext(text)
+            .class(theme::Text::Accent)
+            .width(Length::Fixed(MONO_CELL_WIDTH * 7.0))
+    };
+    let note = |text: String, severity: Severity| {
+        monotext(text).class(match severity {
+            Severity::Critical => theme::Text::Custom(error_text),
+            Severity::Warning | Severity::None => theme::Text::Custom(warning_text),
+        })
+    };
+
+    let mut last = vec![
+        label(fl!("strip-label-last")).into(),
+        monotext(strip.last).into(),
+    ];
+    if let Some(text) = strip.last_note {
+        last.push(note(text, Severity::Warning).into());
+    }
+    let time = widget::column::with_children(vec![
+        widget::row::with_children(last).spacing(8).into(),
+        widget::row::with_children(vec![
+            label(fl!("strip-label-next")).into(),
+            monotext(strip.next).into(),
+        ])
+        .spacing(8)
+        .into(),
+    ]);
+
+    let disk = match strip.disk {
+        DiskStrip::Mounted {
+            device,
+            size,
+            usage,
+            used_free,
+            note: low,
+        } => {
+            let mut free = vec![
+                monotext(used_free)
+                    .wrapping(Wrapping::None)
+                    .class(theme::Text::Custom(dim_text))
+                    .into(),
+            ];
+            if let Some((text, severity)) = low {
+                free.push(note(text, severity).wrapping(Wrapping::None).into());
+            }
+            widget::column::with_children(vec![
+                widget::row::with_children(vec![
+                    monotext(device).class(theme::Text::Accent).into(),
+                    monotext(size).into(),
+                ])
+                .spacing(8)
+                .into(),
+                disk_bar(usage),
+                widget::row::with_children(free).spacing(8).into(),
+            ])
+        }
+        DiskStrip::Text(text) => widget::column::with_children(vec![
+            widget::row::with_children(vec![
+                label(fl!("disk-label")).into(),
+                monotext(text).into(),
+            ])
+            .spacing(8)
+            .into(),
+        ]),
+    };
+    (time.into(), disk.into())
+}
+
+/// The disk bar: [`bar`] in the accent, warning or destructive colour by [`Space`].
 fn disk_bar(usage: DiskUsage) -> Element<'static, Message> {
-    let fraction = usage.used_fraction();
     let class = match Space::of(&usage) {
         Space::Plenty => theme::Text::Custom(accent_text),
         Space::Low => theme::Text::Custom(warning_text),
         Space::Critical => theme::Text::Custom(error_text),
     };
+    bar(usage.used_fraction(), class)
+}
+
+/// The one bar of the disk meter and the activity pane: as many monospace cells as fit the
+/// space left in the line, `fraction` of them filled (`█`) in `class`, the rest `░`, dimmed.
+fn bar(fraction: f64, class: theme::Text) -> Element<'static, Message> {
     let bar = widget::responsive(move |size| {
         #[allow(
             clippy::cast_possible_truncation,
@@ -3440,6 +4126,7 @@ fn help() -> Element<'static, Message> {
         ("p", fl!("help-prune")),
         ("r", fl!("help-refresh")),
         ("s", fl!("help-settings")),
+        ("1 2 3 4", fl!("help-rooms")),
         ("?", fl!("help-help")),
         ("Esc", fl!("help-escape")),
         ("", String::new()),
@@ -3532,6 +4219,30 @@ fn symbolic_icon() -> icon::Handle {
     handle
 }
 
+/// The command that opens the window: this program (as `current_exe` names it; a package
+/// upgrade leaves `... (deleted)` on the path of a running program, cut off here) or `apsis` from
+/// the `PATH`, with `--window` or `flag`.
+fn window_command(exe: Option<std::path::PathBuf>, flag: Option<&str>) -> std::process::Command {
+    let program = exe
+        .map(|path| {
+            let text = path.to_string_lossy();
+            std::path::PathBuf::from(text.strip_suffix(" (deleted)").unwrap_or(&text))
+        })
+        .unwrap_or_else(|| "apsis".into());
+    let mut command = std::process::Command::new(program);
+    command.arg(flag.unwrap_or("--window"));
+    command
+}
+
+/// The view `apsis --settings` or `--about` opens on, if any.
+fn startup_overlay(args: impl IntoIterator<Item = std::ffi::OsString>) -> Option<Overlay> {
+    args.into_iter().find_map(|arg| match arg.to_str()? {
+        "--settings" => Some(Overlay::Settings),
+        "--about" => Some(Overlay::About),
+        _ => None,
+    })
+}
+
 /// Starts `command` detached from the applet (double fork), so it outlives a panel restart and
 /// leaves no zombie. A missing program is only logged.
 fn spawn(command: std::process::Command) -> Task<cosmic::Action<Message>> {
@@ -3573,6 +4284,11 @@ fn char_action(c: char) -> Option<KeyAction> {
         'R' => Some(KeyAction::Restore),
         'J' => Some(KeyAction::MarkDown),
         'p' => Some(KeyAction::Prune),
+        'o' => Some(KeyAction::OpenWindow),
+        '1' => Some(KeyAction::Room(Room::Snapshots)),
+        '2' => Some(KeyAction::Room(Room::Create)),
+        '3' => Some(KeyAction::Room(Room::Schedule)),
+        '4' => Some(KeyAction::Room(Room::Log)),
         _ => None,
     }
 }
@@ -3680,6 +4396,21 @@ fn pane_fill(theme: &Theme, edge: Edge) -> container::Style {
     }
 }
 
+/// A dock cell: a thin accent outline; the active room's cell has the selected row's fill.
+fn dock_cell(theme: &Theme, active: bool) -> container::Style {
+    let cosmic = theme.cosmic();
+    let accent = Color::from(cosmic.accent_color());
+    container::Style {
+        background: active.then(|| Background::Color(accent.scale_alpha(0.15))),
+        border: Border {
+            color: accent,
+            width: LINE,
+            radius: cosmic.corner_radii.radius_s.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
 /// Selected row: the accent colour, faded, as a background.
 fn selected_row(theme: &Theme) -> container::Style {
     let cosmic = theme.cosmic();
@@ -3722,10 +4453,24 @@ fn accent_text(theme: &Theme) -> iced_text::Style {
     text_style(theme, theme.cosmic().accent_text_color().into())
 }
 
-/// The panel icon while the reminder is due.
+/// The panel icon as the panel draws it: the normal text colour.
+fn plain_svg(theme: &Theme) -> iced_svg::Style {
+    iced_svg::Style {
+        color: Some(Color::from(theme.cosmic().background(theme.transparent).on)),
+    }
+}
+
+/// The panel icon while the reminder is due or the disk is low.
 fn warning_svg(theme: &Theme) -> iced_svg::Style {
     iced_svg::Style {
         color: Some(theme.cosmic().warning_text_color().into()),
+    }
+}
+
+/// The panel icon while the disk is nearly full.
+fn critical_svg(theme: &Theme) -> iced_svg::Style {
+    iced_svg::Style {
+        color: Some(theme.cosmic().destructive_text_color().into()),
     }
 }
 
@@ -3866,6 +4611,11 @@ mod tests {
             loading: false,
             running: None,
             progress: None,
+            run_started: None,
+            read_only: false,
+            room: Room::Snapshots,
+            schedule_row: 0,
+            log: Vec::new(),
             prompt: Prompt::Command,
             status: None,
             spinner: 0,
@@ -4801,11 +5551,12 @@ mod tests {
     }
 
     #[test]
-    fn create_progress_goes_from_spinner_to_estimating_to_a_bar() {
+    fn create_progress_goes_from_spinner_to_working_to_a_bar() {
         let mut app = listed(DEVICE_LIST);
         typed(&mut app, "c");
         send(&mut app, Message::Submit);
         assert!(matches!(app.running, Some(Operation::Create(_))));
+        assert!(app.run_started.is_some());
         // Nothing from the helper yet (or ever, through pkexec): the plain spinner line.
         assert_eq!(app.progress_line(), None);
         let at = |percent: Option<f64>, eta: Option<u64>| Progress {
@@ -4813,34 +5564,62 @@ mod tests {
             eta_seconds: eta,
             text: String::new(),
         };
+        let now = Instant::now();
+        app.run_started = Some(now.checked_sub(Duration::from_secs(68)).unwrap());
+        app.spinner = 2;
         send(&mut app, Message::Progress(at(None, None)));
-        assert!(
-            matches!(app.progress_line(), Some(ProgressLine::Estimating(ref t)) if t.ends_with("estimating…"))
+        assert_eq!(
+            app.progress_line_at(now),
+            Some(ProgressLine::Working(
+                "creating snapshot · working · 1m 08s elapsed ⠹".to_owned()
+            ))
         );
         // Timeshift's `0.00% complete (??? remaining)` is no number yet either.
         send(&mut app, Message::Progress(at(Some(0.0), None)));
         assert!(matches!(
-            app.progress_line(),
-            Some(ProgressLine::Estimating(_))
+            app.progress_line_at(now),
+            Some(ProgressLine::Working(_))
         ));
         send(&mut app, Message::Progress(at(Some(58.23), Some(192))));
-        assert_eq!(
-            app.progress_line(),
-            Some(ProgressLine::Bar {
-                label: "creating".to_owned(),
-                filled: 12,
-                empty: 8,
-                tail: "58%  ~3 min left".to_owned(),
-            })
-        );
+        let bar = |app: &AppModel| match app.progress_line_at(now) {
+            Some(ProgressLine::Bar { text, fraction }) => (text, fraction),
+            other => panic!("{other:?}"),
+        };
+        let (text, fraction) = bar(&app);
+        assert_eq!(text, "creating snapshot · 58% · 3m 12s left");
+        assert!((fraction - 0.5823).abs() < 1e-9);
+        // No time left known: the percent alone.
+        send(&mut app, Message::Progress(at(Some(58.23), None)));
+        assert_eq!(bar(&app).0, "creating snapshot · 58%");
         // Done: back to the status line; a late update is dropped.
         send(
             &mut app,
             Message::Finished(Operation::Create(String::new()), Ok(())),
         );
         assert_eq!(app.progress_line(), None);
+        assert!(app.run_started.is_none());
         send(&mut app, Message::Progress(at(Some(99.0), Some(1))));
         assert!(app.progress.is_none());
+    }
+
+    #[test]
+    fn a_restore_uses_the_same_line() {
+        let mut app = listed(DEVICE_LIST);
+        app.running = Some(Operation::Restore(Request {
+            snapshot: "2026-09-25_10-00-00".to_owned(),
+            paths: vec!["/etc/hosts".to_owned()],
+            destination: Destination::Original,
+            dry_run: false,
+        }));
+        app.progress = Some(Progress {
+            percent: Some(12.9),
+            eta_seconds: Some(45),
+            text: String::new(),
+        });
+        let Some(ProgressLine::Bar { text, .. }) = app.progress_line() else {
+            panic!()
+        };
+        assert_eq!(text, "restoring · 12% · 45s left");
     }
 
     #[test]
@@ -4970,31 +5749,34 @@ mod tests {
 
     #[test]
     fn the_reminder_needs_a_device_and_an_old_newest_snapshot() {
+        use apsis_core::Due;
         let now = jiff::civil::date(2026, 10, 3).at(10, 0, 0, 0);
+        let due = |app: &AppModel| match app.status_view_at(now) {
+            StatusView::Loaded(status) => status.due(),
+            other => panic!("{other:?}"),
+        };
         let mut app = with_list(manual_list(), 0);
         // Newest 09-25 10:00: 8 days.
         app.config.remind_days = 7;
-        assert_eq!(app.remind_days_over(now), Some(7));
+        assert_eq!(due(&app), Due::Overdue { days: 7 });
+        assert_eq!(app.status_view_at(now).severity(), Severity::Warning);
         app.config.remind_days = 8;
-        assert_eq!(
-            app.remind_days_over(now),
-            None,
-            "exactly 8 days isn't over 8"
-        );
+        assert_eq!(due(&app), Due::Ok, "exactly 8 days isn't over 8");
         app.config.remind_days = 0;
-        assert_eq!(app.remind_days_over(now), None, "off");
+        assert_eq!(due(&app), Due::Off, "off");
         // No snapshots yet, but a device: remind.
         app.config.remind_days = 7;
         let mut empty = manual_list();
         empty.snapshots.clear();
         app.on_listed(Ok(empty.clone()));
-        assert_eq!(app.remind_days_over(now), Some(7));
+        assert_eq!(due(&app), Due::Never { days: 7 });
         // No device selected, or nothing listed: nothing to remind about.
         empty.device = None;
         app.on_listed(Ok(empty));
-        assert_eq!(app.remind_days_over(now), None);
+        assert_eq!(due(&app), Due::Off);
         app.on_listed(Err(CliError::NotAuthorized));
-        assert_eq!(app.remind_days_over(now), None);
+        assert_eq!(app.status_view_at(now), StatusView::Failed);
+        assert_eq!(app.status_view_at(now).severity(), Severity::None);
     }
 
     #[test]
@@ -5055,13 +5837,480 @@ mod tests {
         // A list without `statvfs` numbers (the helper couldn't get them): no line either.
         let mut app = listed(DEVICE_LIST);
         assert!(app.disk_line().is_none());
-        assert!(!app.tooltip().contains("free"), "{}", app.tooltip());
+        assert!(
+            !app.status_view().tooltip().contains("free"),
+            "{}",
+            app.status_view().tooltip()
+        );
         let Listing::Loaded(list) = &mut app.listing else {
             panic!()
         };
         list.usage = DiskUsage::from_statvfs(1000, 400, 350, 1024 * 1024);
         assert!(app.disk_line().is_some());
-        assert!(app.tooltip().ends_with("350M free"), "{}", app.tooltip());
+        assert!(
+            app.status_view().tooltip().ends_with("350M free"),
+            "{}",
+            app.status_view().tooltip()
+        );
+    }
+
+    /// With the strip in, the snapshot panes still have room for a few rows at the smallest
+    /// window, and nothing overlaps. `APSIS_LAYOUT_TEST=1`, as the other layout tests.
+    #[test]
+    fn the_strip_fits_the_smallest_window() {
+        use cosmic::iced::core::layout::Limits as LayoutLimits;
+        use cosmic::iced::core::renderer::Headless;
+        use cosmic::iced::core::widget::Tree;
+
+        if std::env::var_os("APSIS_LAYOUT_TEST").is_none_or(|v| v != "1") {
+            eprintln!("layout test skipped; set APSIS_LAYOUT_TEST=1 to run it");
+            return;
+        }
+        let Some(renderer) =
+            cosmic::iced::futures::executor::block_on(<cosmic::Renderer as Headless>::new(
+                cosmic::font::default(),
+                14.0.into(),
+                Some("tiny-skia"),
+            ))
+        else {
+            eprintln!("no headless renderer here; skipped");
+            return;
+        };
+        let mut app = listed(DEVICE_LIST);
+        app.mode = Mode::Window;
+        let Listing::Loaded(list) = &mut app.listing else {
+            panic!()
+        };
+        list.usage = Some(DiskUsage {
+            total: 1_000_203_837_440,
+            used: 950_000_000_000,
+            free: 50_203_837_440,
+        });
+        let mut surface = app.surface();
+        let mut tree = Tree::new(&surface);
+        let limits = LayoutLimits::new(Size::ZERO, WINDOW_MIN_SIZE);
+        let node = surface
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        // Header, strip, panes, activity, prompt, hints.
+        let parts = node.children();
+        let (strip, panes) = (&parts[1], &parts[2]);
+        eprintln!(
+            "strip {:.0} px, panes {:.0} px of {:.0}",
+            strip.bounds().height,
+            panes.bounds().height,
+            node.bounds().height
+        );
+        assert!(
+            strip.bounds().y + strip.bounds().height <= panes.bounds().y + 0.5,
+            "the strip overlaps the panes"
+        );
+        assert!(
+            panes.bounds().height >= 5.0 * LINE_HEIGHT,
+            "panes {} px high",
+            panes.bounds().height
+        );
+        assert!(node.bounds().height <= WINDOW_MIN_SIZE.height + 0.5);
+    }
+
+    #[test]
+    fn the_panels_overview_only_looks() {
+        let mut app = listed(DEVICE_LIST);
+        app.read_only = true;
+        // Nothing that changes anything: create, delete, settings, help, prune, restore...
+        for keys in ["c", "d", "s", "?", "p", "R", "J", " ", "j", "k"] {
+            typed(&mut app, keys);
+            assert_eq!(app.prompt, Prompt::Command, "{keys}");
+            assert_eq!(app.overlay, Overlay::None, "{keys}");
+            assert!(app.running.is_none() && app.popup.is_some(), "{keys}");
+        }
+        // Refresh lists again.
+        typed(&mut app, "r");
+        assert!(app.loading);
+        app.loading = false;
+        // `o` opens the window and closes the popup.
+        typed(&mut app, "o");
+        assert!(app.popup.is_none());
+        // Esc closes it too.
+        send(&mut app, Message::TogglePopup);
+        assert!(app.popup.is_some());
+        send(&mut app, Message::Escape);
+        assert!(app.popup.is_none());
+    }
+
+    #[test]
+    fn the_overview_menu_items_open_the_window_instead() {
+        let mut app = listed(DEVICE_LIST);
+        app.read_only = true;
+        send(&mut app, Message::MenuSettings);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(app.popup.is_none());
+        send(&mut app, Message::TogglePopup);
+        send(&mut app, Message::MenuAbout);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(app.popup.is_none());
+        // Not read-only (the window's own state machine): unchanged, the view opens in place.
+        app.read_only = false;
+        send(&mut app, Message::MenuAbout);
+        assert_eq!(app.overlay, Overlay::About);
+    }
+
+    #[test]
+    fn the_window_command_is_this_program_with_a_flag() {
+        let command = |exe: Option<&str>, flag| {
+            let command = window_command(exe.map(Into::into), flag);
+            let program = command.get_program().to_string_lossy().into_owned();
+            let args: Vec<_> = command
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            (program, args)
+        };
+        assert_eq!(
+            command(Some("/usr/bin/apsis"), None),
+            ("/usr/bin/apsis".to_owned(), vec!["--window".to_owned()])
+        );
+        // A package upgrade while the panel runs.
+        assert_eq!(
+            command(Some("/usr/bin/apsis (deleted)"), Some("--settings")),
+            ("/usr/bin/apsis".to_owned(), vec!["--settings".to_owned()])
+        );
+        assert_eq!(
+            command(None, Some("--about")),
+            ("apsis".to_owned(), vec!["--about".to_owned()])
+        );
+    }
+
+    #[test]
+    fn the_window_opens_on_the_view_its_flag_names() {
+        let args = |list: &[&str]| {
+            list.iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(startup_overlay(args(&["--window"])), None);
+        assert_eq!(
+            startup_overlay(args(&["--settings"])),
+            Some(Overlay::Settings)
+        );
+        assert_eq!(
+            startup_overlay(args(&["--window", "--about"])),
+            Some(Overlay::About)
+        );
+        assert_eq!(startup_overlay(args(&[])), None);
+    }
+
+    #[test]
+    fn the_overview_builds_for_every_state_of_the_list() {
+        let mut app = model();
+        app.read_only = true;
+        // Failed (no helper), not loaded, loading.
+        let _ = app.overview();
+        app.listing = Listing::NotLoaded;
+        let _ = app.overview();
+        app.loading = true;
+        let _ = app.overview();
+        app.loading = false;
+        // No device, empty, a few, many.
+        app.on_listed(Ok(SnapshotList::default()));
+        let _ = app.overview();
+        let mut list = manual_list();
+        list.snapshots.clear();
+        app.on_listed(Ok(list));
+        let _ = app.overview();
+        app.on_listed(Ok(manual_list()));
+        let _ = app.overview();
+        assert_eq!(
+            fmt::older_count(app.snapshots().len(), OVERVIEW_ROWS),
+            Some(1)
+        );
+    }
+
+    /// The overview fits its width, with the longest row it can have (all tags, a long
+    /// comment), and stays short. `APSIS_LAYOUT_TEST=1`, as the other layout tests.
+    #[test]
+    fn the_overview_fits_its_card() {
+        use cosmic::iced::core::layout::Limits as LayoutLimits;
+        use cosmic::iced::core::renderer::Headless;
+        use cosmic::iced::core::widget::Tree;
+
+        if std::env::var_os("APSIS_LAYOUT_TEST").is_none_or(|v| v != "1") {
+            eprintln!("layout test skipped; set APSIS_LAYOUT_TEST=1 to run it");
+            return;
+        }
+        let Some(renderer) =
+            cosmic::iced::futures::executor::block_on(<cosmic::Renderer as Headless>::new(
+                cosmic::font::default(),
+                14.0.into(),
+                Some("tiny-skia"),
+            ))
+        else {
+            eprintln!("no headless renderer here; skipped");
+            return;
+        };
+        let mut app = listed(DEVICE_LIST);
+        app.read_only = true;
+        let Listing::Loaded(list) = &mut app.listing else {
+            panic!()
+        };
+        list.usage = Some(DiskUsage {
+            total: 1_000_203_837_440,
+            used: 950_000_000_000,
+            free: 50_203_837_440,
+        });
+        list.snapshots = manual_list().snapshots;
+        for snapshot in &mut list.snapshots {
+            snapshot.tags = vec![
+                apsis_core::Tag::OnDemand,
+                apsis_core::Tag::Boot,
+                apsis_core::Tag::Daily,
+            ];
+            snapshot.comment = Some("a comment that is much too long for the row".to_owned());
+        }
+        let mut overview = app.overview();
+        let mut tree = Tree::new(&overview);
+        let limits = LayoutLimits::new(Size::ZERO, Size::new(OVERVIEW_WIDTH, 1000.0));
+        let node = overview
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        eprintln!(
+            "overview {:.0} x {:.0} px",
+            node.bounds().width,
+            node.bounds().height
+        );
+        assert!(node.bounds().width <= OVERVIEW_WIDTH + 0.5);
+        assert!(node.bounds().height < 520.0, "{}", node.bounds().height);
+    }
+
+    /// A window on a list with a device, as the rooms run in it.
+    fn window() -> AppModel {
+        let mut app = listed(DEVICE_LIST);
+        app.mode = Mode::Window;
+        app
+    }
+
+    #[test]
+    fn number_keys_jump_between_rooms_and_esc_walks_back() {
+        let mut app = window();
+        assert_eq!(app.room, Room::Snapshots);
+        typed(&mut app, "3");
+        assert_eq!(app.room, Room::Schedule);
+        typed(&mut app, "4");
+        assert_eq!(app.room, Room::Log);
+        typed(&mut app, "1");
+        assert_eq!(app.room, Room::Snapshots);
+        // Create starts the comment prompt, like `c`, and the list stays.
+        typed(&mut app, "2");
+        assert_eq!(app.room, Room::Create);
+        assert_eq!(app.prompt, Prompt::Comment(String::new()));
+        // Digits typed at the comment prompt are text, not room keys.
+        typed(&mut app, "7 3");
+        assert_eq!(app.room, Room::Create);
+        assert_eq!(app.prompt, Prompt::Comment("7 3".to_owned()));
+        // Esc: the prompt, then the room, then (window) the window.
+        send(&mut app, Message::Escape);
+        assert_eq!((app.room, &app.prompt), (Room::Create, &Prompt::Command));
+        send(&mut app, Message::Escape);
+        assert_eq!(app.room, Room::Snapshots);
+        assert!(app.popup.is_some());
+        send(&mut app, Message::Escape);
+        assert!(app.popup.is_none());
+    }
+
+    #[test]
+    fn rooms_are_the_windows_and_wait_for_a_running_job() {
+        // The panel's overview, and a popup that is not the window: no rooms.
+        let mut app = listed(DEVICE_LIST);
+        typed(&mut app, "3");
+        assert_eq!(app.room, Room::Snapshots);
+        app.read_only = true;
+        typed(&mut app, "3");
+        assert_eq!(app.room, Room::Snapshots);
+        // A running create keeps the room it started in.
+        let mut app = window();
+        app.running = Some(Operation::Create(String::new()));
+        send(&mut app, Message::Room(Room::Log));
+        assert_eq!(app.room, Room::Snapshots);
+        assert!(app.dock().is_some());
+        // The settings view and the browser have their own footers.
+        let mut app = window();
+        app.overlay = Overlay::Settings;
+        assert!(app.dock().is_none());
+        app.overlay = Overlay::Browse;
+        assert!(app.dock().is_none());
+        app.overlay = Overlay::Details;
+        assert!(app.dock().is_some());
+        // Not in the popup.
+        assert!(listed(DEVICE_LIST).dock().is_none());
+    }
+
+    #[test]
+    fn the_schedule_room_takes_up_and_down_for_itself() {
+        let mut app = window();
+        typed(&mut app, "3");
+        assert_eq!(app.schedule_row, 0);
+        typed(&mut app, "j");
+        assert_eq!(app.schedule_row, 1);
+        assert_eq!(app.selected, 0, "the snapshot selection stays put");
+        typed(&mut app, "k");
+        assert_eq!(app.schedule_row, 0);
+        // Other keys act as everywhere: `1` goes home, `?` shows help.
+        typed(&mut app, "?");
+        assert_eq!(app.overlay, Overlay::Help);
+    }
+
+    #[test]
+    fn the_log_keeps_what_the_status_line_said() {
+        let mut app = window();
+        assert!(app.log.is_empty());
+        send(
+            &mut app,
+            Message::Finished(Operation::Create(String::new()), Ok(())),
+        );
+        assert_eq!(
+            app.log.last().map(|e| (e.text.as_str(), e.error)),
+            Some(("snapshot created", false))
+        );
+        send(
+            &mut app,
+            Message::Finished(Operation::Create(String::new()), failed()),
+        );
+        let last = app.log.last().unwrap();
+        assert!(
+            last.error && last.text.starts_with("create failed"),
+            "{last:?}"
+        );
+        assert_eq!(app.log.len(), 2);
+        // A message that changes nothing adds nothing.
+        send(&mut app, Message::Tick);
+        assert_eq!(app.log.len(), 2);
+        // A list that fails is logged once, not on every message after it.
+        send(&mut app, Message::Listed(Err(CliError::NoHelper)));
+        assert_eq!(app.log.len(), 3);
+        assert!(app.log[2].error);
+        send(&mut app, Message::Tick);
+        assert_eq!(app.log.len(), 3);
+        // Times are `HH:MM:SS`, and only the newest lines are kept.
+        assert_eq!(app.log[0].time.len(), 8);
+        for _ in 0..LOG_LINES + 20 {
+            app.status = None;
+            send(
+                &mut app,
+                Message::Finished(Operation::Create(String::new()), Ok(())),
+            );
+        }
+        assert_eq!(app.log.len(), LOG_LINES);
+    }
+
+    #[test]
+    fn every_room_builds() {
+        let mut app = window();
+        for room in Room::ALL {
+            app.room = room;
+            let _ = app.surface();
+            assert!(app.dock().is_some());
+        }
+        app.log.push(LogEntry {
+            time: "12:00:00".to_owned(),
+            text: "create failed".to_owned(),
+            error: true,
+        });
+        app.room = Room::Log;
+        let _ = app.surface();
+        app.prompt = Prompt::Comment("before upgrade".to_owned());
+        app.room = Room::Create;
+        let _ = app.surface();
+    }
+
+    /// Each room at the smallest window: the dock is there, the footer fits (with `[1-4]rooms`),
+    /// and the panes keep room for a few rows. `APSIS_LAYOUT_TEST=1`.
+    #[test]
+    fn the_dock_and_every_room_fit_the_smallest_window() {
+        use cosmic::iced::core::layout::Limits as LayoutLimits;
+        use cosmic::iced::core::renderer::Headless;
+        use cosmic::iced::core::widget::Tree;
+
+        if std::env::var_os("APSIS_LAYOUT_TEST").is_none_or(|v| v != "1") {
+            eprintln!("layout test skipped; set APSIS_LAYOUT_TEST=1 to run it");
+            return;
+        }
+        let Some(renderer) =
+            cosmic::iced::futures::executor::block_on(<cosmic::Renderer as Headless>::new(
+                cosmic::font::default(),
+                14.0.into(),
+                Some("tiny-skia"),
+            ))
+        else {
+            eprintln!("no headless renderer here; skipped");
+            return;
+        };
+        for room in Room::ALL {
+            let mut app = window();
+            app.room = room;
+            app.log.push(LogEntry {
+                time: "12:00:00".to_owned(),
+                text: "create failed: rsync exited with code 23".to_owned(),
+                error: true,
+            });
+            let mut surface = app.surface();
+            let mut tree = Tree::new(&surface);
+            let limits = LayoutLimits::new(Size::ZERO, WINDOW_MIN_SIZE);
+            let node = surface
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits);
+            // Header, strip, panes, activity, prompt, dock, hints.
+            let parts = node.children();
+            assert_eq!(parts.len(), 7, "{room:?}");
+            let (panes, dock, hints) = (&parts[2], &parts[5], &parts[6]);
+            eprintln!(
+                "{room:?}: panes {:.0} px, dock {:.0} px, footer ends {:.0} of {:.0}",
+                panes.bounds().height,
+                dock.bounds().height,
+                hints
+                    .children()
+                    .last()
+                    .map_or(0.0, |c| c.bounds().x + c.bounds().width),
+                hints.bounds().x + hints.bounds().width
+            );
+            assert!(
+                dock.bounds().height >= 20.0,
+                "{room:?}: the dock is squeezed to {} px",
+                dock.bounds().height
+            );
+            assert!(
+                panes.bounds().height >= 5.0 * LINE_HEIGHT,
+                "{room:?}: panes {} px high",
+                panes.bounds().height
+            );
+            assert!(
+                node.bounds().height <= WINDOW_MIN_SIZE.height + 0.5,
+                "{room:?}"
+            );
+            // Nothing in the footer runs past its row.
+            let right = hints.bounds().x + hints.bounds().width;
+            for cell in hints.children() {
+                assert!(
+                    cell.bounds().x + cell.bounds().width <= right + 0.5,
+                    "{room:?}: the footer is cut"
+                );
+            }
+            // Four cells side by side in the dock.
+            assert_eq!(dock.children().len(), 4);
+        }
+    }
+
+    #[test]
+    fn the_strip_is_the_windows_and_not_the_settings_views() {
+        let mut app = listed(DEVICE_LIST);
+        assert!(app.strip().is_none(), "the popup has the disk line instead");
+        app.mode = Mode::Window;
+        assert!(app.strip().is_some());
+        app.overlay = Overlay::Settings;
+        assert!(app.strip().is_none(), "settings notes are sized without it");
+        // Even with no list or no disk figures there is a strip to say so.
+        let mut app = model();
+        app.mode = Mode::Window;
+        assert!(app.strip().is_some());
     }
 
     #[test]
@@ -5336,10 +6585,9 @@ mod tests {
             eprintln!("no headless renderer here; skipped");
             return;
         };
-        for (mode, size) in [
-            (Mode::Applet, Size::new(POPUP_WIDTH, 1000.0)),
-            (Mode::Window, WINDOW_MIN_SIZE),
-        ] {
+        // The window has the strip instead (`the_strip_fits_the_smallest_window`).
+        let (mode, size) = (Mode::Applet, Size::new(POPUP_WIDTH, 1000.0));
+        {
             let mut app = listed(DEVICE_LIST);
             app.mode = mode;
             let Listing::Loaded(list) = &mut app.listing else {

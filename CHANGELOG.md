@@ -4,6 +4,41 @@ All notable changes to Apsis are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-09-29
+
+A status you can read at a glance, and a window that does the work. The panel popup is now a
+read-only overview; creating, deleting, settings and restore are in the window.
+
+### Added
+
+- A status model behind the panel: the tooltip shows `last`, `next` (manual only, for now) and
+  `disk`; the icon takes the warning colour when a snapshot is overdue or the disk is low, and
+  the destructive colour when the disk is nearly full.
+- An optional panel label beside the icon: the age of the newest snapshot and the share of the
+  backup disk in use (horizontal panels only). Off by default; a setting.
+- The `apsis` strip in the window: last and next on the left, the backup disk and its bar on the
+  right.
+- Disk warning colours: the bar turns to the theme's warning and destructive colours as free
+  space runs low.
+- The activity pane shows progress and the time left while a snapshot is created or restored.
+- A four-room window: snapshots, create (beside the list), schedule (keep and remind) and log,
+  switched with `1`-`4` or by clicking the dock.
+
+### Changed
+
+- The panel popup is a read-only overview: the strip, the newest snapshots, `open apsis`,
+  refresh and close. Nothing is created, deleted or restored from it.
+- Theme audit: every colour comes from the COSMIC theme (accent, divider, background, warning,
+  destructive); the only derived colours are faded versions of those.
+- A leftover from an interrupted snapshot is reported as one plain line ("leftover from an
+  interrupted snapshot, safe to delete") instead of the raw staging path and timestamp; the path
+  goes to the journal.
+
+### Known issues
+
+- With a theme whose background is translucent, the accent border of the active pane tints the
+  whole pane. Changing the theme avoids it; a proper fix waits for libcosmic.
+
 ## [0.2.0] - 2026-09-29
 
 Apsis is standalone now: it takes rsync snapshots itself and no longer needs or runs
@@ -133,6 +168,7 @@ First release.
   password every time.
 - App and symbolic icons, AppStream metainfo, desktop entries, `just install` / `just uninstall`.
 
+[0.3.0]: https://github.com/atraxsrc/apsis/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/atraxsrc/apsis/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/atraxsrc/apsis/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/atraxsrc/apsis/compare/v0.1.0...v0.1.1

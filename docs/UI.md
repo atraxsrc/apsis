@@ -1,7 +1,50 @@
-# UI — terminal-style popup
+# UI — terminal-style popup and window
 
-A panel applet. Clicking the panel icon opens a popup that looks like a tiny terminal.
-It's a normal libcosmic popup, so it always floats and follows the theme (colours, radius, font scale).
+A panel applet. Clicking the panel icon opens a popup that looks like a tiny terminal: a
+**read-only overview** (see "Panel popup" below). The work (create, delete, browse, restore,
+settings) happens in the **window**, `apsis --window`. It's a normal libcosmic popup, so it always
+floats and follows the theme (colours, radius, font scale).
+
+Everything below the overview section (the mock, keys, states, bulk delete, the browser and the
+settings view) describes the window's UI, which is the full UI the popup used to have.
+
+## Panel popup (read-only overview)
+
+```
+ ◎ ~/apsis $ status                                  rsync · 9 snapshots
+ ╭─ apsis ───────────────────────────────────────╮
+ │ last   12h ago                                │
+ │ next   manual only                            │
+ │ sda1   372G / 596G                            │
+ │ ████████████████████░░░░░░░░░░░░░░░░░░░░░░░░  │
+ │ 62% used · 224G free                          │
+ ╰───────────────────────────────────────────────╯
+ ╭─ snapshots ───────────────────────────────────╮
+ │ 2026-09-29 06:12  D   "pre-nvidia"            │
+ │ 2026-09-28 18:01  O                           │
+ │ ... (the newest 5)                            │
+ │ +4 older                                      │
+ ╰───────────────────────────────────────────────╯
+ [o]pen apsis  [r]efresh                  [esc]
+```
+
+- 400 px wide (the window is 720). The popup only looks: no create, delete, restore or settings.
+  The panel's `read_only` flag gates the keys; the window's code is unchanged.
+- Keys: `o` (or the `[o]pen apsis` hint) starts `apsis --window` in its own process and closes
+  the popup; `r` lists again; Esc closes. Every other key does nothing.
+- Same text as the tooltip and the window's strip (`StatusView::strip`): `last`, `next  manual
+  only`, the device and sizes, the disk bar, `NN% used · X free`, with the overdue and low-space
+  phrases in the warning or destructive colour. Only the newest 5 snapshots, as plain rows (date,
+  tags, a comment cut to 14 characters): no selection, no dots, no status column.
+- No list yet, no device, empty, or a failed list: the pane shows the same message as the window.
+- Right-click menu: `Open Apsis` (new), `Refresh`, `Settings…` and `About Apsis` (these two open
+  the window on that view: `apsis --settings`, `apsis --about`), then `Remove or move applet…`
+  and `Close`.
+- A running create is not shown here: it runs in the window's process, and the popup lists only
+  when it opens or on `r`. Showing it would need the helper to expose its running state
+  (roadmap).
+- The window starts from `std::env::current_exe()`, so it is the same build as the panel; a
+  package upgrade while the panel runs (`... (deleted)` on the path) is handled.
 
 ## Mock
 
@@ -73,7 +116,8 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
 - Due when a list showed a backup device and its newest snapshot (any tag) is more than N days
   old, or there is none.
 - Then the panel icon is drawn in the theme's warning colour (same icon, `warning_text_color`)
-  and the tooltip adds `· none for over 7 days`.
+  and the tooltip's `last` line adds `(over 7 days)` (`last  none yet  (over 7 days)` with no
+  snapshot). With no backup device set the reminder is off.
 - So that it works without opening the popup: in applet mode Apsis lists at start and every
   6 hours while the popup is closed, through the helper (no password; no helper: nothing). A
   failed background list (disk unplugged) clears the reminder.
@@ -82,20 +126,28 @@ Phase 3.5 layout (superfile-style panes; superfile was a visual reference only, 
 
 ```
  ╭─ activity ───────────────────────────────────────────────────────────────────╮
- │ creating ████████████░░░░░░░░ 58%  ~3 min left                               │
+ │ creating snapshot · 58% · 3m 12s left  ██████████████░░░░░░░░░░░░░░░░        │
  ╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
 - For creates and real restores, through `apsis-helper`: its `Progress` signal, at most about
-  twice a second.
+  twice a second. The line is the same in the popup and in `--window`.
 - Before the first `Progress`: the usual `creating snapshot… ⠋`.
 - After the helper's first (number-less) `Progress`, until there's a real number:
-  `creating ⠋ estimating…`. `0%` never counts as a number.
-- With a number: label, a 20-cell `█`/`░` bar in the theme's accent colour (the empty part
-  dimmed), the whole percent rounded down, and the time left, rough: `<1 min`, `~3 min`,
-  `~2 h 5 min`. No time while it's unknown, and for all but the last path of an original-mode
-  restore (one rsync per path, the percent spread over them).
-- Where the numbers come from: rsync's `--info=progress2`.
+  `creating snapshot · working · 1m 08s elapsed ⠹` (the spinner is the pulse). `0%` never
+  counts as a number. Elapsed counts from when the create or restore started.
+- With a number: `<label> · 58% · 3m 12s left`, then a bar in the theme's accent colour (the
+  empty part dimmed) filling the rest of the line. The percent is rounded down. Time left and
+  elapsed are to the second: `42s`, `3m 12s`, `1h 02m` (seconds dropped from an hour up). No
+  time left while it's unknown (`<label> · 58%`), and for all but the last path of an
+  original-mode restore (one rsync per path, the percent spread over them). A restore's label
+  is `restoring`.
+- The bar is the disk meter's widget (`bar`): the same monospace cells, filled in the accent
+  colour here, and in the warning or destructive colour for low disk space.
+- While a job runs, the strip's `last`, `next` and disk stay as the last list showed them; the
+  list refreshes when it finishes.
+- Where the numbers come from: rsync's `--info=progress2`. No `2.1G / 3.2G`: rsync gives bytes
+  copied but no reliable total.
 - Deletes, bulk deletes and dry runs keep the spinner.
 
 ## Disk usage
@@ -244,12 +296,82 @@ password (polkit `browse`, cached a few minutes).
   file capabilities, device nodes or FIFOs. Original mode keeps each file it replaces as
   `<name>.apsis-before-<snapshot>` next to it.
 
+## The apsis strip (window)
+
+In `--window`, an `apsis` pane sits above the snapshots and details, from `StatusView::strip`
+(the same source as the tooltip, so they never disagree):
+
+```
+ ╭─ apsis ───────────────────────────────────────────────╮
+ │ last   12h ago                sda1  372G / 596G       │
+ │ next   manual only            ████████████░░░░░░░░    │
+ │                               62% used · 224G free    │
+ ╰───────────────────────────────────────────────────────╯
+```
+
+- Left: `last` and `next` (labels in the accent colour, values in the text colour). `next` is
+  always `manual only` (no scheduler). Overdue adds `(over 7 days)` in the warning colour, and
+  only that phrase.
+- Right: the backup device and `used / total`, the disk bar (accent, warning or destructive by
+  free space, the same widget as the popup's disk line), then `NN% used · X free`. Under 10% or
+  5% free adds `(under 10%)` / `(under 5%)` in the warning / destructive colour.
+- No disk: `disk  not connected` (the list failed, or no device set) or `disk  unknown` (no
+  `statvfs` figures). Before the first list: `-`.
+- Not shown in the settings view (its notes are sized to the smallest window without it) and
+  not in the popup, which keeps its disk line until it becomes the read-only overview.
+- The window's old disk line is gone; the strip replaces it. At the smallest window (640 x 440)
+  the strip is 91 px and the panes keep 184 px (`the_strip_fits_the_smallest_window`).
+- The pane title is dim like the other inactive panes; the accent-everywhere look of the
+  mockups is the window-chrome slice.
+
+## Rooms and the dock (window)
+
+Four outlined cells under the activity pane, in the accent colour; the active room's cell has
+the selected row's fill (`dock_cell`). `1 2 3 4` or a click jump between them; every cell is a
+key. The dock is in `--window` only, and only on the snapshot views (not in the settings view
+or the browser, which have their own footers). The footer gains a dim `[1-4]rooms`.
+
+| room | key | what it shows |
+|---|---|---|
+| snapshots | `1` | home: the list and its details |
+| create | `2` | the list stays; a `create` pane replaces details: `comment` (as typed, mirrored from the `>` line), `tag  O on-demand`, and `[enter]create` / `[esc]cancel`. `2` starts the comment prompt, as `c` does |
+| schedule | `3` | `next  manual only`, then `keep` and `remind` with `[-] [+] [on]`; up/down pick a row, space turns it on or off, `+` `-` change it. Saved at once, like the settings view's rows. There is no scheduler yet, and the pane says so |
+| log | `4` | what happened this session, newest first: `12:04:11  snapshot created`, a failure marked `error` (the word in the destructive colour, the rest text). At most 200 lines |
+
+- Schedule and log replace the snapshots and details panes; the apsis strip and the activity
+  pane stay. Create keeps the list.
+- The log is fed by the status line: whatever a message leaves in the activity pane (created,
+  deleted, failed, saved, cancelled) and a list that fails (once, not on every message).
+- Digits typed at a prompt are text: room keys only work at the command line. Esc walks back:
+  the prompt, then the room (to snapshots), then the marks, then the window.
+- Rooms wait while a create, delete or restore runs.
+- At the smallest window (640 x 440) each room leaves the panes 172 px and the dock 26 px; the
+  schedule and log rooms scroll rather than push the dock out.
+
 ## Panel button
 
 - Symbolic icon `io.github.atraxsrc.Apsis-symbolic` (an orbit with its two apsides), tinted by
   the theme. The popup header shows it in the accent colour before `~/apsis`.
-- Tooltip: `Apsis - last snapshot 3h ago` or `Apsis - no snapshots`, plus ` · 483G free` when
-  the last list knew the free space (statvfs).
+- Tooltip, from `apsis_core::status` through `StatusView` (one formatter, reused by later
+  phases):
+
+  ```
+  last  12h ago
+  next  manual only
+  disk  372G / 596G  224G free
+  ```
+
+  Overdue: `last  9d ago  (over 7 days)`. No snapshots: `last  none yet`. Reminder off: no note.
+  Free space under 10% / 5% of the usable space: `disk  28G free  (under 10%)` / `(under 5%)`.
+  Backup disk not connected (or the list failed): `disk  not connected`; a list without
+  `statvfs` figures: `disk  unknown`. Before the first list: `Apsis`. `next` is always
+  `manual only` (no scheduler).
+- Icon colour, icon only: warning role for a due reminder or free < 10%, destructive role for
+  free < 5% (the worse wins). No hardcoded colours.
+- Optional label beside the icon, `12h · 62%` (age of the newest snapshot, share of the backup
+  disk in use, `-` for an unknown side), on horizontal panels only. Settings view, `apsis`
+  section: `panel label: off` (default) / `on`, toggled with `space`. Text colour only; a
+  warning colours the icon, not the label.
 - Left click: the popup. Right click: a small menu (a standard COSMIC applet menu, not the
   terminal look):
 
@@ -292,6 +414,7 @@ documents), `everything` (a full restore rolls documents back too).
  │             + add filter…                     │ │                              │
  │   apsis     keep: all                         │ │                              │
  │             remind after 7 days               │ │                              │
+ │             panel label: off                  │ │                              │
  ╰───────────────────────────────────────────────╯ ╰──────────────────────────────╯
  [space]change  [+]  [-]  [a]dd  [x]remove  [w]rite  [r]eload                [esc]
 ```
@@ -299,7 +422,7 @@ documents), `everything` (a full restore rolls documents back too).
 - Rows: `device` (space picks the next unencrypted Linux filesystem that can hold snapshots),
   `home` per user (space cycles excluded / hidden files only / everything, Timeshift's
   patterns, kept in the filter list), the `filters` in order (home patterns dimmed; `x`
-  removes a filter), `+ add filter…` (`a` anywhere), then Apsis's own `keep` and `remind`
+  removes a filter), `+ add filter…` (`a` anywhere), then Apsis's own `keep`, `remind` and `panel label`
   (per user, saved at once to cosmic-config, not by `w`; `+`/`-` or `e` change the number).
 - **Import.** While there's no `config.toml`, the view shows what was read from Timeshift's
   settings, marked unsaved, and the activity pane lists it, in the warning colour:
@@ -325,8 +448,9 @@ documents), `everything` (a full restore rolls documents back too).
 
 ## Window mode
 
-`apsis --window` shows the popup's UI (header, panes, activity, `>` line, footer) in a normal
-window instead of a panel button. The app launcher's entry (`io.github.atraxsrc.Apsis.Window.desktop`,
+`apsis --window` shows the full UI (header, apsis strip, panes, activity, `>` line, footer) in a
+normal window instead of a panel button. `--settings` and `--about` open it on that view (the
+panel's menu uses them). The app launcher's entry (`io.github.atraxsrc.Apsis.Window.desktop`,
 `Exec=apsis --window`) starts it that way; the applet's own entry is `NoDisplay=true`, so it only
 shows in the panel settings.
 

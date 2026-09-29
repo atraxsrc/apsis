@@ -21,6 +21,8 @@ pub enum Row {
     KeepManual,
     /// Apsis's own: remind (tooltip, panel icon) when the last snapshot is older than N days.
     Remind,
+    /// Apsis's own: `12h · 62%` beside the panel icon.
+    PanelLabel,
 }
 
 /// What `+`, `-` and `e` change.
@@ -28,6 +30,14 @@ pub enum Row {
 pub enum Counted {
     KeepManual,
     Remind,
+}
+
+/// One step on a counted setting: on or off, one more, one fewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    Toggle,
+    More,
+    Less,
 }
 
 /// Most snapshots "keep" can be set to.
@@ -46,7 +56,7 @@ impl Row {
             Self::Device => Section::Device,
             Self::Home(_) => Section::Home,
             Self::Filter(_) | Self::AddFilter => Section::Filters,
-            Self::KeepManual | Self::Remind => Section::Apsis,
+            Self::KeepManual | Self::Remind | Self::PanelLabel => Section::Apsis,
         }
     }
 }
@@ -67,6 +77,27 @@ pub struct ApsisChoice {
     pub keep_manual: u32,
     /// Remind when the last snapshot is older than N days; 0 = off.
     pub remind_days: u32,
+    /// Show the age and disk use beside the panel icon.
+    pub show_label: bool,
+}
+
+impl ApsisChoice {
+    /// These settings with `counted` stepped: toggled between off and its default, or one more
+    /// or fewer within its range (0 is off).
+    #[must_use]
+    pub fn stepped(mut self, counted: Counted, step: Step) -> Self {
+        let (value, default, max) = match counted {
+            Counted::KeepManual => (&mut self.keep_manual, DEFAULT_KEEP_MANUAL, MAX_KEEP_MANUAL),
+            Counted::Remind => (&mut self.remind_days, DEFAULT_REMIND_DAYS, MAX_REMIND_DAYS),
+        };
+        *value = match step {
+            Step::Toggle if *value == 0 => default,
+            Step::Toggle => 0,
+            Step::More => value.saturating_add(1).min(max),
+            Step::Less => value.saturating_sub(1),
+        };
+        self
+    }
 }
 
 /// The config as read, and as edited.
@@ -119,7 +150,12 @@ impl SettingsView {
         let mut rows = vec![Row::Device];
         rows.extend((0..self.info.users.len()).map(Row::Home));
         rows.extend((0..self.edited.filters.len()).map(Row::Filter));
-        rows.extend([Row::AddFilter, Row::KeepManual, Row::Remind]);
+        rows.extend([
+            Row::AddFilter,
+            Row::KeepManual,
+            Row::Remind,
+            Row::PanelLabel,
+        ]);
         rows
     }
 
@@ -216,6 +252,10 @@ impl SettingsView {
             Row::Remind => {
                 let days = &mut self.backend.remind_days;
                 *days = if *days == 0 { DEFAULT_REMIND_DAYS } else { 0 };
+                Ok(())
+            }
+            Row::PanelLabel => {
+                self.backend.show_label = !self.backend.show_label;
                 Ok(())
             }
         }
@@ -347,10 +387,11 @@ mod tests {
         }
     }
 
-    /// The defaults: keep off, remind after 7 days.
+    /// The defaults: keep off, remind after 7 days, no panel label.
     const DEFAULT_BACKEND: ApsisChoice = ApsisChoice {
         keep_manual: 0,
         remind_days: DEFAULT_REMIND_DAYS,
+        show_label: false,
     };
 
     fn users() -> Vec<User> {
@@ -402,8 +443,13 @@ mod tests {
             4
         );
         assert_eq!(
-            rows[rows.len() - 3..],
-            [Row::AddFilter, Row::KeepManual, Row::Remind]
+            rows[rows.len() - 4..],
+            [
+                Row::AddFilter,
+                Row::KeepManual,
+                Row::Remind,
+                Row::PanelLabel
+            ]
         );
         assert!(!view.dirty());
     }
@@ -493,6 +539,50 @@ mod tests {
         select(&mut view, Row::Filter(0));
         view.remove_filter().unwrap();
         assert_eq!(view.current(), Row::AddFilter);
+    }
+
+    #[test]
+    fn stepping_a_count_toggles_and_stays_in_range() {
+        let start = DEFAULT_BACKEND;
+        let keep = |choice: ApsisChoice| choice.keep_manual;
+        let toggled = start.stepped(Counted::KeepManual, Step::Toggle);
+        assert_eq!(keep(toggled), DEFAULT_KEEP_MANUAL);
+        assert_eq!(keep(toggled.stepped(Counted::KeepManual, Step::Toggle)), 0);
+        assert_eq!(keep(start.stepped(Counted::KeepManual, Step::Less)), 0);
+        assert_eq!(keep(start.stepped(Counted::KeepManual, Step::More)), 1);
+        let top = ApsisChoice {
+            keep_manual: MAX_KEEP_MANUAL,
+            remind_days: MAX_REMIND_DAYS,
+            ..start
+        };
+        assert_eq!(
+            keep(top.stepped(Counted::KeepManual, Step::More)),
+            MAX_KEEP_MANUAL
+        );
+        assert_eq!(
+            top.stepped(Counted::Remind, Step::More).remind_days,
+            MAX_REMIND_DAYS
+        );
+        // The other setting is left alone.
+        assert_eq!(
+            start.stepped(Counted::Remind, Step::Less).keep_manual,
+            start.keep_manual
+        );
+        assert_eq!(start.stepped(Counted::Remind, Step::Toggle).remind_days, 0);
+    }
+
+    #[test]
+    fn the_panel_label_is_a_toggle_off_by_default() {
+        let mut view = view();
+        assert!(!view.backend.show_label);
+        select(&mut view, Row::PanelLabel);
+        assert_eq!(view.counted(), None);
+        view.change().unwrap();
+        assert!(view.backend.show_label);
+        view.change().unwrap();
+        assert!(!view.backend.show_label);
+        // Apsis's own: the config isn't touched.
+        assert!(!view.dirty());
     }
 
     #[test]

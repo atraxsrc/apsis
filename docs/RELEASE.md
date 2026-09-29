@@ -25,7 +25,23 @@ that tag's GitHub release. If the release doesn't exist yet, the workflow makes 
 with placeholder notes; edit its notes and publish it. If it does exist, the file is added
 (or replaced) there. Check the workflow's run in the Actions tab before announcing the release.
 
-## v0.2.0 checklist
+## v0.3.0 checklist
+
+Prepared (2026-09-29): version 0.3.0 (`Cargo.toml`, `Cargo.lock`), metainfo `<release>` and
+description, `resources/deb/changelog`, the man page's `.TH` line, `CHANGELOG.md`, README.
+Covers the UI polish (status model and tooltip, panel label, disk colours, progress, the
+four-room window, the read-only popup, theme audit, the staging warning wording).
+
+Before tagging, retake the screenshots (see the list in the session notes of 2026-09-29 in
+`DECISIONS.md`): `docs/screenshot.png` and `docs/screenshot1.png` show the 0.1 popup, and the
+metainfo and collection entries point at the `v0.1.0` copy. After retaking, point the
+`screenshot:` URLs and the metainfo `<image>` at `v0.3.0`.
+
+User steps, in order: as for v0.2.0 below, with `v0.3.0` (commit, push and check CI, tag and
+push, wait for the Release workflow, paste the `0.3.0` section of `CHANGELOG.md` as the
+notes, publish). `CLAUDE.md` still has the old "Timeshift-style" listing line; update it.
+
+## v0.2.0 checklist (done)
 
 Prepared (2026-09-29): version 0.2.0 (`Cargo.toml`, `Cargo.lock`), metainfo `<release>` and
 summary, `resources/deb/changelog`, the man page, `CHANGELOG.md`, README, SECURITY.md (0.2.x
@@ -179,7 +195,7 @@ mode in its description instead.
 PR text (draft):
 
 > Add Apsis, a panel applet for simple system snapshots: create, list and delete rsync
-> snapshots and restore single files from them, from a terminal-style popup that follows the
-> COSMIC theme. It uses Timeshift's on-disk layout, so existing Timeshift snapshots keep
-> working, but doesn't need Timeshift. It also opens as a window from the app launcher
+> snapshots and restore single files from them, in a terminal-style window that follows the
+> COSMIC theme, with a read-only overview in the panel popup. It uses Timeshift's on-disk layout, so existing Timeshift snapshots keep
+> working, but doesn't need Timeshift. It opens as a window from the app launcher
 > (`apsis --window`). GPL-3.0-only.
