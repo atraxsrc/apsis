@@ -16,10 +16,10 @@ and follows your COSMIC theme.
 > Apsis (and the other way round). Manual only: there is no schedule, and a snapshot is only
 > deleted when you delete it.
 
-<p align="center"><img src="docs/screenshot.png" width="560" alt="Apsis, 0.1: snapshot list, details pane and activity pane"></p>
-<p align="center"><img src="docs/screenshot1.png" width="560" alt="Apsis, 0.1: snapshot list, details pane and activity pane"></p>
-
-<p align="center"><sub>The screenshots are from 0.1. They show the old all-in-one popup; that view is now the window, and the popup is an overview.</sub></p>
+<p align="center"><img src="docs/screenshot-popup.png" width="400" alt="The panel popup: last snapshot, backup disk bar and the newest snapshots, read-only"></p>
+<p align="center"><img src="docs/screenshot-create.png" width="560" alt="The window's create room: the snapshot list beside the create form, with a comment being typed"></p>
+<p align="center"><img src="docs/screenshot-window.png" width="560" alt="The window: apsis strip, snapshot list, details, activity and the four-room dock"></p>
+<p align="center"><img src="docs/screenshot-schedule.png" width="560" alt="The window's schedule room: keep last N and the reminder"></p>
 
 ## Features
 

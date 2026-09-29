@@ -33,6 +33,8 @@ read-only overview; creating, deleting, settings and restore are in the window.
 - A leftover from an interrupted snapshot is reported as one plain line ("leftover from an
   interrupted snapshot, safe to delete") instead of the raw staging path and timestamp; the path
   goes to the journal.
+- New screenshots in the README and the metainfo: the window, the create and schedule rooms,
+  and the panel popup.
 
 ### Known issues
 

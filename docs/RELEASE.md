@@ -32,10 +32,9 @@ description, `resources/deb/changelog`, the man page's `.TH` line, `CHANGELOG.md
 Covers the UI polish (status model and tooltip, panel label, disk colours, progress, the
 four-room window, the read-only popup, theme audit, the staging warning wording).
 
-Before tagging, retake the screenshots (see the list in the session notes of 2026-09-29 in
-`DECISIONS.md`): `docs/screenshot.png` and `docs/screenshot1.png` show the 0.1 popup, and the
-metainfo and collection entries point at the `v0.1.0` copy. After retaking, point the
-`screenshot:` URLs and the metainfo `<image>` at `v0.3.0`.
+Screenshots retaken (2026-09-29): `docs/screenshot-{window,popup,create,schedule}.png`. The
+metainfo and the collection entries below point at the `v0.3.0` copies, which only resolve
+once the tag is pushed.
 
 User steps, in order: as for v0.2.0 below, with `v0.3.0` (commit, push and check CI, tag and
 push, wait for the Release workflow, paste the `0.3.0` section of `CHANGELOG.md` as the
@@ -170,8 +169,8 @@ names and order from a neighbouring entry in each file and adjust these to match
     description: "Simple system snapshots and file restore for the COSMIC™ desktop",
     repository: "https://github.com/atraxsrc/apsis",
     app_id: "io.github.atraxsrc.Apsis",
-    icon: "https://raw.githubusercontent.com/atraxsrc/apsis/v0.1.0/resources/icons/hicolor/scalable/apps/io.github.atraxsrc.Apsis.svg",
-    screenshot: "https://raw.githubusercontent.com/atraxsrc/apsis/v0.1.0/docs/screenshot.png",
+    icon: "https://raw.githubusercontent.com/atraxsrc/apsis/v0.3.0/resources/icons/hicolor/scalable/apps/io.github.atraxsrc.Apsis.svg",
+    screenshot: "https://raw.githubusercontent.com/atraxsrc/apsis/v0.3.0/docs/screenshot-window.png",
 ),
 ```
 
@@ -184,8 +183,8 @@ names and order from a neighbouring entry in each file and adjust these to match
     description: "Simple system snapshots and file restore for the COSMIC™ desktop, in a window (apsis --window)",
     repository: "https://github.com/atraxsrc/apsis",
     app_id: "io.github.atraxsrc.Apsis",
-    icon: "https://raw.githubusercontent.com/atraxsrc/apsis/v0.1.0/resources/icons/hicolor/scalable/apps/io.github.atraxsrc.Apsis.svg",
-    screenshot: "https://raw.githubusercontent.com/atraxsrc/apsis/v0.1.0/docs/screenshot.png",
+    icon: "https://raw.githubusercontent.com/atraxsrc/apsis/v0.3.0/resources/icons/hicolor/scalable/apps/io.github.atraxsrc.Apsis.svg",
+    screenshot: "https://raw.githubusercontent.com/atraxsrc/apsis/v0.3.0/docs/screenshot-window.png",
 ),
 ```
 
