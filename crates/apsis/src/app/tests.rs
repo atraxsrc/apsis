@@ -10,22 +10,37 @@ use cosmic::iced::keyboard::Modifiers;
 use super::*;
 use crate::status::DiskStrip;
 
+/// A fresh, empty folder for one `/dev/disk/by-uuid` stand-in. Tests run on parallel threads, so
+/// each call gets its own (pid and a counter); the first call of a run removes earlier runs'.
+fn by_uuid_dir() -> std::path::PathBuf {
+    static CLEANED: std::sync::Once = std::sync::Once::new();
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let tmp = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp");
+    let base = tmp.join("by-uuid");
+    CLEANED.call_once(|| {
+        for old in [&base, &tmp.join("by-uuid-in"), &tmp.join("by-uuid-out")] {
+            match std::fs::remove_dir_all(old) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => panic!("{e}"),
+                _ => {}
+            }
+        }
+    });
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = base.join(format!("{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 /// A `/dev/disk/by-uuid` stand-in with the fixture's disk in it.
 fn plugged_in() -> std::path::PathBuf {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp/by-uuid-in");
-    std::fs::create_dir_all(&dir).unwrap();
-    let link = dir.join(FIXTURE_UUID);
-    if link.symlink_metadata().is_err() {
-        std::os::unix::fs::symlink("/", &link).unwrap();
-    }
+    let dir = by_uuid_dir();
+    std::os::unix::fs::symlink("/", dir.join(FIXTURE_UUID)).unwrap();
     dir
 }
 
 /// One with nothing in it: the disk is unplugged.
 fn unplugged() -> std::path::PathBuf {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp/by-uuid-out");
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    by_uuid_dir()
 }
 
 const FIXTURE_UUID: &str = "00000000-0000-0000-0000-000000000000";
