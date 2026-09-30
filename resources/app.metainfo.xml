@@ -62,20 +62,20 @@
   </keywords>
   <screenshots>
     <screenshot type="default">
-      <caption>The window: snapshot list, details, activity and the backup disk</caption>
-      <image type="source" width="1328" height="767">https://raw.githubusercontent.com/atraxsrc/apsis/v0.3.0/docs/screenshot-window.png</image>
+      <caption>The window: the snapshot list, the last snapshot and the backup disk</caption>
+      <image type="source" width="647" height="445">https://raw.githubusercontent.com/atraxsrc/apsis/0da47b99312103bac2f07c8b4ce9232179203cff/docs/1.png</image>
     </screenshot>
     <screenshot>
       <caption>The panel popup: a read-only overview</caption>
-      <image type="source" width="495" height="526">https://raw.githubusercontent.com/atraxsrc/apsis/v0.3.0/docs/screenshot-popup.png</image>
+      <image type="source" width="357" height="386">https://raw.githubusercontent.com/atraxsrc/apsis/0da47b99312103bac2f07c8b4ce9232179203cff/docs/4.png</image>
     </screenshot>
     <screenshot>
-      <caption>Creating a snapshot with a comment</caption>
-      <image type="source" width="1328" height="767">https://raw.githubusercontent.com/atraxsrc/apsis/v0.3.0/docs/screenshot-create.png</image>
+      <caption>Settings: the disk where snapshots are saved</caption>
+      <image type="source" width="649" height="448">https://raw.githubusercontent.com/atraxsrc/apsis/0da47b99312103bac2f07c8b4ce9232179203cff/docs/2.png</image>
     </screenshot>
     <screenshot>
-      <caption>Keep the last N snapshots, and a reminder</caption>
-      <image type="source" width="1328" height="767">https://raw.githubusercontent.com/atraxsrc/apsis/v0.3.0/docs/screenshot-schedule.png</image>
+      <caption>Settings: include /root and /home; the system is always included</caption>
+      <image type="source" width="649" height="448">https://raw.githubusercontent.com/atraxsrc/apsis/0da47b99312103bac2f07c8b4ce9232179203cff/docs/3.png</image>
     </screenshot>
   </screenshots>
   <releases>

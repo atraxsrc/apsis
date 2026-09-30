@@ -1602,3 +1602,19 @@ checkbox, as on the Include tab (checked keeps the path, unchecked leaves it out
 pattern; heads "Keep" and "Pattern" above the list. Clicking the row still selects it for
 Remove / Move Up / Move Down. The screenshot test can render with the monospace face
 (`APSIS_SCREENSHOTS_MONO=1`) and has a Filters shot with a converted config's notes.
+
+## 2026-09-30 - 0.4.0 released; the HP checks; screenshots
+
+- **Released:** `v0.4.0` tagged and published. 0.4.0 works on apsis-test; edge-case checks 3-6
+  not run, left to issue reports. (PLAN "0.4.0" J, items 3 to 6: stop from another user's
+  session, stop escalation, a killed helper's leftover, the disk unplugged mid-create.)
+- **Screenshots:** `docs/1.png` (window), `2.png` (settings, Location), `3.png` (settings,
+  Include), `4.png` (panel popup), added in `0da47b9`, after the tag. The README uses them by
+  relative path instead of GitHub user-attachments links, so they're versioned with the code.
+  The metainfo needs absolute links and the `v0.4.0` tag doesn't have them, so it points at
+  that commit's copies (`raw.githubusercontent.com/.../0da47b9.../docs/N.png`), which never
+  change. The 0.3 captions (activity, keep last N) are gone.
+- **CI:** `cargo test` failed on the runner with "File exists" (os error 17): the app tests
+  shared one `by-uuid` stand-in folder and raced to create its symlink on parallel threads.
+  Each call now gets its own folder (pid and a counter); fixed in `7ee73fb`, test-only, no
+  retag.

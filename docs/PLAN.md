@@ -646,10 +646,10 @@ The panel popup is a read-only overview; the window does the work. One slice at 
 
 Roadmap, not scheduled: a scheduler (`next` in time, the last/next timeline), undock.
 
-## 0.4.0 - The Timeshift model (built, waiting for the owner's checks)
+## 0.4.0 - The Timeshift model (released 2026-09-30)
 
-**Status: design only, answers in 2026-09-30. Waiting for the owner's OK; no code yet.** The
-0.3.1 work is still uncommitted in the working tree.
+**Status: released as v0.4.0 (2026-09-30).** 0.4.0 works on apsis-test; edge-case checks 3-6
+not run, left to issue reports.
 
 **Product (owner, 2026-09-30):** Apsis does exactly this, nothing else:
 1. snapshot the system; two include choices, `/root` and `/home` (either, both, neither); the
@@ -684,8 +684,8 @@ fmt` and a summary. No commits (the owner commits).
    (b) settings (tabs); (c) the panel popup in standard widgets, with the running job.
    **Done 2026-09-30** (not committed); see DECISIONS.md.
 4. Docs, version 0.4.0, CHANGELOG, then the owner's checks on the HP.
-   **Docs and version done 2026-09-30** (not committed). Waiting: the owner's checks on the HP
-   (J, items 1 to 10) and new screenshots.
+   **Done 2026-09-30**, released as v0.4.0 with new screenshots (`docs/1.png` to `4.png`).
+   0.4.0 works on apsis-test; edge-case checks 3-6 not run, left to issue reports.
 
 ### A. File-level restore goes
 
@@ -1245,3 +1245,6 @@ download, I ask first).
 `cargo test --workspace`, clippy, fmt, `just test-ext4`; the HP checks 1 to 10 pass; nothing in
 the tree mentions file restore, `Apsis-restored` or home modes except history (DECISIONS.md,
 CHANGELOG, this file's 6a); docs updated; version 0.4.0.
+
+Outcome (2026-09-30): 0.4.0 works on apsis-test; edge-case checks 3-6 not run, left to issue
+reports.

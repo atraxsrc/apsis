@@ -6,16 +6,16 @@
 
 <p align="center">System snapshot and restore for the COSMIC™ desktop.</p>
 <p align="center">
-  <img width="357" height="386" alt="4" src="https://github.com/user-attachments/assets/c30d9de7-d667-4ac7-92bb-88ae40fa78a7" />
+  <img width="357" height="386" alt="The panel popup" src="docs/4.png" />
 </p>
 <p align="center">
-  <img width="647" height="445" alt="1" src="https://github.com/user-attachments/assets/94fd0b46-59fb-4c0c-92bf-5369118920c3" />
+  <img width="647" height="445" alt="The window" src="docs/1.png" />
 </p>
 <p align="center">
-  <img width="649" height="448" alt="2" src="https://github.com/user-attachments/assets/000b38e9-dd00-4d11-8157-b867264dca2b" />
+  <img width="649" height="448" alt="Settings: Location" src="docs/2.png" />
 </p>
 <p align="center">
-  <img width="649" height="448" alt="3" src="https://github.com/user-attachments/assets/5d322264-0302-47c8-9817-454ef0449ac2" />
+  <img width="649" height="448" alt="Settings: Include" src="docs/3.png" />
 </p>
 
 Apsis takes snapshots of your system, the way Timeshift does, and lives in the COSMIC panel.

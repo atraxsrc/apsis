@@ -40,7 +40,12 @@ User steps, in order: as for v0.2.0 below, with `v0.3.0` (commit, push and check
 push, wait for the Release workflow, paste the `0.3.0` section of `CHANGELOG.md` as the
 notes, publish). (The listing line was updated in 0.4.0, see below.)
 
-## v0.4.0 checklist
+## v0.4.0 checklist (done)
+
+Done (2026-09-30): `v0.4.0` tagged and the release published by the Release workflow.
+0.4.0 works on apsis-test; edge-case checks 3-6 not run, left to issue reports. New
+screenshots `docs/1.png` to `4.png` (added after the tag, in `0da47b9`); the README uses them,
+and the metainfo points at that commit's copies.
 
 Prepared (2026-09-30): version 0.4.0 (`Cargo.toml`, `Cargo.lock`), metainfo `<release>` and
 summary ("System snapshot and restore"), desktop `Comment=`, `resources/deb/changelog`, the man
@@ -185,7 +190,7 @@ names and order from a neighbouring entry in each file and adjust these to match
     repository: "https://github.com/atraxsrc/apsis",
     app_id: "io.github.atraxsrc.Apsis",
     icon: "https://raw.githubusercontent.com/atraxsrc/apsis/v0.3.0/resources/icons/hicolor/scalable/apps/io.github.atraxsrc.Apsis.svg",
-    screenshot: "https://raw.githubusercontent.com/atraxsrc/apsis/v0.3.0/docs/screenshot-window.png",
+    screenshot: "https://raw.githubusercontent.com/atraxsrc/apsis/0da47b99312103bac2f07c8b4ce9232179203cff/docs/1.png",
 ),
 ```
 
@@ -199,7 +204,7 @@ names and order from a neighbouring entry in each file and adjust these to match
     repository: "https://github.com/atraxsrc/apsis",
     app_id: "io.github.atraxsrc.Apsis",
     icon: "https://raw.githubusercontent.com/atraxsrc/apsis/v0.3.0/resources/icons/hicolor/scalable/apps/io.github.atraxsrc.Apsis.svg",
-    screenshot: "https://raw.githubusercontent.com/atraxsrc/apsis/v0.3.0/docs/screenshot-window.png",
+    screenshot: "https://raw.githubusercontent.com/atraxsrc/apsis/0da47b99312103bac2f07c8b4ce9232179203cff/docs/1.png",
 ),
 ```
 
