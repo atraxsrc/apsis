@@ -1,28 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The D-Bus interface: `NativeListWithUsage`, `NativeCreate`, `Delete`, `ReadConfig`,
-//! `WriteConfig`, file-level restore's `Browse` and `Restore`, and the `Progress` and
-//! `Finished` signals. Nothing else.
+//! The D-Bus interface `Helper2`: `List`, `Create`, `Delete`, `Stop`, `Job`, `ReadConfig`,
+//! `WriteConfig`, and the `JobChanged` and `Finished` signals. Nothing else.
 //!
 //! Every call is logged with its result on stderr, which systemd puts in the journal
 //! (`journalctl -u apsis-helper`). Comments are cut to [`LOGGED_COMMENT_CHARS`].
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
 use apsis_core::helper::names::{
-    ACTION_BROWSE, ACTION_CONFIGURE, ACTION_CREATE, ACTION_DELETE, ACTION_LIST, ACTION_RESTORE,
-    ACTION_RESTORE_ORIGINAL, OBJECT_PATH, OP_CREATE, OP_DELETE, OP_RESTORE,
+    ACTION_CONFIGURE, ACTION_CREATE, ACTION_DELETE, ACTION_LIST, ACTION_STOP, OBJECT_PATH,
+    OP_CREATE, OP_DELETE,
 };
 use apsis_core::helper::{
-    WireConfig, WireConfigInfo, WireListWithUsage, WireListing, config_from_wire, encode_error,
-    listing_to_wire, to_wire_with_usage,
+    WireConfig, WireConfigInfo, WireListWithUsage, config_from_wire, encode_error,
+    to_wire_with_usage,
 };
-use apsis_core::progress::Throttle;
-use apsis_core::restore::{Destination, Request, SnapPath, check_paths};
-use apsis_core::{Backend, Error, Progress, SnapshotList, parse_snapshot_name, validate_comment};
-use tokio::sync::mpsc;
+use apsis_core::job::{self, JobKind, JobState, WireJob};
+use apsis_core::native::{Cancel, TooLate};
+use apsis_core::status::BY_UUID;
+use apsis_core::{Backend, Error, SnapshotList, parse_snapshot_name, validate_comment};
 use zbus::fdo::DBusProxy;
 use zbus::message::Header;
 use zbus::names::{BusName, UniqueName};
@@ -31,7 +29,6 @@ use zbus::{Connection, DBusError, interface};
 
 use crate::native::{self, Access};
 use crate::polkit;
-use crate::restore::{self, logged_path, logged_paths};
 use crate::runner::DirectRunner;
 use crate::settings::{self, Files};
 use crate::state::{Running, State};
@@ -53,7 +50,7 @@ impl Helper {
 
 /// The helper's D-Bus errors, named `<ERROR_PREFIX>.<Variant>` (see `apsis_core::helper::names`).
 #[derive(Debug, DBusError)]
-#[zbus(prefix = "io.github.atraxsrc.Apsis.Helper1.Error")]
+#[zbus(prefix = "io.github.atraxsrc.Apsis.Helper2.Error")]
 pub enum HelperError {
     #[zbus(error)]
     ZBus(zbus::Error),
@@ -85,12 +82,103 @@ impl From<Error> for HelperError {
     }
 }
 
-#[interface(name = "io.github.atraxsrc.Apsis.Helper1")]
+#[interface(name = "io.github.atraxsrc.Apsis.Helper2")]
 impl Helper {
-    /// Starts deleting snapshot `name` (polkit: `delete`) and returns; `Finished("delete", ..)`
-    /// follows. The backup device is mounted read-write for the delete only; the name must be
-    /// one the list has, and the folder a plain snapshot folder (see
-    /// `NativeRsync::delete_snapshot`).
+    /// The snapshots on the backup device (each one's `info.json`, the device mounted
+    /// read-only for the call), leftovers of interrupted creates, and its `statvfs` (polkit:
+    /// `list`, no password for the active session).
+    async fn list(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+    ) -> Result<WireListWithUsage, HelperError> {
+        let _call = self.state.call();
+        let caller = caller(&header)?;
+        let label = format!("list for {caller}");
+        let result = async {
+            authorize(connection, &caller, ACTION_LIST, false).await?;
+            let running = self.state.begin(JobKind::List)?;
+            let state = Arc::clone(&self.state);
+            blocking(move || {
+                let result = (|| {
+                    let (backend, _mounted) =
+                        native::open(&DirectRunner, Access::ReadOnly, log_lines)?;
+                    let mut list = backend.list()?;
+                    list.usage = usage::of_mount_point(Path::new(native::MOUNT_POINT));
+                    Ok(list)
+                })();
+                state.end(if result.is_ok() {
+                    JobState::Done
+                } else {
+                    JobState::Failed
+                });
+                drop(running);
+                result
+            })
+            .await
+        }
+        .await;
+        match &result {
+            Ok(list) => log(&format!("{label}: {}", describe_list(list))),
+            Err(error) => log(&format!("{label}: {}", describe_error(error))),
+        }
+        Ok(to_wire_with_usage(&result?))
+    }
+
+    /// Starts a snapshot (polkit: `create`) and returns; `Finished("create", ..)` follows.
+    /// rsync runs at idle I/O priority and nice 19. Interrupted creates' folders are removed
+    /// first. The caller's uid may `Stop` it without a password.
+    async fn create(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+        comment: String,
+    ) -> Result<(), HelperError> {
+        let _call = self.state.call();
+        let caller = caller(&header)?;
+        let label = format!("create {} for {caller}", logged_comment(&comment));
+        let started = async {
+            validate_comment(&comment)?;
+            let uid = unix_user(connection, &caller).await?;
+            self.refuse_if_running()?;
+            authorize(connection, &caller, ACTION_CREATE, true).await?;
+            let running = self.state.begin(JobKind::Create)?;
+            let cancel = Cancel::new();
+            self.state.stoppable(Arc::clone(&cancel), uid);
+            Ok((running, cancel))
+        }
+        .await;
+        let (started, cancel) = match started {
+            Ok((running, cancel)) => (Ok(running), Some(cancel)),
+            Err(error) => (Err(error), None),
+        };
+        self.start(
+            connection,
+            caller,
+            OP_CREATE,
+            label,
+            started,
+            move |state| {
+                let cancel = cancel.ok_or_else(|| Error::Helper("not started".to_owned()))?;
+                let (backend, _mounted) =
+                    native::open(&DirectRunner, Access::ReadWrite, log_lines)?;
+                let device = backend.config().device_uuid.clone();
+                let (named, progress) = (Arc::clone(state), Arc::clone(state));
+                let backend = backend
+                    .with_cancel(cancel)
+                    .with_named(move |name| named.named(name))
+                    .with_progress(move |p| progress.progress(&p));
+                backend
+                    .create(&comment)
+                    .map(|()| String::new())
+                    .map_err(|e| removed_or(e, device.as_deref(), Path::new(BY_UUID)))
+            },
+        )
+    }
+
+    /// Starts deleting snapshot `name`, or the interrupted create's folder `name` (polkit:
+    /// `delete`) and returns; `Finished("delete", ..)` follows. The backup device is mounted
+    /// read-write for the delete only; the name must be one the list has.
     async fn delete(
         &self,
         #[zbus(header)] header: Header<'_>,
@@ -107,7 +195,7 @@ impl Helper {
             }
             self.refuse_if_running()?;
             authorize(connection, &caller, ACTION_DELETE, true).await?;
-            self.state.begin()
+            self.state.begin(JobKind::Delete)
         }
         .await;
         self.start(
@@ -116,68 +204,83 @@ impl Helper {
             OP_DELETE,
             label,
             started,
-            move |_running, _| {
+            move |state| {
+                state.named(&name);
                 let (backend, _mounted) =
                     native::open(&DirectRunner, Access::ReadWrite, log_lines)?;
-                if !backend.list()?.snapshots.iter().any(|s| s.name == name) {
+                let device = backend.config().device_uuid.clone();
+                let list = backend.list()?;
+                let known =
+                    list.snapshots.iter().any(|s| s.name == name) || list.leftovers.contains(&name);
+                if !known {
                     return Err(Error::NoSuchSnapshot(name.clone()));
                 }
-                backend.delete_snapshot(&name).map(|()| String::new())
+                backend
+                    .delete(&name)
+                    .map(|()| String::new())
+                    .map_err(|e| removed_or(e, device.as_deref(), Path::new(BY_UUID)))
             },
         )
     }
 
-    /// The snapshots on the backup device (each one's `info.json`, the device mounted
-    /// read-only for the call), plus its `statvfs` (polkit: `list`, no password for the active
-    /// session).
-    async fn native_list_with_usage(
+    /// Stops the running create if it is making `snapshot`, and returns once stopping has
+    /// begun: rsync's process group gets `SIGTERM`, `SIGKILL` 10 s later if it's still there,
+    /// and its copy is removed; the create's `Finished` says `stopped`. The uid that started it
+    /// isn't asked; anyone else needs polkit `stop`. Refused after the snapshot has started
+    /// being put in place.
+    async fn stop(
         &self,
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &Connection,
-    ) -> Result<WireListWithUsage, HelperError> {
-        Ok(to_wire_with_usage(
-            &self.native_snapshot_list(&header, connection).await?,
-        ))
-    }
-
-    /// Starts a snapshot (polkit: `create`) and returns; `Finished("create", ..)` follows.
-    /// rsync runs at idle I/O priority and nice 19.
-    async fn native_create(
-        &self,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(connection)] connection: &Connection,
-        comment: String,
+        snapshot: String,
     ) -> Result<(), HelperError> {
         let _call = self.state.call();
         let caller = caller(&header)?;
-        let label = format!("native create {} for {caller}", logged_comment(&comment));
-        let started = async {
-            validate_comment(&comment)?;
-            self.refuse_if_running()?;
-            authorize(connection, &caller, ACTION_CREATE, true).await?;
-            self.state.begin()
+        let label = format!("stop {snapshot:?} for {caller}");
+        let result = async {
+            if parse_snapshot_name(&snapshot).is_none() {
+                return Err(Error::InvalidSnapshotName(snapshot.clone()));
+            }
+            let (_, starter) = self.state.stop_target(&snapshot)?;
+            let uid = unix_user(connection, &caller).await?;
+            if stop_needs_auth(starter, uid) {
+                authorize(connection, &caller, ACTION_STOP, true).await?;
+            }
+            // The password dialog may have taken a while: still the same create?
+            let (cancel, _) = self.state.stop_target(&snapshot)?;
+            cancel.request().map_err(|TooLate| {
+                Error::InvalidInput(
+                    "the snapshot is being put in place; it can't be stopped now".to_owned(),
+                )
+            })?;
+            self.state.stopping();
+            Ok(uid)
         }
         .await;
-        self.start(
-            connection,
-            caller,
-            OP_CREATE,
-            label,
-            started,
-            move |_running, progress| {
-                progress.started();
-                let (backend, _mounted) =
-                    native::open(&DirectRunner, Access::ReadWrite, log_lines)?;
-                let progress = progress.clone();
-                let backend = backend.with_progress(move |p| progress.report(p));
-                backend.create(&comment).map(|()| String::new())
-            },
-        )
+        match &result {
+            Ok(uid) => log(&format!(
+                "{label} (uid {uid}): stopping, SIGTERM to rsync's process group (SIGKILL after 10 s)"
+            )),
+            Err(error) => log(&format!("{label}: {}", describe_error(error))),
+        }
+        result.map(drop).map_err(HelperError::from)
     }
 
-    /// Apsis's config (or, before it's saved, the import from Timeshift's settings), the block
-    /// devices and the users, for the settings view (polkit: `list`, no password for the active
-    /// session).
+    /// What the helper is doing now (polkit: `list`, no password for the active session).
+    async fn job(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+    ) -> Result<WireJob, HelperError> {
+        let _call = self.state.call();
+        let caller = caller(&header)?;
+        authorize(connection, &caller, ACTION_LIST, false).await?;
+        Ok(job::to_wire(self.state.job().as_ref()))
+    }
+
+    /// Apsis's config (converted from the old format, or imported from Timeshift's settings,
+    /// until it's saved) and the block devices, for the settings view (polkit: `list`, no
+    /// password for the active session).
     async fn read_config(
         &self,
         #[zbus(header)] header: Header<'_>,
@@ -191,9 +294,9 @@ impl Helper {
         }
         .await;
         match &result {
-            Ok(info) if !info.4.is_empty() => {
+            Ok(info) if !info.3.is_empty() => {
                 log(&format!(
-                    "read config for {caller}: imported from Timeshift's settings"
+                    "read config for {caller}: not saved yet (converted or imported)"
                 ));
             }
             Ok(_) => {}
@@ -222,10 +325,17 @@ impl Helper {
             let config = config_from_wire(config);
             self.refuse_if_running()?;
             authorize(connection, &caller, ACTION_CONFIGURE, true).await?;
-            let running = self.state.begin()?;
+            let running = self.state.begin(JobKind::Configure)?;
+            let state = Arc::clone(&self.state);
             blocking(move || {
-                let _running = running;
-                Files::system().write(&DirectRunner, &expected, &config)
+                let result = Files::system().write(&DirectRunner, &expected, &config);
+                state.end(if result.is_ok() {
+                    JobState::Done
+                } else {
+                    JobState::Failed
+                });
+                drop(running);
+                result
             })
             .await
         }
@@ -245,127 +355,10 @@ impl Helper {
         }
     }
 
-    /// One folder of snapshot `snapshot`, each entry compared with the running system (polkit:
-    /// `browse`, password cached: snapshots hold root-only files). The backup device is mounted
-    /// read-only for the call.
-    async fn browse(
-        &self,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(connection)] connection: &Connection,
-        snapshot: String,
-        path: String,
-    ) -> Result<WireListing, HelperError> {
-        let _call = self.state.call();
-        let caller = caller(&header)?;
-        let label = format!("browse {snapshot:?} {} for {caller}", logged_path(&path));
-        let result = async {
-            if parse_snapshot_name(&snapshot).is_none() {
-                return Err(Error::InvalidSnapshotName(snapshot.clone()));
-            }
-            SnapPath::parse(&path)?;
-            self.refuse_if_running()?;
-            authorize(connection, &caller, ACTION_BROWSE, true).await?;
-            let running = self.state.begin()?;
-            blocking(move || {
-                let _running = running;
-                restore::browse(&snapshot, &path)
-            })
-            .await
-        }
-        .await;
-        match &result {
-            Ok(listing) => log(&format!(
-                "{label}: ok, {} entries{}",
-                listing.entries.len(),
-                if listing.truncated { ", truncated" } else { "" }
-            )),
-            Err(error) => log(&format!("{label}: {}", describe_error(error))),
-        }
-        Ok(listing_to_wire(&result?))
-    }
-
-    /// Copies `paths` of snapshot `snapshot` back (`destination`: `folder` or `original`), or
-    /// with `dry_run` only works out what that would do. Returns once started;
-    /// `Finished("restore", ok, text)` follows, the text being the plan or the result.
-    ///
-    /// polkit: a dry run `browse`; folder mode `restore` (cached); original mode
-    /// `restore-original` (asked every time). Refused while another operation runs.
-    async fn restore(
-        &self,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(connection)] connection: &Connection,
-        snapshot: String,
-        paths: Vec<String>,
-        destination: String,
-        dry_run: bool,
-    ) -> Result<(), HelperError> {
-        let _call = self.state.call();
-        let caller = caller(&header)?;
-        let label = format!(
-            "restore {destination:?}{} {snapshot:?} {} for {caller}",
-            if dry_run { " dry run" } else { "" },
-            logged_paths(&paths)
-        );
-        let started = async {
-            let destination = Destination::from_word(&destination).ok_or_else(|| {
-                Error::InvalidInput(format!("unknown destination {destination:?}"))
-            })?;
-            if parse_snapshot_name(&snapshot).is_none() {
-                return Err(Error::InvalidSnapshotName(snapshot.clone()));
-            }
-            check_paths(&paths)?;
-            let uid = unix_user(connection, &caller).await?;
-            let action = match (dry_run, destination) {
-                (true, _) => ACTION_BROWSE,
-                (false, Destination::Folder) => ACTION_RESTORE,
-                (false, Destination::Original) => ACTION_RESTORE_ORIGINAL,
-            };
-            self.refuse_if_running()?;
-            authorize(connection, &caller, action, true).await?;
-            let running = self.state.begin()?;
-            let request = Request {
-                snapshot: snapshot.clone(),
-                paths: paths.clone(),
-                destination,
-                dry_run,
-            };
-            Ok((running, request, uid))
-        }
-        .await;
-        let (started, job) = match started {
-            Ok((running, request, uid)) => (Ok(running), Some((request, uid))),
-            Err(error) => (Err(error), None),
-        };
-        let summary_label = label.clone();
-        self.start(
-            connection,
-            caller,
-            OP_RESTORE,
-            label,
-            started,
-            move |_running, progress| {
-                let (request, uid) = job.ok_or_else(|| Error::Helper("not started".to_owned()))?;
-                if !request.dry_run {
-                    progress.started();
-                }
-                let plan = restore::run(&request, uid, &|p| progress.report(p))?;
-                log(&format!("{summary_label}: uid {uid}: {}", plan.summary()));
-                Ok(plan.to_string())
-            },
-        )
-    }
-
-    /// How far a create or restore is, at most about twice a second (see [`Progress`]); sent
-    /// only to the caller that started it, never after its `Finished`. `percent` and
-    /// `eta_seconds` are `-1` while unknown.
+    /// The job started, got further, is stopping, or ended. To everyone on the bus: no
+    /// comment, caller, error text or path in it.
     #[zbus(signal)]
-    async fn progress(
-        emitter: &SignalEmitter<'_>,
-        op: &str,
-        percent: f64,
-        eta_seconds: i64,
-        text: &str,
-    ) -> zbus::Result<()>;
+    pub async fn job_changed(emitter: &SignalEmitter<'_>, job: WireJob) -> zbus::Result<()>;
 
     /// An operation ended. Sent only to the caller that started it.
     #[zbus(signal)]
@@ -378,35 +371,6 @@ impl Helper {
 }
 
 impl Helper {
-    /// The native list, with `statvfs` of [`native::MOUNT_POINT`] while it's mounted, logged.
-    async fn native_snapshot_list(
-        &self,
-        header: &Header<'_>,
-        connection: &Connection,
-    ) -> Result<SnapshotList, HelperError> {
-        let _call = self.state.call();
-        let caller = caller(header)?;
-        let label = format!("list for {caller}");
-        let result = async {
-            authorize(connection, &caller, ACTION_LIST, false).await?;
-            let running = self.state.begin()?;
-            blocking(move || {
-                let _running = running;
-                let (backend, _mounted) = native::open(&DirectRunner, Access::ReadOnly, log_lines)?;
-                let mut list = backend.list()?;
-                list.usage = usage::of_mount_point(Path::new(native::MOUNT_POINT));
-                Ok(list)
-            })
-            .await
-        }
-        .await;
-        match &result {
-            Ok(list) => log(&format!("{label}: {}", describe_list(list))),
-            Err(error) => log(&format!("{label}: {}", describe_error(error))),
-        }
-        Ok(result?)
-    }
-
     /// Refuses before the password dialog, so nobody types a password for a call that can't
     /// run. [`State::begin`] still decides, after polkit, if two calls race.
     fn refuse_if_running(&self) -> apsis_core::Result<()> {
@@ -417,8 +381,8 @@ impl Helper {
     }
 
     /// Logs whether the operation could start. If it did, runs `work` in the background
-    /// holding the lock, then logs how it went and tells `caller` with `Finished`: the text
-    /// `work` returned, or the error.
+    /// holding the lock, then announces how it ended (`JobChanged`), releases the lock, logs
+    /// it and tells `caller` with `Finished`: the text `work` returned, or the error.
     fn start(
         &self,
         connection: &Connection,
@@ -426,7 +390,7 @@ impl Helper {
         op: &'static str,
         label: String,
         started: apsis_core::Result<Running>,
-        work: impl FnOnce(&Running, &ProgressSink) -> apsis_core::Result<String> + Send + 'static,
+        work: impl FnOnce(&Arc<State>) -> apsis_core::Result<String> + Send + 'static,
     ) -> Result<(), HelperError> {
         let running = match started {
             Ok(running) => running,
@@ -439,32 +403,22 @@ impl Helper {
         // Keeps the helper alive until the signal is out.
         let call = self.state.call();
         let connection = connection.clone();
-        let (sink, mut updates) = ProgressSink::new();
-        let progress_to = (connection.clone(), caller.clone());
-        // Progress goes out from its own task, so a slow bus never holds up the work.
-        let forward = tokio::spawn(async move {
-            let (connection, caller) = progress_to;
-            let Ok(emitter) = SignalEmitter::new(&connection, OBJECT_PATH) else {
-                return;
-            };
-            let emitter = emitter.set_destination(caller.into());
-            while let Some(p) = updates.recv().await {
-                let percent = p.percent.unwrap_or(-1.0);
-                let eta = p
-                    .eta_seconds
-                    .and_then(|s| i64::try_from(s).ok())
-                    .unwrap_or(-1);
-                // A lost update is fine; the next one or `Finished` follows.
-                let _ = Helper::progress(&emitter, op, percent, eta, &p.text).await;
-            }
-        });
+        let state = Arc::clone(&self.state);
         tokio::spawn(async move {
             let _call = call;
-            // `running` drops when `work` returns, so the lock is free before `Finished`
-            // arrives and the caller's refresh isn't refused as busy. The sink drops with the
-            // closure, which ends `forward`; it's awaited so no progress follows `Finished`.
-            let result = blocking(move || work(&running, &sink)).await;
-            let _ = forward.await;
+            // The lock is free before `Finished` arrives, so the caller's refresh isn't
+            // refused as busy.
+            let result = blocking(move || {
+                let result = work(&state);
+                state.end(match &result {
+                    Ok(_) => JobState::Done,
+                    Err(Error::Stopped) => JobState::Stopped,
+                    Err(_) => JobState::Failed,
+                });
+                drop(running);
+                result
+            })
+            .await;
             let (ok, message) = match result {
                 Ok(text) => {
                     log(&format!("{label}: done"));
@@ -490,45 +444,38 @@ impl Helper {
     }
 }
 
-/// Where an operation's work reports its progress: at most one update per
-/// [`PROGRESS_INTERVAL`] (the last, `100%`, always) goes to the task that sends the
-/// `Progress` signal. Never blocks.
-#[derive(Clone)]
-pub struct ProgressSink {
-    updates: mpsc::UnboundedSender<Progress>,
-    throttle: Arc<Mutex<Throttle>>,
+/// Sends each job change as `JobChanged`, to everyone on the bus, in order. Runs as long as
+/// the helper does.
+pub async fn announce_jobs(
+    connection: Connection,
+    mut changes: tokio::sync::mpsc::UnboundedReceiver<WireJob>,
+) {
+    let Ok(emitter) = SignalEmitter::new(&connection, OBJECT_PATH) else {
+        log("couldn't set up JobChanged");
+        return;
+    };
+    while let Some(job) = changes.recv().await {
+        // A lost one is fine: the next change, `Job` or `Finished` follows.
+        let _ = Helper::job_changed(&emitter, job).await;
+    }
 }
 
-/// About two updates a second.
-const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
+/// `Stop` needs a password unless the caller's uid started the create.
+fn stop_needs_auth(starter: Option<u32>, caller: u32) -> bool {
+    starter != Some(caller)
+}
 
-impl ProgressSink {
-    fn new() -> (Self, mpsc::UnboundedReceiver<Progress>) {
-        let (updates, receiver) = mpsc::unbounded_channel();
-        let throttle = Arc::new(Mutex::new(Throttle::new(PROGRESS_INTERVAL)));
-        (Self { updates, throttle }, receiver)
-    }
-
-    /// A first update with no numbers: tells the caller progress will come (the applet shows
-    /// "estimating…" until rsync has a number).
-    pub fn started(&self) {
-        self.report(Progress {
-            percent: None,
-            eta_seconds: None,
-            text: "started".to_owned(),
-        });
-    }
-
-    pub fn report(&self, progress: Progress) {
-        let done = progress.percent.is_some_and(|p| p >= 100.0);
-        let ready = self
-            .throttle
-            .lock()
-            .map_or(true, |mut throttle| throttle.ready(Instant::now()));
-        if ready || done {
-            // The receiver is gone only once the operation is over.
-            let _ = self.updates.send(progress);
-        }
+/// `error`, or [`Error::DeviceRemoved`] if the backup device's link in `by_uuid`
+/// (`/dev/disk/by-uuid`) is gone: the disk left while the job ran, and `error` is what failed
+/// because of it.
+fn removed_or(error: Error, device: Option<&str>, by_uuid: &Path) -> Error {
+    match (&error, device) {
+        (Error::DeviceNotFound { .. } | Error::Stopped, _) | (_, None) => error,
+        (_, Some(uuid)) if by_uuid.join(uuid).symlink_metadata().is_err() => Error::DeviceRemoved {
+            device: uuid.to_owned(),
+            reason: error.to_string(),
+        },
+        _ => error,
     }
 }
 
@@ -536,18 +483,24 @@ fn log(line: &str) {
     eprintln!("apsis-helper: {line}");
 }
 
-/// [`log`] for text that may have several lines (a dry run's plan): one journal line each.
+/// [`log`] for text that may have several lines: one journal line each.
 fn log_lines(text: &str) {
     text.lines().for_each(log);
 }
 
-/// `ok, 5 snapshots` (plus the free space and the warnings, when known).
+/// `ok, 5 snapshots` (plus the free space, leftovers and warnings, when there are any).
 fn describe_list(list: &SnapshotList) -> String {
     let mut text = format!("ok, {} snapshots", list.snapshots.len());
     if let Some(usage) = list.usage {
         text.push_str(&format!(
             ", {} of {} bytes free (statvfs)",
             usage.free, usage.total
+        ));
+    }
+    if !list.leftovers.is_empty() {
+        text.push_str(&format!(
+            "; interrupted creates: {}",
+            list.leftovers.join(", ")
         ));
     }
     if !list.warnings.is_empty() {
@@ -569,6 +522,7 @@ fn describe_error(error: &Error) -> String {
         | Error::NoSuchSnapshot(_)
         | Error::NoSnapshotDevice
         | Error::ConfigChanged => format!("refused: {error}"),
+        Error::Stopped => "stopped".to_owned(),
         other => format!("failed: {other}"),
     }
 }
@@ -591,8 +545,8 @@ fn caller(header: &Header<'_>) -> Result<UniqueName<'static>, HelperError> {
         .ok_or_else(|| HelperError::NotAuthorized("no sender on the call".to_owned()))
 }
 
-/// The caller's uid, as the bus knows it (`GetConnectionUnixUser`): folder mode restores into
-/// that user's home, as that user.
+/// The caller's uid, as the bus knows it (`GetConnectionUnixUser`): who started a create, and
+/// who asks to stop it.
 async fn unix_user(connection: &Connection, caller: &UniqueName<'_>) -> apsis_core::Result<u32> {
     let bus = DBusProxy::new(connection)
         .await
@@ -636,9 +590,8 @@ mod tests {
     use apsis_core::helper::decode_error;
     use apsis_core::helper::names::{
         ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
-        ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_BROWSE, METHOD_DELETE, METHOD_NATIVE_CREATE,
-        METHOD_NATIVE_LIST_WITH_USAGE, METHOD_READ_CONFIG, METHOD_RESTORE, METHOD_WRITE_CONFIG,
-        SIGNAL_FINISHED, SIGNAL_PROGRESS,
+        ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CREATE, METHOD_DELETE, METHOD_JOB, METHOD_LIST,
+        METHOD_READ_CONFIG, METHOD_STOP, METHOD_WRITE_CONFIG, SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
     };
     use zbus::object_server::Interface;
 
@@ -648,65 +601,37 @@ mod tests {
     fn interface_matches_the_shared_names() {
         assert_eq!(Helper::name().as_str(), INTERFACE);
         let mut xml = String::new();
-        Helper::new(State::new()).introspect_to_writer(&mut xml, 0);
+        Helper::new(State::new().0).introspect_to_writer(&mut xml, 0);
         for method in [
-            METHOD_NATIVE_LIST_WITH_USAGE,
-            METHOD_NATIVE_CREATE,
+            METHOD_LIST,
+            METHOD_CREATE,
             METHOD_DELETE,
+            METHOD_STOP,
+            METHOD_JOB,
             METHOD_READ_CONFIG,
             METHOD_WRITE_CONFIG,
-            METHOD_BROWSE,
-            METHOD_RESTORE,
         ] {
             assert!(
                 xml.contains(&format!("<method name=\"{method}\">")),
                 "{method}\n{xml}"
             );
         }
-        for signal in [SIGNAL_FINISHED, SIGNAL_PROGRESS] {
+        for signal in [SIGNAL_FINISHED, SIGNAL_JOB_CHANGED] {
             assert!(
                 xml.contains(&format!("<signal name=\"{signal}\">")),
                 "{signal}\n{xml}"
             );
         }
-        // Progress(s op, d percent, x eta_seconds, s text).
-        for arg in [
-            "<arg name=\"percent\" type=\"d\"/>",
-            "<arg name=\"eta_seconds\" type=\"x\"/>",
-        ] {
-            assert!(xml.contains(arg), "{arg}\n{xml}");
-        }
         // Nothing else: exactly seven methods and two signals.
         assert_eq!(xml.matches("<method ").count(), 7, "{xml}");
         assert_eq!(xml.matches("<signal ").count(), 2, "{xml}");
-        // The list with its warnings and the disk usage.
-        assert!(xml.contains("type=\"((sssa(sss)as)a{st})\""), "{xml}");
+        // The list with its warnings, leftovers and the disk usage.
+        assert!(xml.contains("type=\"((sssa(sss)asas)a{st})\""), "{xml}");
         // The config types.
-        assert!(xml.contains("type=\"(s(sas)sa(ssb)as)\""), "{xml}");
-        assert!(xml.contains("type=\"(sas)\""), "{xml}");
-        // Browse's listing, and Restore's paths.
-        assert!(xml.contains("type=\"(a(sstxuuussstx)b)\""), "{xml}");
-        assert!(xml.contains("type=\"as\""), "{xml}");
-    }
-
-    #[tokio::test]
-    async fn progress_is_throttled_but_the_end_always_gets_through() {
-        let (sink, mut updates) = ProgressSink::new();
-        let at = |percent: f64| Progress {
-            percent: Some(percent),
-            eta_seconds: None,
-            text: String::new(),
-        };
-        for percent in [1.0, 2.0, 3.0, 100.0] {
-            sink.report(at(percent));
-        }
-        drop(sink);
-        let mut got = Vec::new();
-        while let Some(p) = updates.recv().await {
-            got.extend(p.percent);
-        }
-        // The first, then nothing within 500 ms, except the end.
-        assert_eq!(got, [1.0, 100.0]);
+        assert!(xml.contains("type=\"(s(sbbas)sas)\""), "{xml}");
+        assert!(xml.contains("type=\"(sbbas)\""), "{xml}");
+        // The job.
+        assert!(xml.contains("type=\"(sssxdx)\""), "{xml}");
     }
 
     #[test]
@@ -747,13 +672,60 @@ mod tests {
     }
 
     #[test]
+    fn a_disk_that_left_during_the_job_is_named_as_such() {
+        let by_uuid = std::env::temp_dir().join(format!("apsis-by-uuid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&by_uuid);
+        std::fs::create_dir_all(&by_uuid).unwrap();
+        std::os::unix::fs::symlink("../../sdz1", by_uuid.join("here")).unwrap();
+        let io = || Error::Native("rsync exited with code 23: Input/output error".to_owned());
+        // Still there: the error as it was.
+        assert!(matches!(
+            removed_or(io(), Some("here"), &by_uuid),
+            Error::Native(_)
+        ));
+        // Gone: removed, with the reason kept.
+        let removed = removed_or(io(), Some("gone"), &by_uuid);
+        assert!(
+            matches!(&removed, Error::DeviceRemoved { device, reason }
+                if device == "gone" && reason.contains("Input/output")),
+            "{removed:?}"
+        );
+        // Travels as a failure the client decodes.
+        let HelperError::Failed(message) = HelperError::from(removed) else {
+            panic!("not Failed")
+        };
+        assert!(matches!(
+            decode_error(&message),
+            Error::DeviceRemoved { .. }
+        ));
+        // A stop stays a stop; no device, nothing to say.
+        assert!(matches!(
+            removed_or(Error::Stopped, Some("gone"), &by_uuid),
+            Error::Stopped
+        ));
+        assert!(matches!(removed_or(io(), None, &by_uuid), Error::Native(_)));
+        std::fs::remove_dir_all(&by_uuid).unwrap();
+    }
+
+    #[test]
+    fn only_the_starters_uid_stops_without_a_password() {
+        assert!(!stop_needs_auth(Some(1000), 1000));
+        assert!(stop_needs_auth(Some(1000), 1001));
+        assert!(stop_needs_auth(None, 1000));
+        assert!(
+            stop_needs_auth(Some(1000), 0),
+            "root isn't the starter either"
+        );
+    }
+
+    #[test]
     fn input_errors_are_invalid_input() {
         for error in [
             Error::InvalidComment("too long"),
             Error::InvalidSnapshotName("x".to_owned()),
             Error::NoSuchSnapshot("2001-01-01_00-00-00".to_owned()),
             Error::InvalidSettings("choose a backup device".to_owned()),
-            Error::InvalidInput("/proc/x: never restored".to_owned()),
+            Error::InvalidInput("not deleting x: no info.json".to_owned()),
         ] {
             assert!(matches!(
                 HelperError::from(error),
@@ -782,6 +754,7 @@ mod tests {
             describe_error(&Error::Busy),
             format!("refused: {}", Error::Busy)
         );
+        assert_eq!(describe_error(&Error::Stopped), "stopped");
 
         let mut list = SnapshotList::default();
         assert_eq!(describe_list(&list), "ok, 0 snapshots");
@@ -791,6 +764,12 @@ mod tests {
             "ok, 0 snapshots; warnings: x: incomplete: no info.json"
         );
         list.warnings.clear();
+        list.leftovers = vec!["2026-09-29_14-02-11".to_owned()];
+        assert_eq!(
+            describe_list(&list),
+            "ok, 0 snapshots; interrupted creates: 2026-09-29_14-02-11"
+        );
+        list.leftovers.clear();
         list.usage = apsis_core::DiskUsage::from_statvfs(1000, 400, 350, 1000);
         assert_eq!(
             describe_list(&list),

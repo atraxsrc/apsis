@@ -13,7 +13,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use apsis_core::config::{self, BACKUP_PATH, CONFIG_PATH, Config, TIMESHIFT_CONFIG};
+use apsis_core::config::{self, BACKUP_PATH, CONFIG_PATH, Config, System, TIMESHIFT_CONFIG};
 use apsis_core::helper::{WireConfigInfo, config_to_wire};
 use apsis_core::settings::{self, LSBLK_ARGS, User};
 use apsis_core::{Error, Result, Runner};
@@ -59,8 +59,9 @@ impl Files {
         }
     }
 
-    /// The config in effect: the file's, else an import of Timeshift's settings, else empty;
-    /// with the import's notes (see `apsis_core::config::effective`).
+    /// The config in effect: the file's (converted if it's version 1), else an import of
+    /// Timeshift's settings, else the defaults; with notes on a conversion or import (see
+    /// `apsis_core::config::effective`).
     ///
     /// # Errors
     ///
@@ -68,7 +69,7 @@ impl Files {
     pub fn effective(
         &self,
         devices: &[settings::Device],
-        users: &[User],
+        system: &System,
     ) -> Result<(Config, Vec<String>)> {
         let text = self.read()?;
         let timeshift = if text.is_none() {
@@ -76,7 +77,7 @@ impl Files {
         } else {
             None
         };
-        config::effective(text.as_deref(), timeshift.as_deref(), devices, users)
+        config::effective(text.as_deref(), timeshift.as_deref(), devices, system)
     }
 
     /// Checks `config` against the connected devices and writes it, if the file still reads
@@ -95,9 +96,9 @@ impl Files {
         let old = if current.is_empty() {
             None
         } else {
-            Some(Config::parse(&current)?)
+            Some(Config::read(&current)?.device().to_owned())
         };
-        config::validate(config, old.as_ref(), &devices)?;
+        config::validate(config, old.as_deref(), &devices)?;
         let text = config.to_text();
         if text == current {
             return Ok(false);
@@ -178,8 +179,29 @@ pub fn users() -> Result<Vec<User>> {
         .collect())
 }
 
-/// What `ReadConfig` returns: the file, the config in effect, the devices, the users and the
-/// import's notes.
+/// What the conversion of old settings needs about this system: the users and the names in
+/// `/home` (none if it can't be read).
+///
+/// # Errors
+///
+/// `/etc/passwd` can't be read.
+pub fn system() -> Result<System> {
+    let home_entries = fs::read_dir("/home")
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(System {
+        users: users()?,
+        home_entries,
+    })
+}
+
+/// What `ReadConfig` returns: the file, the config in effect, the devices and notes on a
+/// conversion or import.
 ///
 /// # Errors
 ///
@@ -188,13 +210,8 @@ pub fn info(files: &Files, runner: &impl Runner) -> Result<WireConfigInfo> {
     let text = files.read()?.unwrap_or_default();
     let devices_json = lsblk(runner)?;
     let devices = settings::parse_lsblk(&devices_json)?;
-    let users = users()?;
-    let (config, notes) = files.effective(&devices, &users)?;
-    let users = users
-        .into_iter()
-        .map(|user| (user.name, user.home, user.encrypted_home))
-        .collect();
-    Ok((text, config_to_wire(&config), devices_json, users, notes))
+    let (config, notes) = files.effective(&devices, &system()?)?;
+    Ok((text, config_to_wire(&config), devices_json, notes))
 }
 
 /// Timeshift's check for an ecryptfs home: the user's `Private.mnt` names the home folder.
@@ -258,6 +275,14 @@ mod tests {
         Config {
             backup_device_uuid: uuid.to_owned(),
             filters: filters.iter().map(|f| (*f).to_owned()).collect(),
+            ..Config::default()
+        }
+    }
+
+    fn current(text: &str) -> Config {
+        match Config::read(text).unwrap() {
+            config::Stored::Current(config) => config,
+            other => panic!("not version 2: {other:?}"),
         }
     }
 
@@ -269,14 +294,14 @@ mod tests {
     fn before_the_first_save_timeshifts_settings_are_imported() {
         let (dir, files) = folder();
         assert_eq!(files.read().unwrap(), None);
-        let (config, notes) = files.effective(&[], &[]).unwrap();
+        let (config, notes) = files.effective(&[], &System::default()).unwrap();
         assert_eq!(config.backup_device_uuid, BACKUP_UUID);
         assert_eq!(config.filters.len(), 4);
         assert!(notes[0].starts_with("imported from"));
         // Without timeshift.json: empty, no notes.
         fs::remove_file(dir.join("timeshift/timeshift.json")).unwrap();
         assert_eq!(
-            files.effective(&[], &[]).unwrap(),
+            files.effective(&[], &System::default()).unwrap(),
             (Config::default(), Vec::new())
         );
         fs::remove_dir_all(dir).unwrap();
@@ -285,10 +310,10 @@ mod tests {
     #[test]
     fn the_first_save_makes_the_file_and_then_timeshift_isnt_read() {
         let (dir, files) = folder();
-        let first = config(BACKUP_UUID, &["+ /home/user1/**", "*.iso"]);
+        let first = config(BACKUP_UUID, &["+ /home/user1/**", "- *.iso"]);
         assert!(files.write(&FakeLsblk, "", &first).unwrap());
         let written = fs::read_to_string(dir.join("apsis/config.toml")).unwrap();
-        assert_eq!(Config::parse(&written).unwrap(), first);
+        assert_eq!(current(&written), first);
         assert_eq!(mode(&dir.join("apsis/config.toml")), 0o644);
         assert_eq!(mode(&dir.join("apsis")), 0o755);
         assert!(
@@ -297,7 +322,7 @@ mod tests {
         );
         assert!(!dir.join("apsis/config.toml.apsis-tmp").exists());
         // From now on the file decides; Timeshift's settings are left alone.
-        let (config, notes) = files.effective(&[], &[]).unwrap();
+        let (config, notes) = files.effective(&[], &System::default()).unwrap();
         assert_eq!((config, notes.len()), (first, 0));
         assert_eq!(
             fs::read_to_string(dir.join("timeshift/timeshift.json")).unwrap(),
@@ -312,7 +337,7 @@ mod tests {
         let first = config(BACKUP_UUID, &[]);
         files.write(&FakeLsblk, "", &first).unwrap();
         let first_text = fs::read_to_string(dir.join("apsis/config.toml")).unwrap();
-        let second = config(BACKUP_UUID, &["*.mp3"]);
+        let second = config(BACKUP_UUID, &["- *.mp3"]);
         assert!(files.write(&FakeLsblk, &first_text, &second).unwrap());
         assert_eq!(
             fs::read_to_string(dir.join("apsis/config.toml.bak")).unwrap(),
@@ -329,7 +354,7 @@ mod tests {
         files.write(&FakeLsblk, "", &first).unwrap();
         // The caller read "no file", but there is one now.
         assert!(matches!(
-            files.write(&FakeLsblk, "", &config(BACKUP_UUID, &["x"])),
+            files.write(&FakeLsblk, "", &config(BACKUP_UUID, &["- x"])),
             Err(Error::ConfigChanged)
         ));
         assert!(!dir.join("apsis/config.toml.bak").exists());
@@ -376,12 +401,47 @@ mod tests {
     }
 
     #[test]
+    fn a_version_1_file_is_converted_and_saved_as_version_2_with_a_backup() {
+        let (dir, files) = folder();
+        fs::create_dir_all(dir.join("apsis")).unwrap();
+        let old =
+            format!("version = 1\nbackup_device_uuid = \"{BACKUP_UUID}\"\nfilters = [\"*.iso\"]\n");
+        fs::write(dir.join("apsis/config.toml"), &old).unwrap();
+        let (converted, notes) = files.effective(&[], &System::default()).unwrap();
+        assert_eq!(converted.filters, ["- *.iso"]);
+        assert!(notes[0].starts_with("settings from Apsis 0.3"), "{notes:?}");
+        // The device is unchanged, so it may be unplugged; the write goes through.
+        assert!(files.write(&NoDevices, &old, &converted).unwrap());
+        let written = fs::read_to_string(dir.join("apsis/config.toml")).unwrap();
+        assert_eq!(current(&written), converted);
+        assert_eq!(
+            fs::read_to_string(dir.join("apsis/config.toml.bak")).unwrap(),
+            old
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// lsblk with no devices at all.
+    struct NoDevices;
+
+    impl Runner for NoDevices {
+        fn run(&self, _: &[OsString]) -> io::Result<RunOutput> {
+            Ok(RunOutput {
+                success: true,
+                code: Some(0),
+                stdout: "{\"blockdevices\": []}".to_owned(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
     fn a_broken_config_file_is_an_error_not_an_import() {
         let (dir, files) = folder();
         fs::create_dir_all(dir.join("apsis")).unwrap();
         fs::write(dir.join("apsis/config.toml"), "version = 7").unwrap();
         assert!(matches!(
-            files.effective(&[], &[]),
+            files.effective(&[], &System::default()),
             Err(Error::InvalidConfig(_))
         ));
         fs::remove_dir_all(dir).unwrap();

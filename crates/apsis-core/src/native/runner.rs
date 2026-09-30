@@ -3,8 +3,14 @@
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, BufReader};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStderr, Command, Stdio};
+use std::sync::Arc;
 use std::thread;
+
+use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+
+use super::cancel::Cancel;
 
 use crate::progress::read_segments;
 use crate::runner::find_in_path;
@@ -60,7 +66,9 @@ impl QuietRunner {
 }
 
 impl QuietRunner {
-    /// rsync as `argv` says, found on the fixed `PATH`, with stdout going to `stdout`.
+    /// rsync as `argv` says, found on the fixed `PATH`, with stdout going to `stdout`. It leads
+    /// a process group of its own (ionice and nice exec into it, and the processes rsync forks
+    /// join it), so a stop reaches all of it and nothing else.
     fn spawn(&self, argv: &[OsString], stdout: Stdio) -> io::Result<Child> {
         let (program, rest) = argv
             .split_first()
@@ -89,6 +97,7 @@ impl QuietRunner {
             .stdin(Stdio::null())
             .stdout(stdout)
             .stderr(Stdio::piped())
+            .process_group(0)
             .spawn()
     }
 }
@@ -119,6 +128,42 @@ impl Runner for QuietRunner {
         let read = child.stdout.take().map_or(Ok(String::new()), |out| {
             read_segments(out, false, on_segment)
         });
+        let status = child.wait()?;
+        read?;
+        Ok(RunOutput {
+            success: status.success(),
+            code: status.code(),
+            stdout: String::new(),
+            stderr: tail.join().unwrap_or_default(),
+        })
+    }
+
+    /// [`Runner::run_streaming`] that `cancel` can stop: rsync's group is registered with it
+    /// while its leader runs, and unregistered once the leader has exited but before it's
+    /// reaped (a `WNOWAIT` wait), so a signal never reaches a reused pid.
+    fn run_cancellable(
+        &self,
+        argv: &[OsString],
+        on_segment: &mut dyn FnMut(&str) -> bool,
+        cancel: &Arc<Cancel>,
+    ) -> io::Result<RunOutput> {
+        if cancel.is_stopping() {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        let mut child = self.spawn(argv, Stdio::piped())?;
+        let pid = Pid::from_child(&child);
+        cancel.started(pid);
+        let stderr = child.stderr.take();
+        let tail = thread::spawn(move || stderr_tail(stderr));
+        let read = child.stdout.take().map_or(Ok(String::new()), |out| {
+            read_segments(out, false, on_segment)
+        });
+        // Exited, still a zombie: its pid and group id can't be reused yet.
+        while let Err(rustix::io::Errno::INTR) = waitid(
+            WaitId::Pid(pid),
+            WaitIdOptions::EXITED | WaitIdOptions::NOWAIT,
+        ) {}
+        cancel.exited();
         let status = child.wait()?;
         read?;
         Ok(RunOutput {

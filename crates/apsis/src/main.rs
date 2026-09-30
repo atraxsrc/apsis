@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 mod app;
-mod browser;
 mod config;
 mod fmt;
 mod i18n;
 mod settings_view;
 mod status;
-mod tallest;
 
-use app::Mode;
+use app::{Flags, Mode, StartView};
 use cosmic::applet::PanelType;
 
 fn main() -> cosmic::iced::Result {
@@ -21,8 +19,11 @@ fn main() -> cosmic::iced::Result {
 
     match mode(std::env::args_os().skip(1), in_panel()) {
         // Starts the applet's event loop with the mode as the application's flags.
-        Mode::Applet => cosmic::applet::run::<app::AppModel>(Mode::Applet),
-        Mode::Window => app::run_window(),
+        Mode::Applet => cosmic::applet::run::<app::AppModel>(Flags {
+            mode: Mode::Applet,
+            view: None,
+        }),
+        Mode::Window => app::run_window(StartView::from_args(std::env::args_os().skip(1))),
     }
 }
 

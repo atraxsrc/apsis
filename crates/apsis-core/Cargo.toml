@@ -1,6 +1,6 @@
 [package]
 name = "apsis-core"
-description = "Snapshot model, rsync backend, config and file restore for Apsis (no UI)"
+description = "Snapshot model, rsync backend and config for Apsis (no UI)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

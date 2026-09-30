@@ -2,22 +2,8 @@
 
 //! Plain-text formatting for the popup and tooltip. No widgets, so it's unit-testable.
 
-use apsis_core::{DiskUsage, Mode, Snapshot, Tag};
+use apsis_core::Snapshot;
 use jiff::civil::DateTime;
-
-/// How long ago `then` was, as seen at `now`: `just now`, `5m ago`, `3h ago`, `2d ago`.
-///
-/// Both are local civil times. A `then` in the future (clock changes) reads as `just now`.
-#[must_use]
-pub fn ago(then: DateTime, now: DateTime) -> String {
-    let minutes = now.duration_since(then).as_secs() / 60;
-    match minutes {
-        ..1 => "just now".to_owned(),
-        1..60 => format!("{minutes}m ago"),
-        60..2880 => format!("{}h ago", minutes / 60),
-        _ => format!("{}d ago", minutes / 1440),
-    }
-}
 
 /// `2026-09-18 12:41`
 #[must_use]
@@ -34,24 +20,6 @@ pub fn label(snapshot: &Snapshot) -> String {
         Some(_) => format!("{when} {}", quoted_comment(snapshot)),
         None => when,
     }
-}
-
-/// `OB`, the way Timeshift prints the Tags column.
-#[must_use]
-pub fn tag_letters(tags: &[Tag]) -> String {
-    tags.iter().map(|t| t.letter()).collect()
-}
-
-/// `O on-demand, B boot`
-#[must_use]
-pub fn tag_names(tags: &[Tag]) -> String {
-    if tags.is_empty() {
-        return "-".to_owned();
-    }
-    tags.iter()
-        .map(|t| format!("{} {}", t.letter(), t.name()))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// `"before kernel update"`, or nothing.
@@ -75,17 +43,6 @@ pub fn truncate(text: &str, max: usize) -> String {
     short
 }
 
-/// `rsync · 3 snapshots`
-#[must_use]
-pub fn summary(mode: Option<Mode>, count: usize) -> String {
-    let noun = if count == 1 { "snapshot" } else { "snapshots" };
-    match mode {
-        Some(Mode::Rsync) => format!("rsync · {count} {noun}"),
-        Some(Mode::Btrfs) => format!("btrfs · {count} {noun}"),
-        None => format!("{count} {noun}"),
-    }
-}
-
 /// `1a2b…`: enough of a filesystem UUID to recognise the disk.
 #[must_use]
 pub fn short_uuid(uuid: &str) -> String {
@@ -93,45 +50,6 @@ pub fn short_uuid(uuid: &str) -> String {
 }
 
 pub use apsis_core::status::{size, size_short};
-
-/// The disk line's text: `448G used · 483G free · 9 snapshots` from `statvfs`. `None` when
-/// the usage isn't known: nothing is shown then.
-#[must_use]
-pub fn disk_text(usage: Option<DiskUsage>, count: usize) -> Option<String> {
-    let noun = if count == 1 { "snapshot" } else { "snapshots" };
-    let usage = usage?;
-    Some(format!(
-        "{} used · {} free · {count} {noun}",
-        size_short(usage.used),
-        size_short(usage.free)
-    ))
-}
-
-/// How many of a bar's `cells` are filled for `fraction` used, and how many are empty.
-/// Anything used shows at least one filled cell, and anything free at least one empty one.
-#[must_use]
-pub fn bar_cells(fraction: f64, cells: usize) -> (usize, usize) {
-    let fraction = if fraction.is_nan() {
-        0.0
-    } else {
-        fraction.clamp(0.0, 1.0)
-    };
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss,
-        reason = "a cell count, clamped to 0..=cells"
-    )]
-    let mut filled = ((fraction * cells as f64).round() as usize).min(cells);
-    if cells >= 2 {
-        if fraction > 0.0 && filled == 0 {
-            filled = 1;
-        } else if fraction < 1.0 && filled == cells {
-            filled = cells - 1;
-        }
-    }
-    (filled, cells - filled)
-}
 
 /// `58%`: whole percent, rounded down, so `100%` means done.
 #[must_use]
@@ -156,19 +74,6 @@ pub fn duration(seconds: u64) -> String {
     }
 }
 
-/// One line of the panel overview: `2026-09-19 08:00  D   pre-nvidia`, the comment cut to
-/// `comment_chars`.
-#[must_use]
-pub fn overview_row(snapshot: &Snapshot, comment_chars: usize) -> String {
-    let row = format!(
-        "{}  {:<3} {}",
-        when(snapshot.created),
-        tag_letters(&snapshot.tags),
-        truncate(&quoted_comment(snapshot), comment_chars),
-    );
-    row.trim_end().to_owned()
-}
-
 /// How many snapshots the overview leaves out of its `shown` rows, if any.
 #[must_use]
 pub fn older_count(total: usize, shown: usize) -> Option<usize> {
@@ -184,6 +89,7 @@ pub fn device_name(device: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use apsis_core::Tag;
     use jiff::civil::date;
 
     #[test]
@@ -217,63 +123,11 @@ mod tests {
     }
 
     #[test]
-    fn disk_text_says_only_what_is_known() {
-        let usage = DiskUsage {
-            total: 1_000_203_837_440,
-            used: 481_036_337_152,
-            free: 518_617_202_688,
-        };
-        assert_eq!(
-            disk_text(Some(usage), 9).as_deref(),
-            Some("448G used · 483G free · 9 snapshots")
-        );
-        assert!(disk_text(Some(usage), 1).unwrap().ends_with("1 snapshot"));
-        assert_eq!(disk_text(None, 3), None);
-    }
-
-    #[test]
-    fn bar_cells_add_up_and_never_hide_a_little_use_or_space() {
-        assert_eq!(bar_cells(0.0, 10), (0, 10));
-        assert_eq!(bar_cells(1.0, 10), (10, 0));
-        assert_eq!(bar_cells(0.58, 10), (6, 4));
-        assert_eq!(bar_cells(0.001, 10), (1, 9));
-        assert_eq!(bar_cells(0.999, 10), (9, 1));
-        assert_eq!(bar_cells(0.5, 0), (0, 0));
-        assert_eq!(bar_cells(0.7, 1), (1, 0));
-        assert_eq!(bar_cells(f64::NAN, 4), (0, 4));
-        assert_eq!(bar_cells(7.0, 4), (4, 0));
-        for cells in 0..50 {
-            let (filled, empty) = bar_cells(0.37, cells);
-            assert_eq!(filled + empty, cells);
-        }
-    }
-
-    #[test]
     fn percents_round_down() {
         assert_eq!(percent(58.23), "58%");
         assert_eq!(percent(99.91), "99%");
         assert_eq!(percent(100.0), "100%");
         assert_eq!(percent(-3.0), "0%");
-    }
-
-    #[test]
-    fn overview_rows_are_date_tags_and_a_short_comment() {
-        let mut snapshot = Snapshot {
-            name: "2026-09-19_08-00-00".to_owned(),
-            created: date(2026, 9, 19).at(8, 0, 0, 0),
-            tags: vec![Tag::Daily],
-            comment: None,
-        };
-        assert_eq!(overview_row(&snapshot, 14), "2026-09-19 08:00  D");
-        snapshot.comment = Some("pre-nvidia".to_owned());
-        assert_eq!(
-            overview_row(&snapshot, 14),
-            "2026-09-19 08:00  D   \"pre-nvidia\""
-        );
-        snapshot.comment = Some("before the big kernel update".to_owned());
-        assert!(overview_row(&snapshot, 14).ends_with('…'));
-        snapshot.tags = vec![Tag::OnDemand, Tag::Boot];
-        assert!(overview_row(&snapshot, 14).starts_with("2026-09-19 08:00  OB  "));
     }
 
     #[test]
@@ -306,43 +160,11 @@ mod tests {
     }
 
     #[test]
-    fn ago_buckets() {
-        let now = date(2026, 9, 25).at(12, 0, 0, 0);
-        let cases = [
-            (date(2026, 9, 25).at(12, 0, 30, 0), "just now"), // future
-            (date(2026, 9, 25).at(11, 59, 30, 0), "just now"),
-            (date(2026, 9, 25).at(11, 59, 0, 0), "1m ago"),
-            (date(2026, 9, 25).at(11, 0, 1, 0), "59m ago"),
-            (date(2026, 9, 25).at(9, 0, 0, 0), "3h ago"),
-            (date(2026, 9, 23).at(12, 0, 1, 0), "47h ago"),
-            (date(2026, 9, 23).at(12, 0, 0, 0), "2d ago"),
-            (date(2025, 9, 25).at(12, 0, 0, 0), "365d ago"),
-        ];
-        for (then, want) in cases {
-            assert_eq!(ago(then, now), want, "{then}");
-        }
-    }
-
-    #[test]
-    fn tags_format() {
-        assert_eq!(tag_letters(&[Tag::Boot, Tag::Daily]), "BD");
-        assert_eq!(tag_names(&[Tag::OnDemand]), "O on-demand");
-        assert_eq!(tag_names(&[]), "-");
-    }
-
-    #[test]
     fn truncate_counts_characters() {
         assert_eq!(truncate("short", 5), "short");
         assert_eq!(truncate("longer", 5), "long…");
         assert_eq!(truncate("äöüäöü", 4), "äöü…");
         assert_eq!(truncate("", 0), "");
-    }
-
-    #[test]
-    fn summary_counts() {
-        assert_eq!(summary(Some(Mode::Rsync), 3), "rsync · 3 snapshots");
-        assert_eq!(summary(Some(Mode::Btrfs), 1), "btrfs · 1 snapshot");
-        assert_eq!(summary(None, 0), "0 snapshots");
     }
 
     #[test]

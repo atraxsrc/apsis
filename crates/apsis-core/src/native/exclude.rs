@@ -8,7 +8,8 @@
 //! user's filters from `timeshift.json` (`load_app_config`, `Main.vala:3345-3360`),
 //! `/etc/fstab` (`FsTabEntry.read_file`, `FsTabEntry.vala:59-121`) and the users in
 //! `/etc/passwd` with their ecryptfs folders (`detect_encrypted_dirs`, `Main.vala:498`;
-//! `SystemUser.vala:74-198`). Same order, same de-duplication.
+//! `SystemUser.vala:74-198`). Same order, same de-duplication, with Apsis's own config in the
+//! user's part (see [`for_backup`]).
 //!
 //! 24.01.1 is the version this follows. 26.09.0 moves the user's filters to the front (so
 //! rsync sees them first) and runs the per-user step after they're copied; see DECISIONS.md.
@@ -160,39 +161,30 @@ fn passwd_users(passwd: &str) -> impl Iterator<Item = (&str, i64, &str)> {
     })
 }
 
-/// Timeshift's `exclude.list` for a backup, as a list of patterns.
+/// The rsync filter list for a backup, as a list of patterns: Timeshift's order, with Apsis's
+/// config in the user's part.
 ///
-/// `user` is `timeshift.json`'s `exclude` array, `fstab` the text of `/etc/fstab`, `users`
-/// from [`home_users`].
+/// 1. Timeshift's defaults, the fstab mounts, the default extras.
+/// 2. Decrypted ecryptfs contents (never backed up).
+/// 3. The config's `filters`, as written (`+ x` / `- x`). In front of each `+` filter that is
+///    an absolute path, its parent folders as `+ <dir>/` (the folder, not its contents): rsync
+///    never looks inside an excluded folder, so `+ /home/user1/Videos/keep/***` with `/home`
+///    left out needs `+ /home/`, `+ /home/user1/` and `+ /home/user1/Videos/` first. Not
+///    Timeshift's; see DECISIONS.md, 0.4.0.
+/// 4. `+ /root/**` if `include_root`, `+ /home/**` if `include_home`.
+/// 5. The built-in `/root/**` and `/home/*/**`, then `/timeshift/*`.
+///
+/// So a filter beats the includes, and a `+` can't bring back a built-in exclude (they come
+/// first). `users` are only for the ecryptfs folders; there is no per-user home step (Apsis
+/// 0.3 had Timeshift's, see [`crate::config::convert`]).
 #[must_use]
-pub fn for_backup(user: &[String], fstab: &str, users: &[HomeUser]) -> Vec<String> {
-    // `load_app_config`: user filters that are defaults or home entries are dropped.
-    let mut user_list: Vec<String> = Vec::new();
-    for pattern in user {
-        let known = DEFAULT.contains(&pattern.as_str()) || HOME.contains(&pattern.as_str());
-        if !known && !user_list.contains(pattern) {
-            user_list.push(pattern.clone());
-        }
-    }
-    // Each user whose home isn't included gets it excluded, at the end of the user filters
-    // (`Main.vala:751-781`). Timeshift adds it to its settings list; the removals there only
-    // run when neither include is in it, so they never remove anything.
-    for user in users {
-        let (exclude, include) = if user.encrypted_home {
-            let path = format!("/home/.ecryptfs/{}/***", user.name);
-            (path.clone(), format!("+ {path}"))
-        } else {
-            (format!("{}/**", user.home), format!("+ {}/**", user.home))
-        };
-        let include_hidden = format!("+ {}/.**", user.home);
-        if !user_list.contains(&include)
-            && !user_list.contains(&include_hidden)
-            && !user_list.contains(&exclude)
-        {
-            user_list.push(exclude);
-        }
-    }
-
+pub fn for_backup(
+    filters: &[String],
+    include_root: bool,
+    include_home: bool,
+    fstab: &str,
+    users: &[HomeUser],
+) -> Vec<String> {
     let mut list: Vec<String> = Vec::new();
     let add = |list: &mut Vec<String>, pattern: String| {
         if !list.contains(&pattern) {
@@ -218,14 +210,48 @@ pub fn for_backup(user: &[String], fstab: &str, users: &[HomeUser]) -> Vec<Strin
             list.push(format!("{dir}/**"));
         }
     }
-    for pattern in user_list {
-        add(&mut list, pattern);
+    for filter in filters {
+        if let Some(body) = filter.strip_prefix("+ ") {
+            for parent in parent_folders(body) {
+                add(&mut list, format!("+ {parent}"));
+            }
+        }
+        add(&mut list, filter.clone());
+    }
+    if include_root {
+        add(&mut list, "+ /root/**".to_owned());
+    }
+    if include_home {
+        add(&mut list, "+ /home/**".to_owned());
     }
     for pattern in HOME {
         add(&mut list, pattern.to_owned());
     }
     add(&mut list, "/timeshift/*".to_owned());
     list
+}
+
+/// The folders above an absolute pattern's last part, each as `/a/`, `/a/b/`: what rsync has
+/// to be let into to reach it. None for a relative pattern, and none from a part with `**` on
+/// (it can't be spelled as one folder).
+fn parent_folders(pattern: &str) -> Vec<String> {
+    let Some(path) = pattern.strip_prefix('/') else {
+        return Vec::new();
+    };
+    let parts: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    // `dir/***` matches `dir` itself too: its parents start one up.
+    let last = if parts.last() == Some(&"***") { 2 } else { 1 };
+    let mut folders = Vec::new();
+    let mut prefix = String::from("/");
+    for part in &parts[..parts.len().saturating_sub(last)] {
+        if part.is_empty() || part.contains("**") {
+            break;
+        }
+        prefix.push_str(part);
+        prefix.push('/');
+        folders.push(prefix.clone());
+    }
+    folders
 }
 
 /// `exclude.list`'s text: each pattern that isn't blank, then `\n`. The pattern itself is
@@ -271,7 +297,7 @@ mod tests {
 
     #[test]
     fn defaults_alone() {
-        let list = for_backup(&[], "", &[]);
+        let list = for_backup(&[], false, false, "", &[]);
         let expected: Vec<String> = DEFAULT
             .iter()
             .chain(DEFAULT_EXTRA.iter())
@@ -284,64 +310,59 @@ mod tests {
     }
 
     #[test]
-    fn user_filters_come_after_the_defaults_minus_defaults_and_duplicates() {
-        let user = strings(&[
-            "/home/user1/**",
-            "+ /home/user2/**",
-            "/proc/*",
-            "/root/**",
-            "*.mp3",
-            "*.mp3",
-        ]);
-        let list = for_backup(&user, "", &[]);
+    fn filters_come_after_the_defaults_then_the_includes_then_the_homes() {
+        let filters = strings(&["- /var/lib/libvirt/**", "- *.iso", "- /proc/*", "- *.iso"]);
+        let list = for_backup(&filters, true, true, "", &[]);
         let at = DEFAULT.len() + DEFAULT_EXTRA.len();
         assert_eq!(
             list[at..],
             strings(&[
-                "/home/user1/**",
-                "+ /home/user2/**",
-                "*.mp3",
+                "- /var/lib/libvirt/**",
+                "- *.iso",
+                "- /proc/*",
+                "+ /root/**",
+                "+ /home/**",
                 "/root/**",
                 "/home/*/**"
             ])
         );
-        assert_eq!(list.iter().filter(|p| *p == "/proc/*").count(), 1);
-    }
-
-    fn user(name: &str, home: &str) -> HomeUser {
-        HomeUser {
-            name: name.to_owned(),
-            home: home.to_owned(),
-            encrypted_home: false,
-            encrypted_private_dirs: Vec::new(),
-        }
+        // Neither include: only the built-in home excludes.
+        let list = for_backup(&[], false, false, "", &[]);
+        assert!(!list.iter().any(|p| p.starts_with('+')));
     }
 
     #[test]
-    fn homes_without_an_include_are_excluded_after_the_user_filters() {
-        let users = [
-            user("root", "/root"),
-            user("user1", "/home/user1"),
-            user("user2", "/home/user2"),
-            user("user3", "/home/user3"),
-        ];
-        let filters = strings(&["+ /home/user1/**", "+ /home/user2/.**", "*.iso"]);
-        let list = for_backup(&filters, "", &users);
+    fn a_kept_folder_gets_its_parents_let_in_first() {
+        let filters = strings(&[
+            "+ /home/user1/Videos/keep/***",
+            "- /home/*/Videos/***",
+            "+ /root/.ssh",
+            "+ *.conf",
+            "+ /srv/**/keep",
+        ]);
+        let list = for_backup(&filters, false, false, "", &[]);
         let at = DEFAULT.len() + DEFAULT_EXTRA.len();
         assert_eq!(
             list[at..],
             strings(&[
-                "+ /home/user1/**",
-                "+ /home/user2/.**",
-                "*.iso",
+                "+ /home/",
+                "+ /home/user1/",
+                "+ /home/user1/Videos/",
+                "+ /home/user1/Videos/keep/***",
+                "- /home/*/Videos/***",
+                "+ /root/",
+                "+ /root/.ssh",
+                "+ *.conf",
+                "+ /srv/",
+                "+ /srv/**/keep",
                 "/root/**",
-                "/home/user3/**",
                 "/home/*/**"
             ])
         );
-        // An exclude already in the filters isn't added twice.
-        let list = for_backup(&strings(&["/home/user3/**"]), "", &users[3..]);
-        assert_eq!(list.iter().filter(|p| *p == "/home/user3/**").count(), 1);
+        assert_eq!(parent_folders("/a/b/"), ["/a/"]);
+        assert_eq!(parent_folders("/a/b/***"), ["/a/"]);
+        assert!(parent_folders("relative/x").is_empty());
+        assert!(parent_folders("/top").is_empty());
     }
 
     #[test]
@@ -356,7 +377,7 @@ mod tests {
             UUID=0004   /srv2   ext4 defaults 0 2\n\
             UUID=0005 /games ext4 defaults 0 2\n\
             tmpfs relative tmpfs defaults 0 0";
-        let list = for_backup(&[], fstab, &[]);
+        let list = for_backup(&[], false, false, fstab, &[]);
         let defaults = DEFAULT.len();
         assert_eq!(list[defaults..defaults + 1], strings(&["/games/*"]));
         // `/srv2` starts with `/srv`: skipped, like `/homework`.
@@ -395,17 +416,25 @@ mod tests {
         assert!(users[2].encrypted_home && !users[1].encrypted_home);
         assert_eq!(users[3].encrypted_private_dirs, ["/home/user3/Private"]);
 
-        let list = for_backup(&[], "", &users);
+        let list = for_backup(
+            &strings(&["+ /home/user2/.config/***"]),
+            false,
+            true,
+            "",
+            &users,
+        );
         let at = DEFAULT.len() + DEFAULT_EXTRA.len();
+        // Decrypted contents stay out, even of an included /home and before a `+` filter.
         assert_eq!(
             list[at..],
             strings(&[
                 "/home/user2/**",
                 "/home/user3/Private/**",
+                "+ /home/",
+                "+ /home/user2/",
+                "+ /home/user2/.config/***",
+                "+ /home/**",
                 "/root/**",
-                "/home/user1/**",
-                "/home/.ecryptfs/user2/***",
-                "/home/user3/**",
                 "/home/*/**"
             ])
         );

@@ -25,6 +25,7 @@
 //! `exclude.list` as incomplete. So Apsis builds in `timeshift/apsis-staging/<name>/` and
 //! renames the finished folder into `snapshots/`, where it appears complete in one step.
 
+mod cancel;
 pub mod distro;
 pub mod exclude;
 pub mod info;
@@ -37,9 +38,11 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use jiff::Zoned;
 
+pub use self::cancel::{Cancel, GRACE, TooLate};
 pub use self::info::{INFO_FILE, Info};
 pub use self::runner::QuietRunner;
 use crate::backend::Backend;
@@ -109,7 +112,9 @@ pub struct NativeRsync<R> {
     clock: Box<dyn Fn() -> Zoned + Send + Sync>,
     log: Box<dyn Fn(&str) + Send + Sync>,
     progress: Box<dyn Fn(Progress) + Send + Sync>,
+    named: Box<dyn Fn(&str) + Send + Sync>,
     mountinfo: Box<dyn Fn() -> io::Result<String> + Send + Sync>,
+    cancel: Arc<Cancel>,
 }
 
 /// The mounts a delete checks for, as the kernel lists them for this process.
@@ -124,8 +129,24 @@ impl<R: Runner> NativeRsync<R> {
             clock: Box::new(Zoned::now),
             log: Box::new(|_| {}),
             progress: Box::new(|_| {}),
+            named: Box::new(|_| {}),
             mountinfo: Box::new(|| fs::read_to_string(MOUNTINFO)),
+            cancel: Cancel::new(),
         }
+    }
+
+    /// A create stops when `cancel` is asked to (see [`Cancel`]).
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: Arc<Cancel>) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    /// Tells `named` a create's snapshot name as soon as it's planned.
+    #[must_use]
+    pub fn with_named(mut self, named: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        self.named = Box::new(named);
+        self
     }
 
     /// Reads the mount table from `mountinfo` instead of [`MOUNTINFO`] (for the tests).
@@ -291,18 +312,26 @@ impl<R: Runner> NativeRsync<R> {
     /// Carries out `plan`: builds the snapshot in the staging folder, then moves it into
     /// `snapshots/` and updates the tag folders.
     fn execute(&self, plan: &CreatePlan) -> Result<()> {
+        (self.named)(&plan.name);
         fs::create_dir_all(self.snapshots_dir())?;
+        // Space comes back before the new copy starts.
+        self.remove_leftovers();
         fs::create_dir_all(plan.staging.join(LOCALHOST_DIR))?;
-        let built = self.build(plan);
+        let built = self.build(plan).and_then(|()| {
+            if self.cancel.commit() {
+                Ok(())
+            } else {
+                Err(Error::Stopped)
+            }
+        });
         if let Err(error) = built {
             (self.log)(&format!(
                 "removing the unfinished {}",
                 plan.staging.display()
             ));
-            if let Err(cleanup) = fs::remove_dir_all(&plan.staging) {
+            if let Err(cleanup) = self.remove_staging(&plan.name) {
                 (self.log)(&format!("couldn't remove it: {cleanup}"));
             }
-            let _ = fs::remove_dir(self.staging_dir());
             return Err(error);
         }
         // `rename` would replace an empty folder; `plan` checked, this checks again.
@@ -324,11 +353,25 @@ impl<R: Runner> NativeRsync<R> {
     fn build(&self, plan: &CreatePlan) -> Result<()> {
         write_synced(&plan.staging.join(EXCLUDE_FILE), &plan.exclude)?;
         (self.log)(&format!("running {}", shell_words(&plan.argv)));
-        let output = self.runner.run_streaming(&plan.argv, &mut |segment| {
-            parse_rsync(segment)
-                .map(|progress| (self.progress)(progress))
-                .is_some()
-        })?;
+        let output = self.runner.run_cancellable(
+            &plan.argv,
+            &mut |segment| {
+                parse_rsync(segment)
+                    .map(|progress| (self.progress)(progress))
+                    .is_some()
+            },
+            &self.cancel,
+        );
+        let output = match output {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                return Err(Error::Stopped);
+            }
+            other => other?,
+        };
+        // Stopped while rsync ran: whatever it managed goes.
+        if self.cancel.is_stopping() {
+            return Err(Error::Stopped);
+        }
         let code = output.code.unwrap_or(-1);
         let stderr = output.stderr.trim();
         if !RSYNC_OK_CODES.contains(&code) {
@@ -425,6 +468,120 @@ impl<R: Runner> NativeRsync<R> {
         Ok(())
     }
 
+    /// Removes the staging folder `apsis-staging/<name>`, as root, with the delete's rules:
+    ///
+    /// - `name` must be a snapshot name;
+    /// - `timeshift/`, `apsis-staging/` and `<name>/` are opened with `O_NOFOLLOW`: a symlink
+    ///   anywhere on the way is refused;
+    /// - nothing may be mounted at or below it (`/proc/self/mountinfo`);
+    /// - it's removed with [`prune::remove_at`] (never follows a symlink, never leaves the
+    ///   filesystem), then `apsis-staging/` itself if that's empty now.
+    ///
+    /// Not there (never made, or gone already) is fine.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidSnapshotName`], [`Error::InvalidInput`] (the refusals above, before
+    /// anything is removed), or the removal failed part-way.
+    pub fn remove_staging(&self, name: &str) -> Result<()> {
+        use rustix::fs::{AtFlags, FileType, Mode, OFlags, open, openat, statat, unlinkat};
+        use rustix::io::Errno;
+
+        if parse_snapshot_name(name).is_none() {
+            return Err(Error::InvalidSnapshotName(name.to_owned()));
+        }
+        let refuse =
+            |why: &str| Error::InvalidInput(format!("not removing the unfinished {name}: {why}"));
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let folder = |errno: Errno, what: &str| match errno {
+            Errno::LOOP | Errno::NOTDIR => refuse(&format!("{what} is a symlink or not a folder")),
+            other => Error::Io(io::Error::from(other)),
+        };
+        let repo = open(&self.config.repo, flags, Mode::empty())
+            .map_err(|e| folder(e, "backup device folder"))?;
+        let timeshift = match openat(&repo, TIMESHIFT_DIR, flags, Mode::empty()) {
+            Err(Errno::NOENT) => return Ok(()),
+            other => other.map_err(|e| folder(e, "timeshift/"))?,
+        };
+        let staging = match openat(&timeshift, STAGING_DIR, flags, Mode::empty()) {
+            Err(Errno::NOENT) => return Ok(()),
+            other => other.map_err(|e| folder(e, "timeshift/apsis-staging/"))?,
+        };
+        match statat(&staging, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Err(Errno::NOENT) => {}
+            Err(errno) => return Err(Error::Io(io::Error::from(errno))),
+            Ok(st) if FileType::from_raw_mode(st.st_mode) != FileType::Directory => {
+                return Err(refuse("it is a symlink or not a folder"));
+            }
+            Ok(_) => {
+                let path = fs::canonicalize(self.staging_dir().join(name))?;
+                let mounts = mounts_under(&(self.mountinfo)()?, &path);
+                if !mounts.is_empty() {
+                    let list: Vec<String> =
+                        mounts.iter().map(|m| m.display().to_string()).collect();
+                    return Err(refuse(&format!(
+                        "something is mounted inside it ({}); unmount it first",
+                        list.join(", ")
+                    )));
+                }
+                prune::remove_at(&staging, &self.staging_dir(), name)?;
+                (self.log)(&format!(
+                    "removed {}",
+                    self.staging_dir().join(name).display()
+                ));
+            }
+        }
+        drop(staging);
+        // Only if it's empty now; anything else there stays.
+        let _ = unlinkat(&timeshift, STAGING_DIR, AtFlags::REMOVEDIR);
+        Ok(())
+    }
+
+    /// Interrupted creates' folders in `apsis-staging/`: real folders with a snapshot name,
+    /// oldest first. Anything else there is a warning (and is never removed).
+    fn leftovers(&self) -> (Vec<String>, Vec<String>) {
+        let mut names = Vec::new();
+        let mut warnings = Vec::new();
+        let dir = self.staging_dir();
+        if !fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+            return (names, warnings);
+        }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return (names, warnings);
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_dir = fs::symlink_metadata(entry.path()).is_ok_and(|m| m.is_dir());
+            if is_dir && parse_snapshot_name(&name).is_some() {
+                names.push(name);
+            } else {
+                eprintln!("apsis: not Apsis's, left alone: {}", entry.path().display());
+                warnings.push(format!(
+                    "{name:?} in the unfinished snapshots folder isn't Apsis's; left alone"
+                ));
+            }
+        }
+        names.sort();
+        (names, warnings)
+    }
+
+    /// Removes every interrupted create's folder (see [`NativeRsync::remove_staging`]). A
+    /// refusal is logged and the rest go on.
+    fn remove_leftovers(&self) {
+        for name in self.leftovers().0 {
+            let started = parse_snapshot_name(&name)
+                .map(|t| t.strftime("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_default();
+            (self.log)(&format!(
+                "removing leftover {} (an interrupted create, started {started})",
+                self.staging_dir().join(&name).display()
+            ));
+            if let Err(error) = self.remove_staging(&name) {
+                (self.log)(&format!("couldn't remove it: {error}"));
+            }
+        }
+    }
+
     /// Removes `snapshots-<tag>/<name>` for each tag folder, where that is a symlink. A tag
     /// folder that is itself a symlink, and anything that isn't a link, are left alone.
     fn remove_tag_links(&self, name: &str) -> Result<()> {
@@ -468,8 +625,8 @@ impl<R: Runner> NativeRsync<R> {
 }
 
 impl<R: Runner> Backend for NativeRsync<R> {
-    /// Reads every `info.json` directly. Folders Timeshift would count as incomplete, and a
-    /// native create's leftovers, are warnings.
+    /// Reads every `info.json` directly. Folders Timeshift would count as incomplete are
+    /// warnings; interrupted creates' folders are [`SnapshotList::leftovers`].
     fn list(&self) -> Result<SnapshotList> {
         let mut warnings = Vec::new();
         let mut snapshots = Vec::new();
@@ -489,22 +646,15 @@ impl<R: Runner> Backend for NativeRsync<R> {
                 comment: Some(info.comments).filter(|c| !c.is_empty()),
             });
         }
-        // One line however many there are; the folder's path goes to the journal, not the pane.
-        if let Ok(mut entries) = fs::read_dir(self.staging_dir())
-            && entries.next().is_some()
-        {
-            eprintln!(
-                "apsis: leftover from an interrupted snapshot in {}",
-                self.staging_dir().display()
-            );
-            warnings.push("leftover from an interrupted snapshot, safe to delete".to_owned());
-        }
+        let (leftovers, odd) = self.leftovers();
+        warnings.extend(odd);
         Ok(SnapshotList {
             device: self.config.device.clone(),
             uuid: self.config.device_uuid.clone(),
             mode: Some(Mode::Rsync),
             snapshots,
             warnings,
+            leftovers,
             // The helper adds what `statvfs` says while the device is mounted.
             usage: None,
         })
@@ -520,8 +670,17 @@ impl<R: Runner> Backend for NativeRsync<R> {
         self.execute(&plan)
     }
 
-    /// Deletes one snapshot: see [`NativeRsync::delete_snapshot`].
+    /// Deletes one snapshot ([`NativeRsync::delete_snapshot`]), or one interrupted create's
+    /// folder ([`NativeRsync::remove_staging`]) when `name` is a leftover and no snapshot.
     fn delete(&self, name: &str) -> Result<()> {
+        if parse_snapshot_name(name).is_none() {
+            return Err(Error::InvalidSnapshotName(name.to_owned()));
+        }
+        // Everything else goes through the snapshot delete, with all its refusals.
+        let is_snapshot = fs::symlink_metadata(self.snapshots_dir().join(name)).is_ok();
+        if !is_snapshot && self.leftovers().0.iter().any(|n| n == name) {
+            return self.remove_staging(name);
+        }
         self.delete_snapshot(name)
     }
 }
@@ -630,9 +789,9 @@ impl fmt::Display for CreatePlan {
 
 /// Timeshift's rsync command for a new snapshot (`RsyncTask.build_script`,
 /// `RsyncTask.vala:175-255`, with the options `create_snapshot_with_rsync` sets,
-/// `Main.vala:1538-1559`), as an argv instead of a shell script. `--delete-excluded` is there
-/// twice, as in Timeshift's. The source is `source` with a trailing `/` (Timeshift: `/`), the
-/// destination `<snapshot>/localhost/`. Apsis adds `--info=progress2` (whole-transfer percent
+/// `Main.vala:1538-1559`), as an argv instead of a shell script. Timeshift passes
+/// `--delete-excluded` twice; once is enough (it's a flag, not an ordered rule). The source
+/// is `source` with a trailing `/` (Timeshift: `/`), the destination `<snapshot>/localhost/`. Apsis adds `--info=progress2` (whole-transfer percent
 /// and time left, on stdout, which Timeshift's log file doesn't get).
 #[must_use]
 pub fn rsync_argv(source: &Path, snapshot: &Path, link_from: Option<&Path>) -> Vec<OsString> {
@@ -674,7 +833,6 @@ pub fn rsync_argv(source: &Path, snapshot: &Path, link_from: Option<&Path>) -> V
         "--exclude-from=",
         snapshot.join(EXCLUDE_FILE).into_os_string(),
     ));
-    argv.push("--delete-excluded".into());
     argv.push(with_slash(source));
     argv.push(with_slash(&snapshot.join(LOCALHOST_DIR)));
     argv
@@ -753,7 +911,6 @@ mod tests {
                 "--link-dest=/mnt/timeshift/snapshots/2026-09-24_10-00-00/localhost/",
                 &format!("--log-file={s}/rsync-log"),
                 &format!("--exclude-from={s}/exclude.list"),
-                "--delete-excluded",
                 "/",
                 &format!("{s}/localhost/"),
             ]

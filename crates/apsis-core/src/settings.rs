@@ -235,18 +235,6 @@ pub enum HomeState {
     All,
 }
 
-impl HomeState {
-    /// The next state, for a key or click that cycles through them.
-    #[must_use]
-    pub fn next(self) -> Self {
-        match self {
-            Self::Excluded => Self::Hidden,
-            Self::Hidden => Self::All,
-            Self::All => Self::Excluded,
-        }
-    }
-}
-
 /// A user whose home folder Timeshift's Users tab lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct User {
@@ -258,7 +246,7 @@ pub struct User {
 
 impl User {
     /// Timeshift's patterns for this user: (exclude, include all, include hidden).
-    fn patterns(&self) -> [String; 3] {
+    pub(crate) fn patterns(&self) -> [String; 3] {
         let hidden = format!("+ {}/.**", self.home);
         if self.encrypted_home {
             let path = format!("/home/.ecryptfs/{}/***", self.name);
@@ -283,27 +271,6 @@ impl User {
         } else {
             HomeState::Excluded
         }
-    }
-
-    /// Sets it like Timeshift does: the state's pattern is added at the end (if it isn't there
-    /// yet) and the other two are removed.
-    pub fn set_home_state(&self, exclude: &mut Vec<String>, state: HomeState) {
-        let [excluded, all, hidden] = self.patterns();
-        let (keep, drop) = match state {
-            HomeState::Excluded => (excluded, [all, hidden]),
-            HomeState::Hidden => (hidden, [excluded, all]),
-            HomeState::All => (all, [excluded, hidden]),
-        };
-        exclude.retain(|p| !drop.contains(p));
-        if !exclude.contains(&keep) {
-            exclude.push(keep);
-        }
-    }
-
-    /// Whether `pattern` is one of this user's home folder patterns.
-    #[must_use]
-    pub fn owns(&self, pattern: &str) -> bool {
-        self.patterns().iter().any(|p| p == pattern)
     }
 }
 

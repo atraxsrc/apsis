@@ -5,22 +5,21 @@
 //! - [`names`]: the shared bus, interface, error and polkit names.
 //! - [`WireList`] and [`WireListWithUsage`]: a snapshot list and the backup disk's usage.
 //! - [`WireConfigInfo`] and [`WireConfig`]: what `ReadConfig` returns and `WriteConfig` takes.
-//! - [`WireListing`]: what `Browse` returns.
+//! - [`crate::job::WireJob`]: what `Job` returns and `JobChanged` carries.
 //! - [`encode_error`] / [`decode_error`]: how errors keep their kind across the bus.
 //! - [`HelperClient`]: the applet's side.
 
 mod client;
 pub mod names;
 
-pub use client::HelperClient;
+pub use client::{HelperClient, JobEvent};
 
 use std::collections::HashMap;
 
 use crate::config::{Config, ConfigInfo};
 use crate::error::{Error, Result};
 use crate::model::{Mode, Snapshot, SnapshotList, Tag, parse_snapshot_name};
-use crate::restore::{Entry, Kind, Listing, Live};
-use crate::settings::{User, parse_lsblk};
+use crate::settings::parse_lsblk;
 use crate::usage::DiskUsage;
 
 /// One snapshot on the bus: `(name, tags, comment)`. Tags are the letters Timeshift's list
@@ -28,9 +27,16 @@ use crate::usage::DiskUsage;
 /// empty comment means none.
 pub type WireSnapshot = (String, String, String);
 
-/// A snapshot list on the bus, D-Bus type `(sssa(sss)as)`: `(device, uuid, mode, snapshots,
-/// warnings)`. Empty strings mean "none"; mode is `btrfs`, `rsync` or empty.
-pub type WireList = (String, String, String, Vec<WireSnapshot>, Vec<String>);
+/// A snapshot list on the bus, D-Bus type `(sssa(sss)asas)`: `(device, uuid, mode, snapshots,
+/// warnings, leftovers)`. Empty strings mean "none"; mode is `btrfs`, `rsync` or empty.
+pub type WireList = (
+    String,
+    String,
+    String,
+    Vec<WireSnapshot>,
+    Vec<String>,
+    Vec<String>,
+);
 
 /// A [`SnapshotList`] as the helper sends it.
 #[must_use]
@@ -57,6 +63,7 @@ pub fn to_wire(list: &SnapshotList) -> WireList {
         mode.to_owned(),
         snapshots,
         list.warnings.clone(),
+        list.leftovers.clone(),
     )
 }
 
@@ -64,10 +71,13 @@ pub fn to_wire(list: &SnapshotList) -> WireList {
 ///
 /// # Errors
 ///
-/// [`Error::Helper`] for an unknown mode or tag, or a snapshot name that isn't
+/// [`Error::Helper`] for an unknown mode or tag, or a snapshot or leftover name that isn't
 /// `YYYY-MM-DD_HH-MM-SS`.
 pub fn from_wire(wire: WireList) -> Result<SnapshotList> {
-    let (device, uuid, mode, snapshots, warnings) = wire;
+    let (device, uuid, mode, snapshots, warnings, leftovers) = wire;
+    if let Some(bad) = leftovers.iter().find(|n| parse_snapshot_name(n).is_none()) {
+        return Err(Error::Helper(format!("bad leftover name {bad:?}")));
+    }
     let mode = match mode.as_str() {
         "btrfs" => Some(Mode::Btrfs),
         "rsync" => Some(Mode::Rsync),
@@ -97,6 +107,7 @@ pub fn from_wire(wire: WireList) -> Result<SnapshotList> {
         mode,
         snapshots,
         warnings,
+        leftovers,
         usage: None,
     })
 }
@@ -106,8 +117,7 @@ pub fn from_wire(wire: WireList) -> Result<SnapshotList> {
 /// signature; unknown keys are ignored.
 pub type WireUsage = HashMap<String, u64>;
 
-/// What `NativeListWithUsage` returns, D-Bus type `((sssa(sss)as)a{st})`: the list and the
-/// usage.
+/// What `List` returns, D-Bus type `((sssa(sss)asas)a{st})`: the list and the usage.
 pub type WireListWithUsage = (WireList, WireUsage);
 
 const USAGE_TOTAL: &str = "total";
@@ -147,27 +157,32 @@ pub fn from_wire_with_usage(wire: WireListWithUsage) -> Result<SnapshotList> {
     Ok(list)
 }
 
-/// A user on the bus: `(name, home, encrypted_home)`.
-pub type WireUser = (String, String, bool);
+/// A [`Config`] on the bus, D-Bus type `(sbbas)`: `(backup device UUID, include_root,
+/// include_home, filters)`.
+pub type WireConfig = (String, bool, bool, Vec<String>);
 
-/// A [`Config`] on the bus, D-Bus type `(sas)`: `(backup device UUID, filters)`.
-pub type WireConfig = (String, Vec<String>);
-
-/// What `ReadConfig` returns, D-Bus type `(s(sas)sa(ssb)as)`: `(config.toml as read or empty,
-/// the config in effect, lsblk JSON, users, import notes)`. The notes are empty unless the
-/// config was imported from Timeshift's settings.
-pub type WireConfigInfo = (String, WireConfig, String, Vec<WireUser>, Vec<String>);
+/// What `ReadConfig` returns, D-Bus type `(s(sbbas)sas)`: `(config.toml as read or empty, the
+/// config in effect, lsblk JSON, notes)`. The notes are empty unless the config was converted
+/// from the old format or imported from Timeshift's settings (not saved yet).
+pub type WireConfigInfo = (String, WireConfig, String, Vec<String>);
 
 #[must_use]
 pub fn config_to_wire(config: &Config) -> WireConfig {
-    (config.backup_device_uuid.clone(), config.filters.clone())
+    (
+        config.backup_device_uuid.clone(),
+        config.include_root,
+        config.include_home,
+        config.filters.clone(),
+    )
 }
 
 #[must_use]
 pub fn config_from_wire(wire: WireConfig) -> Config {
-    let (backup_device_uuid, filters) = wire;
+    let (backup_device_uuid, include_root, include_home, filters) = wire;
     Config {
         backup_device_uuid,
+        include_root,
+        include_home,
         filters,
     }
 }
@@ -179,114 +194,16 @@ pub fn config_from_wire(wire: WireConfig) -> Config {
 /// [`Error::InvalidConfig`] for a `config.toml` text that doesn't parse, [`Error::Helper`] for
 /// output that isn't lsblk's.
 pub fn config_info_from_wire(wire: WireConfigInfo) -> Result<ConfigInfo> {
-    let (text, config, lsblk, users, imported) = wire;
+    let (text, config, lsblk, notes) = wire;
     if !text.is_empty() {
-        Config::parse(&text)?;
+        Config::read(&text)?;
     }
     Ok(ConfigInfo {
         text,
         config: config_from_wire(config),
         devices: parse_lsblk(&lsblk)?,
-        users: users
-            .into_iter()
-            .map(|(name, home, encrypted_home)| User {
-                name,
-                home,
-                encrypted_home,
-            })
-            .collect(),
-        imported,
+        notes,
     })
-}
-
-/// One browse entry on the bus: `(name, kind, size, mtime, mode, uid, gid, owner, link target,
-/// live, live size, live mtime)`. `kind` and `live` are [`Kind::word`] and [`Live::word`].
-pub type WireEntry = (
-    String,
-    String,
-    u64,
-    i64,
-    u32,
-    u32,
-    u32,
-    String,
-    String,
-    String,
-    u64,
-    i64,
-);
-
-/// What `Browse` returns, D-Bus type `(a(sstxuuussstx)b)`: the entries and `truncated`.
-pub type WireListing = (Vec<WireEntry>, bool);
-
-#[must_use]
-pub fn listing_to_wire(listing: &Listing) -> WireListing {
-    let entries = listing
-        .entries
-        .iter()
-        .map(|e| {
-            (
-                e.name.clone(),
-                e.kind.word().to_owned(),
-                e.size,
-                e.mtime,
-                e.mode,
-                e.uid,
-                e.gid,
-                e.owner.clone(),
-                e.target.clone(),
-                e.live.word().to_owned(),
-                e.live_size,
-                e.live_mtime,
-            )
-        })
-        .collect();
-    (entries, listing.truncated)
-}
-
-/// The [`Listing`] the helper sent.
-///
-/// # Errors
-///
-/// [`Error::Helper`] for an unknown kind or live state.
-pub fn listing_from_wire(wire: WireListing) -> Result<Listing> {
-    let (entries, truncated) = wire;
-    let entries = entries
-        .into_iter()
-        .map(|w| {
-            let (
-                name,
-                kind,
-                size,
-                mtime,
-                mode,
-                uid,
-                gid,
-                owner,
-                target,
-                live,
-                live_size,
-                live_mtime,
-            ) = w;
-            Ok(Entry {
-                kind: Kind::from_word(&kind)
-                    .ok_or_else(|| Error::Helper(format!("unknown entry kind {kind:?}")))?,
-                live: Live::from_word(&live)
-                    .ok_or_else(|| Error::Helper(format!("unknown live state {live:?}")))?,
-                name,
-                size,
-                mtime,
-                mode,
-                uid,
-                gid,
-                owner,
-                target,
-                live_size,
-                live_mtime,
-            })
-        })
-        .collect::<Result<_>>()?;
-    Ok(Listing { entries, truncated })
 }
 
 fn non_empty(text: String) -> Option<String> {
@@ -297,18 +214,24 @@ fn non_empty(text: String) -> Option<String> {
 const DEVICE_NOT_FOUND_HEADER: &str = "backup device not found: ";
 /// An encoded [`Error::InvalidInput`]; the reason follows.
 const INVALID_INPUT_HEADER: &str = "refused: ";
-/// An encoded [`Error::Restore`]; the reason follows.
-const RESTORE_HEADER: &str = "restore failed: ";
+/// An encoded [`Error::DeviceRemoved`]: `<device>: <reason>` follows.
+const DEVICE_REMOVED_HEADER: &str = "backup disk removed: ";
+/// An encoded [`Error::Stopped`].
+const STOPPED: &str = "stopped";
 
 /// An error as one message for the bus (a D-Bus error's text, or `Finished`'s `message`).
-/// [`Error::DeviceNotFound`], [`Error::InvalidInput`] and [`Error::Restore`] keep their kind, so
-/// [`decode_error`] gives them back; anything else is its text.
+/// [`Error::DeviceNotFound`], [`Error::DeviceRemoved`], [`Error::InvalidInput`] and
+/// [`Error::Stopped`] keep their kind, so [`decode_error`] gives them back; anything else is
+/// its text.
 #[must_use]
 pub fn encode_error(error: &Error) -> String {
     match error {
         Error::DeviceNotFound { device } => format!("{DEVICE_NOT_FOUND_HEADER}{device}"),
+        Error::DeviceRemoved { device, reason } => {
+            format!("{DEVICE_REMOVED_HEADER}{device}: {reason}")
+        }
         Error::InvalidInput(reason) => format!("{INVALID_INPUT_HEADER}{reason}"),
-        Error::Restore(reason) => format!("{RESTORE_HEADER}{reason}"),
+        Error::Stopped => STOPPED.to_owned(),
         other => other.to_string(),
     }
 }
@@ -322,11 +245,18 @@ pub fn decode_error(message: &str) -> Error {
             device: device.to_owned(),
         };
     }
+    if let Some(rest) = message.strip_prefix(DEVICE_REMOVED_HEADER) {
+        let (device, reason) = rest.split_once(": ").unwrap_or((rest, ""));
+        return Error::DeviceRemoved {
+            device: device.to_owned(),
+            reason: reason.to_owned(),
+        };
+    }
     if let Some(reason) = message.strip_prefix(INVALID_INPUT_HEADER) {
         return Error::InvalidInput(reason.to_owned());
     }
-    if let Some(reason) = message.strip_prefix(RESTORE_HEADER) {
-        return Error::Restore(reason.to_owned());
+    if message == STOPPED {
+        return Error::Stopped;
     }
     Error::Helper(message.to_owned())
 }
@@ -353,6 +283,7 @@ mod tests {
                 snapshot("2026-09-25_11-28-53"),
             ],
             warnings: Vec::new(),
+            leftovers: Vec::new(),
             usage: None,
         }
     }
@@ -423,7 +354,14 @@ mod tests {
         let snapshot = |name: &str, tags: &str| (name.to_owned(), tags.to_owned(), String::new());
         let list = |mode: &str, snapshots| {
             let none = String::new;
-            (none(), none(), mode.to_owned(), snapshots, Vec::new())
+            (
+                none(),
+                none(),
+                mode.to_owned(),
+                snapshots,
+                Vec::new(),
+                Vec::new(),
+            )
         };
         for bad in [
             list("zfs", vec![]),
@@ -435,10 +373,21 @@ mod tests {
     }
 
     #[test]
+    fn leftovers_survive_the_bus_and_must_be_snapshot_names() {
+        let mut list = sample();
+        list.leftovers = vec!["2026-09-29_14-02-11".to_owned()];
+        assert_eq!(from_wire(to_wire(&list)).unwrap().leftovers, list.leftovers);
+        list.leftovers = vec!["../x".to_owned()];
+        assert!(matches!(from_wire(to_wire(&list)), Err(Error::Helper(_))));
+    }
+
+    #[test]
     fn configs_survive_the_bus() {
         let config = Config {
             backup_device_uuid: "uuid".to_owned(),
-            filters: vec!["+ /root/**".to_owned(), "*.mp3".to_owned()],
+            include_root: true,
+            include_home: false,
+            filters: vec!["+ /root/.ssh".to_owned(), "- *.mp3".to_owned()],
         };
         assert_eq!(config_from_wire(config_to_wire(&config)), config);
     }
@@ -446,38 +395,35 @@ mod tests {
     #[test]
     fn config_info_is_parsed_on_arrival() {
         let lsblk = include_str!("../../tests/fixtures/lsblk.json");
-        let users = vec![("user1".to_owned(), "/home/user1".to_owned(), false)];
         let config = Config {
             backup_device_uuid: "uuid".to_owned(),
-            filters: Vec::new(),
+            ..Config::default()
         };
         let wire = (
             config.to_text(),
             config_to_wire(&config),
             lsblk.to_owned(),
-            users.clone(),
             Vec::new(),
         );
         let info = config_info_from_wire(wire).unwrap();
-        assert_eq!(info.saved(), Some(config.clone()));
+        assert_eq!(info.saved_device().as_deref(), Some("uuid"));
         assert_eq!(info.devices.len(), 10);
-        assert_eq!(info.users[0].home, "/home/user1");
+        assert!(!info.unsaved());
         // No file yet (an import): nothing saved.
         let imported = (
             String::new(),
             config_to_wire(&config),
             lsblk.to_owned(),
-            users.clone(),
             vec!["imported".to_owned()],
         );
         let info = config_info_from_wire(imported).unwrap();
-        assert_eq!(info.saved(), None);
+        assert_eq!(info.saved_device(), None);
+        assert!(info.unsaved());
         assert_eq!(info.config, config);
         let bad = (
             "nope = ".to_owned(),
             config_to_wire(&config),
             lsblk.to_owned(),
-            users,
             Vec::new(),
         );
         assert!(matches!(
@@ -498,43 +444,28 @@ mod tests {
     }
 
     #[test]
-    fn restore_errors_survive_the_bus() {
-        let refused = Error::InvalidInput("/proc/x: never".to_owned());
-        assert!(
-            matches!(decode_error(&encode_error(&refused)), Error::InvalidInput(m) if m == "/proc/x: never")
-        );
-        let failed = Error::Restore("rsync failed with exit code 11".to_owned());
-        assert!(
-            matches!(decode_error(&encode_error(&failed)), Error::Restore(m) if m.ends_with("11"))
-        );
+    fn a_removed_disk_and_a_stop_survive_the_bus() {
+        let removed = Error::DeviceRemoved {
+            device: "00000000-0000-0000-0000-000000000000".to_owned(),
+            reason: "rsync exited with code 23: Input/output error (os error 5)".to_owned(),
+        };
+        assert!(matches!(
+            decode_error(&encode_error(&removed)),
+            Error::DeviceRemoved { device, reason }
+                if device.starts_with("0000") && reason.ends_with("(os error 5)")
+        ));
+        assert!(matches!(
+            decode_error(&encode_error(&Error::Stopped)),
+            Error::Stopped
+        ));
     }
 
     #[test]
-    fn listings_survive_the_bus() {
-        let listing = Listing {
-            entries: vec![Entry {
-                name: "hosts".to_owned(),
-                kind: Kind::Link,
-                size: 9,
-                mtime: -5,
-                mode: 0o120_777,
-                uid: 0,
-                gid: 0,
-                owner: "root:root".to_owned(),
-                target: "/x".to_owned(),
-                live: Live::Changed,
-                live_size: 12,
-                live_mtime: 1_700_000_000,
-            }],
-            truncated: true,
-        };
-        assert_eq!(
-            listing_from_wire(listing_to_wire(&listing)).unwrap(),
-            listing
+    fn refusals_survive_the_bus() {
+        let refused = Error::InvalidInput("not deleting x: no info.json".to_owned());
+        assert!(
+            matches!(decode_error(&encode_error(&refused)), Error::InvalidInput(m) if m == "not deleting x: no info.json")
         );
-        let mut bad = listing_to_wire(&listing);
-        bad.0[0].1 = "pipe".to_owned();
-        assert!(matches!(listing_from_wire(bad), Err(Error::Helper(_))));
     }
 
     #[test]

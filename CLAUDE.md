@@ -1,10 +1,11 @@
 # Apsis
 
-Timeshift-style system snapshots for the COSMIC™ desktop.
-A panel applet whose popup looks like a small, clickable terminal, and follows the live COSMIC theme.
+System snapshot and restore for the COSMIC™ desktop.
+A panel applet and a window laid out like Timeshift's, in standard COSMIC widgets that follow the live
+theme (see `docs/APSIS-UI-PROMPT.md`).
 
 - Display name: **Apsis**. Repo, crate and binary: **`apsis`**.
-- Listing line (cosmic-utils): *Timeshift-style system snapshots for the COSMIC™ desktop*
+- Listing line (cosmic-utils): *System snapshot and restore* (no tagline; owner, 2026-09-30)
 - Target: the community collection at https://cosmic-utils.github.io/ (PR to
   `cosmic-utils/cosmic-project-collection`, file `applets.ron`). Only the user opens that PR.
 

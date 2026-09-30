@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Snapshot model, the native rsync backend, Apsis's config and file-level restore.
+//! Snapshot model, the native rsync backend and Apsis's config.
 //!
 //! This crate has no UI dependencies and must stay testable without root or a COSMIC session.
 
@@ -8,11 +8,10 @@ mod backend;
 pub mod config;
 mod error;
 pub mod helper;
+pub mod job;
 mod model;
 pub mod native;
 pub mod progress;
-pub mod restore;
-pub mod retention;
 mod runner;
 pub mod settings;
 pub mod status;

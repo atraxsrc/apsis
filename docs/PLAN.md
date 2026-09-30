@@ -171,6 +171,9 @@ reference.
 
 ## Phase 6a - File-level restore
 
+**Removed in 0.4.0** (owner's product decision, 2026-09-30; see "0.4.0" below and DECISIONS.md).
+Kept here as history.
+
 Open a snapshot, browse its files, copy chosen files and folders back. The same for Timeshift-made
 and Apsis-native rsync snapshots (both `timeshift/snapshots/<name>/localhost/...`). Full-system
 restore is 6b: nothing of it is built here. btrfs mode is refused (different layout; btrfs is
@@ -359,10 +362,12 @@ original, and the journal shows each call.
   writes `.apsis-before-<snapshot>`; refusals and journal lines as specified. Leftovers: see
   Polish below.
 
-## Phase 6b - Full-system restore (not started)
+## Phase 6b - Full-system restore (not started; release 0.5.0)
 
 - Never restore the running root live. Stage the restore, require typing the snapshot name,
-  then reboot. Pop!_OS uses systemd-boot (no GRUB), so no grub-btrfs style boot entries.
+  then reboot.
+- The confirm says plainly whether home folders are rolled back or left untouched (from the
+  snapshot's includes: `/root`, `/home`), owner, 2026-09-30. Pop!_OS uses systemd-boot (no GRUB), so no grub-btrfs style boot entries.
 
 ## Polish
 
@@ -640,3 +645,603 @@ The panel popup is a read-only overview; the window does the work. One slice at 
 6. Copy pass, then theme audit (no hardcoded colours) - done 2026-09-29, see `DECISIONS.md`.
 
 Roadmap, not scheduled: a scheduler (`next` in time, the last/next timeline), undock.
+
+## 0.4.0 - The Timeshift model (built, waiting for the owner's checks)
+
+**Status: design only, answers in 2026-09-30. Waiting for the owner's OK; no code yet.** The
+0.3.1 work is still uncommitted in the working tree.
+
+**Product (owner, 2026-09-30):** Apsis does exactly this, nothing else:
+1. snapshot the system; two include choices, `/root` and `/home` (either, both, neither); the
+   system is always included;
+2. a simple include/exclude filter list (like Timeshift's Filters tab);
+3. delete snapshots;
+4. restore the whole system (0.5.0, Phase 6b).
+
+**UI direction (owner, 2026-09-30; overrides the earlier UI decisions and the old
+`APSIS-UI-PROMPT.md`):** take Timeshift's UI and ease of use over to Apsis. Start simple; add
+features only when users ask. Standard libcosmic widgets and COSMIC theme colours only; no
+terminal styling, no key-hint footer, no dock or rooms, no prompt line. Keyboard shortcuts may
+keep working but are documented only in the man page and README. Kept: the panel applet
+(read-only popup and tooltip) and the single window. The new contract is
+`docs/APSIS-UI-PROMPT.md` (rewritten short; the old one is in git history).
+
+### Order of work
+
+One slice at a time; each ends with `cargo test --workspace`, clippy `-D warnings`, `cargo
+fmt` and a summary. No commits (the owner commits).
+
+1. **Removals:** H; A (file-level restore); keep-last-N and its pruning; the window's rooms,
+   dock, schedule and log rooms. The terminal look stays until slice 3 replaces it, so the app
+   builds and runs between slices.
+   **Done 2026-09-30** (not committed): tests, clippy and fmt pass; see DECISIONS.md.
+2. **Helper:** config v2 and the converter (B); `Helper2` with clean names; `Job` and
+   `JobChanged` (D); `Stop` (E); leftovers, including delete of a leftover (F);
+   `DeviceRemoved` (G); the polkit file (I). The applet is moved onto `Helper2` in the same
+   slice, keeping its current look, so it keeps working.
+   **Done 2026-09-30** (not committed); see DECISIONS.md.
+3. **UI**, in three parts: (a) the main window (toolbar, list, status area, dialogs, stop);
+   (b) settings (tabs); (c) the panel popup in standard widgets, with the running job.
+   **Done 2026-09-30** (not committed); see DECISIONS.md.
+4. Docs, version 0.4.0, CHANGELOG, then the owner's checks on the HP.
+   **Docs and version done 2026-09-30** (not committed). Waiting: the owner's checks on the HP
+   (J, items 1 to 10) and new screenshots.
+
+### A. File-level restore goes
+
+Removed, whole:
+- `apsis-core`: `restore/` (`mod`, `browse`, `dest`, `path`, `plan`, `runner`), `tests/restore.rs`,
+  `Error::Restore`, `RESTORE_HEADER`, `WireListing`/`listing_to_wire`, the client's browse and
+  restore calls, `OP_RESTORE`, `METHOD_BROWSE`, `METHOD_RESTORE`, the three restore action
+  names, `Progress` part-splitting for multi-path restores. From 0.3.1:
+  `Listing::is_excluded_home` (the browser's "home not included" message) and
+  `Restored::from_result`.
+- `apsis-helper`: `restore.rs`, the `Browse` and `Restore` methods, `unix_user` (only restore
+  used it), `native::mount_backup` (only restore used it), `logged_path(s)`.
+- Applet: `browser.rs`, the browser, plan and result views, `R`, the 0.3.1 `[o]pen folder`
+  key and `xdg-open` call for it, the `restoring` progress label, their i18n strings. Enter and
+  double-click on a snapshot open nothing until 0.5.0 (restore).
+- polkit: `browse`, `restore`, `restore-original`.
+- `justfile`: `test-ext4` runs `--test native` only.
+- **Keep last N** (answer 5): `apsis_core::retention` and its tests, the prune preview, `p`,
+  the settings row, the automatic preview after a create. Its cosmic-config field is no longer
+  read (left in old configs, harmless). The **reminder** and the optional **panel label** stay.
+- **Window chrome** (answer to the UI direction): rooms and the dock (`Room`, `1 2 3 4`), the
+  schedule and log rooms, the apsis strip pane, the details pane, the prompt line, the key-hint
+  footer, the help overlay, the pane widget and the settings view's layout test helper
+  (`tallest.rs`). Removed in slice 1 where they're self-contained (rooms, dock, schedule, log,
+  help, keep-N); the rest is replaced in slice 3.
+- Docs: UI.md's browser section, ARCHITECTURE.md's restore section, README, man page,
+  metainfo, desktop `Comment=`, crate descriptions, the .deb's extended description.
+
+Left alone on users' machines: anything already in `~/Apsis-restored/` and any
+`*.apsis-before-<snapshot>` file next to an original. They're the user's files now; the
+CHANGELOG and README say they can be deleted by hand. Apsis never touches them again.
+
+### B. Settings
+
+#### Config v2 (`/etc/apsis/config.toml`)
+
+```toml
+# Written by apsis-helper; change it in Apsis's settings.
+# filters: first match wins, top to bottom; "- " leaves out, "+ " keeps.
+# Built-in excludes (/proc, /dev, caches, ...) always come first.
+version = 2
+backup_device_uuid = "8cecb045-975d-49d0-bd57-1ec9f6eb77b5"
+include_root = true
+include_home = true
+filters = [
+    "+ /home/user1/Videos/keep/***",
+    "- /home/*/Videos/***",
+    "- *.iso",
+]
+```
+
+Changes from v1:
+- `version = 2`.
+- New `include_root`, `include_home` (booleans).
+- `filters`: every entry starts with `+ ` or `- ` (v1 had a bare pattern for an exclude).
+  Explicit signs also fix a v1 trap: rsync reads a bare line starting with `#` or `;` in an
+  exclude file as a comment.
+- No per-user home patterns: those become the two booleans or plain filter rows (below).
+- `backup_device_uuid` unchanged.
+
+Checks (core `config::validate`, again in the helper): the device rule as today; each filter
+`+ ` or `- ` then a body that isn't blank, no control characters, at most 4096 bytes, not
+repeated. No semantic checks (Timeshift has none either).
+
+Wire: `(sbbas)` = (device UUID, include_root, include_home, filters).
+
+#### Loading old configs
+
+- `Config::parse` reads version 2 as is. **Version 1** (0.2.0 to 0.3.x) and the **Timeshift
+  import** (`timeshift.json`'s `exclude`, which is the v1 format) go through one converter,
+  `config::from_v1(filters, users, home_entries) -> (Config, notes)`. The result is used for
+  list and create at once (like today's import), shown in settings as unsaved, and written only
+  on `w`; the written file's `.bak` then holds the v1 text.
+- **The conversion doesn't change what a snapshot holds.** It simplifies only when it can prove
+  the result is the same, else it keeps explicit rows. One exception, from the builder's
+  parent-folder lines (below): a `+` filter that a later `-` filter used to hide (so it did
+  nothing) starts to work. Timeshift's editor appends, so its lists rarely have that; the
+  CHANGELOG says so. The rules:
+  1. Every bare pattern gets `- `; `+ ` patterns stay; order is kept.
+  2. `/root`: root's home state (Timeshift's reading, as today) `everything` -> `include_root
+     = true`, its pattern dropped. `excluded` -> `false`, dropped (the built-in `/root/**`
+     covers it). `hidden files only` -> `false`, and `+ /root/.**` stays as a row in place.
+  3. `/home`: `include_home = true`, all home patterns dropped, only if (a) every non-system
+     user with a home under `/home/` is `everything`, (b) every folder in `/home` except
+     `lost+found` and `.ecryptfs` is one of those homes (the helper reads `/home`; a shared
+     `/home/data` was left out before and would come in), and (c) no filter after a dropped
+     `+ <home>/**` could match inside that home (anything not anchored with `/`, or anchored
+     under that home). Otherwise `include_home = false` and each include stays as a row in
+     place: `+ /home/user1/**`, `+ /home/user2/.**` (this is how **hidden files only**
+     migrates: it becomes a visible `+ <home>/.**` row the user can keep or remove). A plain
+     `/home/<user>/**` exclude is dropped (the built-in `/home/*/**` covers it).
+  4. ecryptfs users: their `/home/.ecryptfs/<name>/***` patterns follow rule 3 as if they were
+     the home. Decrypted contents stay out, as today (the builder adds those first).
+  5. A user whose home is outside `/root` and `/home` and was `excluded` gets `- <home>/**`,
+     so it stays out (0.4.0 has no per-user step; such a home is otherwise system files).
+
+  The converter needs the users (`/etc/passwd`) and the entries of `/home`, so the helper
+  passes them wherever it loads the config (`native::open` passes no users today, since they
+  only fed the notes).
+- Notes, shown at the top of the settings page (a dimmed box) until saved:
+
+  ```
+  settings from Apsis 0.3 (not saved yet; w saves)
+    /root   excluded
+    /home   included (every home was "everything")
+    kept as filters  + /home/user2/.**  (user2: hidden files only)
+  ```
+
+- Existing snapshots: untouched. They list, delete and `--link-dest` as before.
+- Downgrade: 0.3.x refuses a v2 file (`version 2 (this Apsis reads 1)`). Documented fix in
+  the CHANGELOG, for the user to run: `sudo cp /etc/apsis/config.toml.bak
+  /etc/apsis/config.toml`.
+- Fresh config (no `config.toml`, no `timeshift.json`): device none, filters empty, include
+  defaults `/root` on, `/home` off (answer 1).
+- `ReadConfig` no longer sends the users list (the UI has no home rows): `(s(sbbas)sas)` =
+  (file text, config in effect, lsblk JSON, notes).
+
+#### rsync filter list (`native::exclude::for_backup`)
+
+Same Timeshift 24.01.1 order, with the user part replaced:
+
+1. Built-in defaults, fstab mounts, default extras (unchanged).
+2. Decrypted ecryptfs contents (unchanged).
+3. The user's filters, in order, as written (`+ x` / `- x`). For each `+` filter that is an
+   absolute path, its parent folders are added just before it as `+ <dir>/` (folder only, not
+   contents), so rsync reaches a kept folder inside a left-out one (`+
+   /home/user1/Videos/keep/***` with `/home` off needs `+ /home/user1/Videos/` first; rsync
+   never looks inside an excluded folder). Only in `exclude.list`, not in the config. Not
+   Timeshift's behaviour; noted in DECISIONS.
+4. `+ /root/**` if `include_root`, `+ /home/**` if `include_home`.
+5. The built-in `/root/**`, `/home/*/**`, then `/timeshift/*` (unchanged).
+
+Removed: the per-user "exclude homes without an include" step (steps 4 and 5 cover it; see
+rule 5 above for homes elsewhere). So a user's `- /home/*/Videos/***` beats `/home` on, and a
+user's `+ ...` beats `/home` off; a `+` can't bring back a built-in exclude (they come first).
+
+#### Settings (Timeshift's tabs)
+
+A page in the same window (single window): the Settings toolbar button opens it, a back
+button returns to the list. Three tabs (libcosmic `tab_bar` / segmented button): **Location**,
+**Include**, **Filters**. Changes are kept until **Save** (the helper writes `config.toml`,
+polkit `configure`, one password, cached); **Cancel** drops them. Leaving with unsaved
+changes asks once (Save / Discard / Cancel dialog).
+
+```
+┌ Apsis ───────────────────────────────────────────────────── ✕ ┐
+│ ← Settings                                     [Cancel] [Save]│
+│  ( Location )   Include    Filters                            │
+│ ───────────────────────────────────────────────────────────── │
+│  Select the disk where snapshots are saved.                   │
+│                                                               │
+│  ◉  sdb1   ext4    931.5 GB   Backup                          │
+│  ○  sdc1   ext4    120.0 GB   USB                             │
+│  ○  sda3   btrfs   476.9 GB   (system disk)                   │
+│     sdd1   ntfs     64.0 GB   can't hold snapshots (greyed)   │
+│                                                               │
+│  Snapshots are saved in timeshift/snapshots on this disk.     │
+└───────────────────────────────────────────────────────────────┘
+
+│  Location   ( Include )   Filters                             │
+│  The system is always included.                               │
+│                                                               │
+│  [✓] /root   the root user's home folder                      │
+│  [ ] /home   every user's home folder                         │
+│                                                               │
+│  Home folders hold documents and settings. A full restore     │
+│  puts included ones back as they were in the snapshot.        │
+
+│  Location    Include   ( Filters )                            │
+│  ┌─────┬────────────────────────────────────────────────┐     │
+│  │  +  │ /home/user1/Videos/keep/***                    │ ◀ selected
+│  │  -  │ /home/*/Videos/***                             │     │
+│  │  -  │ *.iso                                          │     │
+│  └─────┴────────────────────────────────────────────────┘     │
+│  [Add Folder] [Add File] [Add Pattern] [Remove] [Move Up] [Move Down] │
+│  + includes, - excludes. The first matching line wins, top    │
+│  to bottom. Built-in excludes (/proc, /dev, caches) come      │
+│  first.                                                       │
+```
+
+- Location: a radio list of devices from `ReadConfig`'s lsblk (as the 0.3 device row, now
+  all at once); unusable ones shown dimmed with the reason, not selectable. The saved device
+  can be unplugged and still shown (`not connected`).
+- Include: two libcosmic checkboxes (standard widgets are allowed now). Fresh installs:
+  `/root` on, `/home` off (answer 1).
+- Filters: a list; each row a `+`/`-` toggle (a small segmented button or dropdown, `+ Include`
+  / `- Exclude`) and the pattern. Buttons: **Add Folder**, **Add File** (the xdg portal picker,
+  libcosmic `dialog::file_chooser`, as the user), **Add Pattern** (a dialog with a text field
+  and the +/- choice), **Remove**, **Move Up**, **Move Down** (answer 6; the last four act on
+  the selected row, dimmed without one). New rows go at the top and are selected.
+- Picker patterns as designed before: folder `<path>/***`, file `<path>`, rsync wildcards
+  (`*`, `?`, `[`, `\`) backslash-escaped; sign `-`, except `+` inside `/root` or `/home` while
+  that include is off; `/run/user/<uid>/doc/` paths refused. `/root` can't be browsed by the
+  user; its paths are typed with Add Pattern.
+- A bad pattern: the Add Pattern dialog stays open with the reason under the field.
+- The reminder and panel label (kept, answer 5): a fourth tab, **Misc** (open question 1).
+- Removed: per-user home rows, `HomeState` cycling, `is_home_pattern`, the users in
+  `ReadConfig`, `w`/`r`/`space` as the way to edit.
+
+### Main window (Timeshift's)
+
+```
+┌ Apsis ─────────────────────────────────────────────────── ☰  ✕ ┐
+│ [+ Create]  [↺ Restore]  [🗑 Delete]  [⚙ Settings]              │
+├────────────────────────────────────────────────────────────────┤
+│  Snapshot             Comment                                  │
+│  2026-09-30 14:02     before driver update                     │
+│▌ 2026-09-29 06:12                                              │ ◀ selected
+│  2026-09-28 18:01     pre-nvidia                               │
+│  2026-09-27 14:02     Interrupted snapshot, removed by the     │ (dimmed)
+│                       next one                                 │
+├────────────────────────────────────────────────────────────────┤
+│  Last snapshot   12 hours ago                                  │
+│  Backup disk     sdb1   372 GB used · 224 GB free              │
+│                  ████████████████████░░░░░░░░░░░░              │
+└────────────────────────────────────────────────────────────────┘
+
+while a job runs, the status area:
+├────────────────────────────────────────────────────────────────┤
+│  Creating snapshot · 58% · 3 min left                  [ Stop ] │
+│  ███████████████████████░░░░░░░░░░░░░░░░░                       │
+└────────────────────────────────────────────────────────────────┘
+```
+
+(The toolbar icons are the theme's symbolic icons, not characters; the mock only marks them.)
+
+- **Toolbar:** labelled buttons with symbolic icons, in a libcosmic header or a row under it.
+  **Create** is enabled when a backup device is set and connected and no job runs. **Delete**
+  needs a selection and no job. **Settings** always. **Restore** isn't shown until 0.5.0 (open question 2). The header's menu (☰) has Refresh and About Apsis (libcosmic's about widget).
+- **List:** columns Snapshot (date and time, local) and Comment (cut with `…`, full in the
+  tooltip). Newest first. Click selects; Ctrl/Shift-click selects several (multi-select
+  replaces space/`J` marks). Double-click does nothing in 0.4.0 (0.5.0: restore). libcosmic's
+  `table` widget if the pinned revision has it, else a column of selectable rows; checked at
+  the start of slice 3a. States in the list area: loading (spinner), empty ("No snapshots
+  yet. Click Create to make one."), no device ("No backup disk chosen. Choose one in
+  Settings." with a button), disk not connected, no helper, error (the reason and a Retry
+  button).
+- **Leftover rows** (answer 2): dimmed, one per leftover, "Interrupted snapshot, removed by the
+  next one" and the time it started. Selectable; Delete removes it through the normal delete
+  path (F).
+- **Create:** a dialog, "Create snapshot", one optional Comment field, a dimmed line with what
+  it includes (C), [Cancel] [Create]. Then polkit asks for the password.
+- **Delete:** a dialog, "Delete 2 snapshots?", their labels (`09-30 14:02 "before driver
+  update"`), "This can't be undone.", [Cancel] [Delete] (destructive button style). Several go
+  one at a time through the helper, as the bulk delete does now; the status area says
+  "Deleting 2 of 4…". It stops at the first failure and says which were deleted.
+- **Status area** (bottom): idle, "Last snapshot" (age, with the reminder's warning colour and
+  "(over 7 days)" when due) and "Backup disk" (device, used, free, a libcosmic progress bar;
+  warning / destructive colour under 10% / 5% free). "Not connected" when the disk is gone.
+  While a job runs (this window's or another's, D): its label, percent and time left, a
+  progress bar, and **Stop** for a create (E). After a job: one line with the result ("Snapshot
+  created", "Create stopped", "Create failed: backup disk removed", with the helper's reason in
+  the tooltip) until the next action.
+- **Keyboard** (man page and README only, not shown in the UI): Ctrl+N create, Delete delete,
+  Ctrl+R / F5 refresh, Ctrl+, settings, Ctrl+A select all, Esc closes a dialog or the settings
+  page. The single-letter commands (`c`, `d`, `x`, `s`, ...) go with the prompt line.
+- Colours: theme only (accent for selection and bars as libcosmic draws them; warning and
+  destructive roles for the reminder and low space). No hard-coded colours, no monospace.
+- Window size: opens at about 720 x 520, minimum 640 x 440 as now; a layout test checks the
+  toolbar, a few rows and the status area fit the minimum.
+
+### C. What a snapshot includes (Create dialog)
+
+The 0.3.1 `home  included / hidden files only / excluded` line becomes one dimmed line in the
+Create dialog, from the config in effect (`ReadConfig` when the dialog opens):
+
+```
+Includes the system, /root and 3 filters.
+Includes the system, /root, /home and 1 filter.
+Includes the system only.
+```
+
+No line if `ReadConfig` fails. `HomeState::summary`, `ConfigInfo::home_state_of` and the
+`$HOME` matching go.
+
+### D. Job status
+
+The helper keeps the current job next to its one lock, in `State` (one `Mutex<Job>` beside the
+existing `running` flag; `State::begin(kind)` sets it, `Running`'s drop clears it). Nothing new
+takes the lock.
+
+- `Job() -> (sssxdx)`: `(kind, state, snapshot, started, percent, eta_seconds)`. `kind`:
+  `create`, `delete`, `list`, `configure`, or `""` when idle. `state`: `running` or
+  `stopping`. `snapshot`: the name being made or deleted (`""` until a create has planned
+  it). `started`: Unix seconds. `percent` / `eta_seconds`: `-1` while unknown. polkit `list`,
+  not interactive.
+- `JobChanged((sssxdx))`: broadcast (no destination), on start, when the name is known, on
+  each progress step (at most every 500 ms, the end always), on `stopping`, and once at the end
+  with `state` = `done`, `failed` or `stopped` (then `Job()` says idle).
+- Privacy: the broadcast carries no comment, caller, error text or path; any local process can
+  see that a create runs, its snapshot name (a time) and its progress. The error text still
+  goes only to the starter, in `Finished`.
+- `Progress` is folded into `JobChanged` (answer 4): one path for the window that started
+  the job and for everyone else. `Finished(s op, b ok, s message)` stays, sent only to the
+  starter.
+- Applet, window and popup alike: subscribe to `JobChanged` at start (a match rule; it doesn't
+  start the helper). On open, ask `NameHasOwner` on the system bus first and call `Job()` only
+  if the helper runs, so opening the popup never starts a root process just to hear "idle". A
+  window opened mid-job shows it in the status area ("Creating snapshot · 42% · 3 min left",
+  "Deleting 09-27 09:12…"), Create and Delete wait, and it lists when the job ends. The 0.3.1
+  busy poll (list again every 3 s) is replaced by this; `kind` `list`/`configure` still reads
+  `busy` (they last a second).
+- The helper leaving the bus mid-job (crash): `NameOwnerChanged` ends it as `failed`, then a
+  list.
+- Popup: one line and a progress bar while a job runs or has just ended ("Creating snapshot ·
+  42%", then "Snapshot created", "Create failed" or "Create stopped", dimmed) until it closes.
+  Read-only: no Stop there; "Open Apsis" goes to the window, which has it.
+
+### E. Stop (create only)
+
+`Stop(s snapshot)`: stops the running create if its snapshot is `snapshot` (so a confirm typed
+for one job can't stop the next). Refused: nothing running, not a create, another name, or too
+late (see commit point). Returns once stopping has begun; the create's own `Finished` follows.
+
+Core (`apsis-core`, no root, testable):
+- `native::Cancel` (`Arc`), a small state machine: `Armed` -> `Stopping` or `Committed`.
+  `request()` moves `Armed` to `Stopping`; `commit()` moves `Armed` to `Committed` right before
+  the rename into `snapshots/`. Whichever comes first wins, so a stop can never race the
+  rename: after `Committed`, `Stop` answers "finishing, can't be stopped now" and the snapshot
+  is kept.
+- `QuietRunner` starts rsync in its own process group (`CommandExt::process_group(0)`; ionice
+  and nice exec into rsync, so the group is rsync and the children it forks) and registers the
+  group with the `Cancel`.
+- Kill: `SIGTERM` to the group (`rustix::process::kill_process_group`), then `SIGKILL` to the
+  group after 10 s if the leader hasn't exited. The pid can't be reused under us: the waiting
+  thread first waits with `waitid(WEXITED | WNOWAIT)` (leader exited but not reaped, so its
+  pid and group id stay taken), marks the group dead under the `Cancel`'s lock, and only then
+  reaps. The killer takes the same lock and skips a dead group. rustix 1.1 has both calls
+  (checked); no new crate.
+- `execute` checks the `Cancel` before rsync, after rsync, and commits before the rename. A
+  stopped create returns `Error::Stopped`.
+- Staging removal, for a stop and for every failed create (today it's `fs::remove_dir_all`):
+  the delete's rules. The name is a snapshot name; `timeshift/`, `apsis-staging/` and `<name>/`
+  opened with `openat(O_NOFOLLOW | O_DIRECTORY)` from the mount; nothing mounted at or below it
+  (`mounts_under`); removed with `prune::remove_at` (no symlink followed, stops at another
+  filesystem); then `apsis-staging/` itself if empty. Logged with the path.
+
+Helper:
+- The lock stays held from the stop request until the staging folder is gone; meanwhile
+  `Job()` says `stopping`, every other call gets `Busy`.
+- Journal: `stop "2026-09-30_14-02-11" for :1.42`, `SIGTERM to process group 12345`, `SIGKILL
+  after 10 s` (if needed), `removed .../apsis-staging/2026-09-30_14-02-11`, `stopped`.
+- polkit (answer 3): the **uid** that started the job may stop it without a prompt (the helper
+  keeps the starter's uid from `GetConnectionUnixUser`, so `unix_user` stays when restore
+  goes; the stopper's uid is asked the same way). Any other uid needs the new `stop` action,
+  `auth_admin_keep`. The uid is never broadcast.
+- A process stuck in the kernel (disk gone, `D` state) may ignore even `SIGKILL` for a while;
+  the job stays `stopping` until it goes, and the UI keeps saying `stopping…`.
+- `Finished("create", false, "stopped")` (new `STOPPED_HEADER` in `encode_error`).
+
+UI (window only; the popup has none):
+- **Stop** button at the end of the status area's progress line, while a create runs, once its
+  snapshot name is known (under a second in). Also in a window that didn't start it.
+- Confirm dialog: "Stop the snapshot? What was copied so far is deleted." [Keep Going]
+  [Stop] (destructive style).
+- Status: "Stopping…" with an indeterminate bar, then "Create stopped". Too late: "It can't be
+  stopped now: the snapshot is being finished", and it ends as "Snapshot created".
+- Deletes: no stop (a half-deleted snapshot is worse than either end). A bulk delete stops at
+  the first failure, as now.
+
+**Restore in 0.5.0:** stoppable while it prepares (checks, the dry run, anything staged on the
+backup side), not once it writes to the live system: a half-restored system is worse than
+either end. 6b already plans "stage, then apply at reboot"; the apply has no stop, and the UI
+shows none then.
+
+### F. Leftovers from interrupted creates
+
+A create killed with the helper (power loss, crash, `systemctl stop`) leaves
+`timeshift/apsis-staging/<name>/`. Today the list only warns.
+
+- **Automatic** (answer 2): at the start of every create, holding the lock,
+  after the read-write mount and before rsync, each entry in `apsis-staging/` is removed if its
+  name is a snapshot name and it's a real folder, with the staging removal rules from E. Anything
+  else there is left and logged. Journal: `removed leftover .../apsis-staging/
+  2026-09-29_14-02-11 (an interrupted create, started 2026-09-29 14:02:11)`. Space comes back
+  before the new copy starts.
+- **Visible**: `List` returns the leftover names (a new `as` in the list tuple, replacing the
+  0.3.0 warning string). The window's list shows one dimmed row per leftover (main window
+  mock). The time is the interrupted create's start (from the name); when it was cut off isn't
+  recorded.
+- **Delete on that row** (answer 2): the normal `Delete(s name)`, polkit `delete`. The helper
+  lists afresh; a name in `snapshots/` is a snapshot delete as now, a name among the leftovers
+  (and not in `snapshots/`) is removed from `apsis-staging/` with the staging removal rules
+  (E). Journal: `delete leftover "2026-09-29_14-02-11" for :1.42: removed .../apsis-staging/
+  2026-09-29_14-02-11`. No new method.
+
+### G. "Backup disk removed" from the helper
+
+- New `Error::DeviceRemoved { device, reason }`. When a create or delete fails, the helper
+  checks `/dev/disk/by-uuid/<uuid>` (the device it mounted); gone -> this error instead of the
+  raw one. Encoded `device removed: <uuid>: <reason>` in `Finished`.
+- Applet: "Create failed: backup disk removed" / "Delete failed: backup disk removed" in the
+  status area; the reason (rsync's `Input/output error (os error 5)`) in its tooltip. The 0.3.1 inference
+  (`CreateFailure::of`) goes.
+- The unmount after a yanked disk: if `umount` fails, `umount --lazy`, so the next plug-in
+  mounts cleanly. Logged.
+
+### H. rsync argv
+
+The second `--delete-excluded` (after `--exclude-from`) is removed. rsync's behaviour doesn't
+change (it's a flag, not an order-dependent rule). Tests and the doc comment ("twice, as in
+Timeshift") updated.
+
+### Helper interface after 0.4.0
+
+Removing and changing methods is a breaking change, so the interface becomes
+`io.github.atraxsrc.Apsis.Helper2` (names.rs: "a breaking change gets a new interface"); bus
+name, object path and unit stay. With the new version, the Timeshift-era `Native` prefixes go
+(answer 4).
+
+| method / signal | polkit | |
+|---|---|---|
+| `List() -> ((sssa(sss)asas)a{st})` | `list` | was `NativeListWithUsage`; adds leftovers |
+| `Create(s comment)` | `create` | was `NativeCreate`; removes leftovers first; `Finished("create", ..)` |
+| `Delete(s name)` | `delete` | a snapshot, or a leftover (F); `Finished("delete", ..)` |
+| `Stop(s snapshot)` | `stop`, not asked of the starter's uid | new |
+| `Job() -> (sssxdx)` | `list`, not interactive | new |
+| `ReadConfig() -> (s(sbbas)sas)` | `list` | no users; v2 config |
+| `WriteConfig(s expected, (sbbas) config) -> s` | `configure` | v2 config |
+| `JobChanged((sssxdx))` | - | new, broadcast |
+| `Finished(s op, b ok, s message)` | - | unchanged, to the starter |
+| errors | | `NotAuthorized`, `Busy`, `InvalidInput`, `Failed`, `DeviceNotFound`, `Changed` (under `Helper2.Error`) |
+
+Removed: `NativeListWithUsage`, `NativeCreate`, `Browse`, `Restore`, `Progress`. The bus policy
+file names `Helper2`. A 0.3.x panel still running after the upgrade gets `UnknownInterface`
+until it's re-added (log out and in); `just deb-install` already prints that.
+
+### I. polkit actions after 0.4.0
+
+| action | used by | allow_active | allow_inactive, allow_any |
+|---|---|---|---|
+| `io.github.atraxsrc.Apsis.list` | `List`, `Job`, `ReadConfig` | `yes` | `auth_admin` |
+| `io.github.atraxsrc.Apsis.create` | `Create` | `auth_admin_keep` | `auth_admin` |
+| `io.github.atraxsrc.Apsis.delete` | `Delete` (snapshots and leftovers) | `auth_admin_keep` | `auth_admin` |
+| `io.github.atraxsrc.Apsis.stop` (new) | `Stop`, except from the starter's uid | `auth_admin_keep` | `auth_admin` |
+| `io.github.atraxsrc.Apsis.configure` | `WriteConfig` | `auth_admin_keep` | `auth_admin` |
+
+Removed: `browse`, `restore`, `restore-original`. 0.5.0 would add one for the full restore,
+`auth_admin` (asked every time), like `restore-original` was. Five actions; the resource test
+counts them.
+
+### Root-level and destructive, for review
+
+- **Kill**: the helper (root) sends `SIGTERM`/`SIGKILL` to rsync's process group, only the
+  group it started, only while its leader is known unreaped (E).
+- **New root delete path**: `apsis-staging/<name>` on stop, on failure and at the start of a
+  create (leftovers), with the snapshot delete's rules. `snapshots/` is never touched by it.
+- **Staging failures now use the safe walk** instead of `remove_dir_all`.
+- **Config rewrite** to v2 on `w` (`.bak` keeps v1). Before `w`, the converted config is used
+  for creates; the conversion keeps snapshot contents the same (B).
+- **Broadcast signal** readable by any local process (D, privacy line).
+- **`umount --lazy`** after a failed unmount of a removed disk (G).
+- **What a snapshot holds** changes only when the user flips an include or edits filters, and
+  in one conversion case: a `+` filter a later `-` hid now works (B, parent-folder lines).
+
+### J. Tests
+
+Unit and integration tests, no root (run by Claude):
+- Config: v2 round trip; v2 checks (sign required, blank, control characters, length,
+  duplicates); version 3 refused; v1 conversion: root all / excluded / hidden, all users
+  everything -> `include_home`, mixed, hidden, a shared folder in `/home` (stays explicit), a
+  filter after a dropped include (stays explicit), ecryptfs, a home outside `/home`, bare ->
+  `- `, a `#pattern`, a `+` hidden by a later `-` (the documented exception); the import from
+  the `config-rsync.json` fixture.
+- Filter builder: order (defaults, ecryptfs, user filters with parent `+ dir/` lines, includes,
+  built-ins); `exclude.list` for the converted fixture equals today's in what it keeps (checked
+  by running rsync `--dry-run` with both lists on a temp tree with `/root`, `/home/<users>`,
+  `/home/shared` and hidden files, comparing the file lists).
+- Picker patterns: folder `/***`, file, escaping of `* ? [ \`, the default sign, refused portal
+  path, relative path refused.
+- argv: one `--delete-excluded`.
+- Stop, on temp folders with real processes: a group of `sh -c 'sleep 60 & sleep 60'` dies on
+  `SIGTERM`; one that ignores `SIGTERM` (`trap '' TERM`) dies on `SIGKILL` after a test-sized
+  timeout; stop before spawn; stop after commit refused; no signal after the group is reaped.
+- Staging removal on temp trees (also through `Delete` of a leftover): symlinked
+  `apsis-staging/` refused, a symlink inside not
+  followed, a non-snapshot name left alone, a fake mountinfo entry refuses it; leftovers listed
+  and removed by the next create (fake runner).
+- Helper: `Helper2` introspection (7 methods, 2 signals, the new types); names; policy file (5
+  actions, defaults as in I); `State` job transitions (begin, name, progress, stopping, end);
+  `JobChanged` has no comment; the starter exemption (a pure `stop_needs_auth`); `DeviceRemoved`
+  encode/decode; the by-uuid check with a temp folder standing in for `/dev/disk/by-uuid`.
+- Applet (messages into the model, no display): toolbar enablement (no device, no selection,
+  job running), multi-select and the delete dialog's labels, Create dialog and its includes
+  line, settings tabs (device pick, include toggles, +/- flip, add/remove/move up/down, new
+  rows at the top, unsaved/Save/Discard), picker-to-pattern, job messages (running, stopping,
+  done, failed, stopped, helper gone) in window and popup, the Stop dialog and too-late
+  copy, leftover rows and their delete, disk-removed copy, the shortcuts; layout test at
+  640 x 440 for the main window and each settings tab (`APSIS_LAYOUT_TEST=1`).
+- `just test-ext4` (the user mounts the image): create, stop mid-rsync, leftover removal, on
+  ext4.
+
+On the HP (`apsis-test` over SSH; root steps are the user's to run):
+1. Upgrade with `just deb-install` over 0.3.1 with a v1 config (one with a hidden-files user
+   if possible): notes shown, list and create work before `w`, `w` writes v2, `.bak` is v1.
+2. Create with `/root` and `/home` each on and off: the new snapshot's `exclude.list`, the
+   folders present, `--link-dest` still hard-linking (`du -sh` of the new snapshot).
+3. Stop mid-create from the starting window and from a reopened window (both no password,
+   same uid), and from another user's session (password): journal lines, `pgrep -a rsync`
+   empty, staging gone, list works at once.
+4. Stop escalation: `sudo kill -STOP <rsync pid>`, then stop in the UI: `SIGKILL` after 10 s.
+5. Leftover: start a create, `sudo systemctl kill apsis-helper`; the list shows the dimmed
+   row; Delete on it removes it (journal); a second leftover is removed by the next create.
+6. Unplug the disk mid-create: `create failed · backup disk removed`; replug lists; the mount
+   point is clean (`findmnt /run/apsis/backup` empty).
+7. Job status: create from the window, open the popup (progress line); close the window mid-job
+   and reopen it (shows the job); `gdbus monitor --system --dest io.github.atraxsrc.Apsis.Helper`
+   as the user sees `JobChanged` (the bus lets an unprivileged process receive the broadcast).
+8. `pkaction --verbose --action-id io.github.atraxsrc.Apsis.stop`; `browse`, `restore`,
+   `restore-original` gone.
+9. Pickers open (portal) and add the right patterns; a typed `/root` pattern; the window,
+   settings tabs and popup follow a light and a dark theme and an accent change live.
+10. `~/Apsis-restored/` and any `.apsis-before-*` files are untouched.
+
+### Docs
+
+UI.md rewritten for the new window, settings and popup (browser, rooms, prompt line and
+key-hint sections out); ARCHITECTURE.md (interface, config, privilege model, restore section
+out); README and man page (the keyboard shortcuts live only there); metainfo `<summary>`
+"System snapshot and restore" (AppStream requires one; answer 7); desktop entries without a
+tagline `Comment=`; crate descriptions and the .deb's short description "System snapshot and
+restore" (Debian requires one); "Timeshift-style" removed everywhere, including CLAUDE.md's
+listing line (answer 7; the collection draft in RELEASE.md too); CHANGELOG (downgrade note,
+restored-files note, keep-last-N removed); SECURITY.md (0.4.x); `docs/APSIS-UI-PROMPT.md`
+rewritten 2026-09-30 as the short Timeshift-style contract. Screenshots retaken by the owner.
+
+### Answers (owner, 2026-09-30)
+
+1. Defaults: `/root` on, `/home` off for fresh installs. The 0.5.0 restore confirm must say
+   whether home folders are rolled back or left untouched (added to Phase 6b).
+2. Leftovers: removed automatically at the next create, and shown as a dimmed row; Delete on
+   that row removes it through the normal delete path.
+3. Stop: the uid that started the job stops it without a prompt; anyone else needs
+   `auth_admin_keep` (`stop`).
+4. `Helper2` with clean method names.
+5. Keep-last-N and its pruning are removed. The reminder and the optional panel label stay.
+6. Filters: Move Up / Move Down buttons; new rows at the top.
+7. No tagline; the app is "Apsis". Where a summary is required (AppStream, Debian): "System
+   snapshot and restore". "Timeshift-style" goes everywhere.
+
+Also kept, as proposed: the Timeshift import on first run (through the converter), and the
+pickers through libcosmic's `xdg-portal` feature (ashpd is in `Cargo.lock`; if cargo needs a
+download, I ask first).
+
+### Open questions (answered 2026-09-30, all as recommended)
+
+1. The reminder and panel label are set on a fourth settings tab, **Misc**: "Remind me when
+   the newest snapshot is older than [7] days" (0 = off) and "Show last snapshot age and disk
+   use next to the panel icon".
+2. The Restore button isn't shown until 0.5.0 builds it.
+3. The popup keeps its content (last snapshot, disk bar, newest 5, the running job, Open Apsis
+   and Refresh) in standard libcosmic widgets; the `~/apsis $ status` header and bordered
+   monospace panes go.
+
+### Done when
+
+`cargo test --workspace`, clippy, fmt, `just test-ext4`; the HP checks 1 to 10 pass; nothing in
+the tree mentions file restore, `Apsis-restored` or home modes except history (DECISIONS.md,
+CHANGELOG, this file's 6a); docs updated; version 0.4.0.

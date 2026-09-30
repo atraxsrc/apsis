@@ -17,7 +17,9 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use apsis_core::native::{self, CreatePlan, NativeConfig, NativeRsync, QuietRunner, exclude};
+use apsis_core::native::{
+    self, Cancel, CreatePlan, NativeConfig, NativeRsync, QuietRunner, exclude,
+};
 use apsis_core::{Backend, Error, RunOutput, Runner, Tag};
 use jiff::Zoned;
 use jiff::tz::{Offset, TimeZone};
@@ -114,7 +116,7 @@ fn config(lab: &Lab, dry_run: bool) -> NativeConfig {
         source: lab.source.clone(),
         sys_uuid: SYS_UUID.to_owned(),
         sys_distro: "Pop 24.04 (noble)".to_owned(),
-        exclude: exclude::for_backup(&[], "", &[]),
+        exclude: exclude::for_backup(&[], false, false, "", &[]),
         dry_run,
     }
 }
@@ -426,7 +428,10 @@ fn timeshift_can_read_a_native_snapshot() {
         assert_eq!(s.description, "apsis: native, \"quoted\"");
         assert!(!s.live);
         assert_eq!(s.kind, "rsync");
-        assert_eq!(s.exclude_list, exclude::for_backup(&[], "", &[]));
+        assert_eq!(
+            s.exclude_list,
+            exclude::for_backup(&[], false, false, "", &[])
+        );
         let log = fs::read(snapshots.join(FIRST).join("rsync-log")).unwrap();
         assert_eq!(
             s.file_count,
@@ -475,42 +480,6 @@ fn info_json_is_written_as_timeshift_writes_it() {
     assert_eq!(info.created, 1_790_116_435);
     assert_eq!(info.file_count, 1_218_050);
     assert_eq!(info.to_text(), text);
-}
-
-/// The same `exclude.list` from the settings it was made with. Those are read back from the
-/// list: the user filters are everything between the fixed extras and the home entries
-/// (24.01.1's order), `/recovery/*` comes from Pop!_OS's fstab, and the two `+ /home/userN/**`
-/// lines were two different homes before redaction (the builder drops exact duplicates).
-#[test]
-fn exclude_list_is_built_as_timeshift_builds_it() {
-    let path = Path::new(FIXTURE_REPO)
-        .join("timeshift/snapshots")
-        .join(FIXTURE_NAME)
-        .join("exclude.list");
-    let expected = fs::read_to_string(path).unwrap();
-    let user: Vec<String> = [
-        "+ /root/**",
-        "+ /home/user1/**",
-        "/var/lib/libvirt/**",
-        "+ /home/user2/**",
-    ]
-    .map(str::to_owned)
-    .to_vec();
-    let fstab = "UUID=0000 / ext4 noatime,errors=remount-ro 0 0\n\
-        PARTUUID=0001 /boot/efi vfat umask=0077 0 0\n\
-        PARTUUID=0002 /recovery vfat umask=0077 0 0\n\
-        /dev/mapper/cryptswap none swap defaults 0 0\n";
-    let passwd = "root:x:0:0:root:/root:/bin/bash\n\
-        daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n\
-        user1:x:1000:1000::/home/user1:/bin/bash\n\
-        user2:x:1001:1001::/home/user2:/bin/bash\n\
-        nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n";
-    let users = exclude::home_users(passwd, Path::new("/nonexistent-apsis-root"));
-    let text = exclude::to_text(&exclude::for_backup(&user, fstab, &users));
-    let redacted = text
-        .replace("/home/user1/", "/home/userN/")
-        .replace("/home/user2/", "/home/userN/");
-    assert_eq!(redacted, expected);
 }
 
 /// Copies the fixture tree (made to Timeshift's layout) into the lab's repository.
@@ -642,7 +611,7 @@ fn dry_run_logs_the_plan_and_writes_nothing() {
             log.contains(&format!(
                 "run (argv, no shell): rsync -aii --recursive --verbose --delete --force \
                  --stats --sparse --delete-excluded --info=progress2 --link-dest={}/ --log-file={}/rsync-log \
-                 --exclude-from={}/exclude.list --delete-excluded {}/ {}/localhost/",
+                 --exclude-from={}/exclude.list {}/ {}/localhost/",
                 localhost(&lab, FIRST).display(),
                 staging.display(),
                 staging.display(),
@@ -1014,20 +983,208 @@ fn delete_leaves_real_mounts_inside_alone() {
 /// The snapshot name `just nested-mount` makes.
 const NESTED_NAME: &str = "2026-01-01_00-00-00";
 
+const LEFTOVER: &str = "2026-09-01_00-00-00";
+
 #[test]
-fn a_leftover_staging_folder_is_reported() {
+fn leftovers_are_listed_then_removed_by_the_next_create() {
     for lab in labs("staging-leftover") {
         let kind = lab.kind;
-        fs::create_dir_all(lab.repo.join("timeshift/apsis-staging/2026-09-01_00-00-00")).unwrap();
-        let (backend, _) = backend(&lab, false);
+        populate(&lab.source);
+        let staging = lab.repo.join("timeshift/apsis-staging");
+        write(&staging.join(LEFTOVER).join("localhost/etc/hosts"), "half");
+        // Not Apsis's: reported, never touched.
+        write(&staging.join("notes.txt"), "mine");
+        let (backend, log) = backend(&lab, false);
         let list = backend.list().unwrap();
         assert!(list.snapshots.is_empty(), "{kind}");
-        assert_eq!(list.warnings.len(), 1, "{kind}");
-        assert_eq!(
-            list.warnings[0], "leftover from an interrupted snapshot, safe to delete",
+        assert_eq!(list.leftovers, [LEFTOVER], "{kind}");
+        assert_eq!(list.warnings.len(), 1, "{kind}: {:?}", list.warnings);
+        assert!(list.warnings[0].contains("notes.txt"), "{kind}");
+        assert!(
+            !list.warnings[0].contains('/'),
+            "{kind}: no path in the pane"
+        );
+
+        backend.create("after a crash").unwrap();
+        assert!(!staging.join(LEFTOVER).exists(), "{kind}");
+        assert!(staging.join("notes.txt").exists(), "{kind}");
+        let log = log.lock().unwrap().join("\n");
+        assert!(
+            log.contains("an interrupted create, started 2026-09-01 00:00:00"),
+            "{kind}: {log}"
+        );
+        assert!(backend.list().unwrap().leftovers.is_empty(), "{kind}");
+    }
+}
+
+#[test]
+fn delete_removes_a_leftover_through_the_same_rules() {
+    for lab in labs("staging-delete") {
+        let kind = lab.kind;
+        let staging = lab.repo.join("timeshift/apsis-staging");
+        write(&staging.join(LEFTOVER).join("localhost/a"), "half");
+        let outside = lab.repo.join("outside");
+        write(&outside.join("keep"), "keep");
+        std::os::unix::fs::symlink(&outside, staging.join(LEFTOVER).join("localhost/link"))
+            .unwrap();
+        let (backend, _) = backend(&lab, false);
+        backend.delete(LEFTOVER).unwrap();
+        assert!(
+            !staging.exists(),
+            "{kind}: the empty staging folder goes too"
+        );
+        assert!(
+            outside.join("keep").exists(),
+            "{kind}: symlinks aren't followed"
+        );
+        // Gone: now it's neither a leftover nor a snapshot.
+        assert!(backend.delete(LEFTOVER).is_err(), "{kind}");
+        assert!(
+            matches!(backend.delete("../x"), Err(Error::InvalidSnapshotName(_))),
             "{kind}"
         );
-        assert!(!list.warnings[0].contains("apsis-staging"), "{kind}");
+    }
+}
+
+#[test]
+fn a_symlinked_staging_folder_is_never_removed_through() {
+    for lab in labs("staging-symlink") {
+        let kind = lab.kind;
+        let elsewhere = lab.repo.join("elsewhere");
+        write(&elsewhere.join(LEFTOVER).join("x"), "x");
+        fs::create_dir_all(lab.repo.join("timeshift")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, lab.repo.join("timeshift/apsis-staging")).unwrap();
+        let (backend, _) = backend(&lab, false);
+        let error = backend.remove_staging(LEFTOVER).unwrap_err();
+        assert!(matches!(error, Error::InvalidInput(_)), "{kind}: {error:?}");
+        assert!(elsewhere.join(LEFTOVER).join("x").exists(), "{kind}");
+    }
+}
+
+#[test]
+fn a_mount_inside_a_leftover_refuses_its_removal() {
+    for lab in labs("staging-mount") {
+        let kind = lab.kind;
+        let leftover = lab.repo.join("timeshift/apsis-staging").join(LEFTOVER);
+        write(&leftover.join("localhost/mnt/x"), "x");
+        let mounted = fs::canonicalize(leftover.join("localhost/mnt")).unwrap();
+        let line = format!(
+            "36 35 98:0 / {} rw - ext4 /dev/sdz1 rw\n",
+            mounted.display()
+        );
+        let (backend, _) = backend(&lab, false);
+        let backend = backend.with_mountinfo(move || Ok(line.clone()));
+        let error = backend.remove_staging(LEFTOVER).unwrap_err();
+        assert!(
+            error.to_string().contains("mounted inside"),
+            "{kind}: {error}"
+        );
+        assert!(leftover.join("localhost/mnt/x").exists(), "{kind}");
+    }
+}
+
+/// A folder holding one program, `rsync`: the shell `script`, for a runner's fixed `PATH`.
+fn fake_rsync(lab: &Lab, script: &str) -> OsString {
+    let bin = lab.repo.parent().unwrap().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let path = bin.join("rsync");
+    fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut search = bin.into_os_string();
+    search.push(":/usr/bin:/bin");
+    search
+}
+
+/// Starts a create on another thread, waits until rsync is running, stops it; how long the
+/// stop took and what the create returned.
+fn stop_while_copying(lab: &Lab, script: &str, grace: Duration) -> (Duration, Error) {
+    let path = fake_rsync(lab, script);
+    let cancel = Cancel::with_grace(grace);
+    let backend = NativeRsync::new(config(lab, false), QuietRunner::new(path))
+        .with_clock(clock())
+        .with_cancel(Arc::clone(&cancel));
+    let staging = lab.repo.join("timeshift/apsis-staging");
+    let create = std::thread::spawn(move || backend.create("stopped").unwrap_err());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !staging.join("2026-09-25_11-28-53/exclude.list").exists() {
+        assert!(std::time::Instant::now() < deadline, "rsync never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // rsync has been started by now (the list is written right before).
+    std::thread::sleep(Duration::from_millis(300));
+    let asked = std::time::Instant::now();
+    cancel.request().unwrap();
+    let error = create.join().unwrap();
+    (asked.elapsed(), error)
+}
+
+#[test]
+fn stop_ends_rsyncs_whole_group_and_removes_its_copy() {
+    for lab in labs("stop-term") {
+        let kind = lab.kind;
+        populate(&lab.source);
+        // A child in the same group, as rsync's receiver is: both must go.
+        let (took, error) = stop_while_copying(&lab, "sleep 60 & wait", Duration::from_secs(30));
+        assert!(matches!(error, Error::Stopped), "{kind}: {error:?}");
+        assert!(
+            took < Duration::from_secs(10),
+            "{kind}: SIGTERM was enough ({took:?})"
+        );
+        assert!(!lab.repo.join("timeshift/apsis-staging").exists(), "{kind}");
+        assert_eq!(
+            fs::read_dir(lab.repo.join("timeshift/snapshots"))
+                .unwrap()
+                .count(),
+            0,
+            "{kind}"
+        );
+    }
+}
+
+#[test]
+fn stop_kills_what_ignores_sigterm_after_the_grace_period() {
+    for lab in labs("stop-kill") {
+        let kind = lab.kind;
+        populate(&lab.source);
+        let grace = Duration::from_millis(400);
+        let script = "trap '' TERM\nwhile :; do sleep 0.1; done";
+        let (took, error) = stop_while_copying(&lab, script, grace);
+        assert!(matches!(error, Error::Stopped), "{kind}: {error:?}");
+        assert!(took >= grace, "{kind}: ended before SIGKILL ({took:?})");
+        assert!(took < Duration::from_secs(10), "{kind}: {took:?}");
+        assert!(!lab.repo.join("timeshift/apsis-staging").exists(), "{kind}");
+    }
+}
+
+#[test]
+fn a_stop_before_rsync_starts_copies_nothing() {
+    for lab in labs("stop-early") {
+        let kind = lab.kind;
+        populate(&lab.source);
+        let cancel = Cancel::new();
+        cancel.request().unwrap();
+        let (backend, _) = backend(&lab, false);
+        let backend = backend.with_cancel(cancel);
+        assert!(matches!(backend.create("x"), Err(Error::Stopped)), "{kind}");
+        assert!(!lab.repo.join("timeshift/apsis-staging").exists(), "{kind}");
+    }
+}
+
+#[test]
+fn a_create_names_its_snapshot_as_soon_as_its_planned() {
+    for lab in labs("create-named") {
+        populate(&lab.source);
+        let seen: Log = Arc::default();
+        let sink = Arc::clone(&seen);
+        let (backend, _) = backend(&lab, false);
+        let backend = backend.with_named(move |name| sink.lock().unwrap().push(name.to_owned()));
+        backend.create("").unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["2026-09-25_11-28-53"],
+            "{}",
+            lab.kind
+        );
     }
 }
 

@@ -87,9 +87,9 @@ ext4-image:
     /usr/sbin/mkfs.ext4 -F -q -L apsis-test -E root_owner=$(id -u):$(id -g) {{ext4-dir}}/ext4.img
     @echo "now: sudo mount -o loop,nosuid,nodev {{ext4-dir}}/ext4.img {{ext4-dir}}/mnt"
 
-# Runs the native backend's and file-level restore's tests on the mounted ext4 image too
+# Runs the native backend's tests on the mounted ext4 image too
 test-ext4:
-    APSIS_EXT4_MNT="$(realpath {{ext4-dir}}/mnt)" cargo test -p apsis-core --test native --test restore
+    APSIS_EXT4_MNT="$(realpath {{ext4-dir}}/mnt)" cargo test -p apsis-core --test native
 
 # Delete with real mounts inside a snapshot: a bind mount (same filesystem) and the ext4 image
 # (another filesystem, so a loop mount). Makes the folders and prints the mount commands

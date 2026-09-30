@@ -9,19 +9,19 @@ use std::future::Future;
 
 use super::names::{
     BUS_NAME, ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
-    ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_BROWSE, METHOD_DELETE, METHOD_NATIVE_CREATE,
-    METHOD_NATIVE_LIST_WITH_USAGE, METHOD_READ_CONFIG, METHOD_RESTORE, METHOD_WRITE_CONFIG,
-    OBJECT_PATH, OP_CREATE, OP_DELETE, OP_RESTORE, SIGNAL_FINISHED, SIGNAL_PROGRESS,
+    ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CREATE, METHOD_DELETE, METHOD_JOB, METHOD_LIST,
+    METHOD_READ_CONFIG, METHOD_STOP, METHOD_WRITE_CONFIG, OBJECT_PATH, OP_CREATE, OP_DELETE,
+    SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
 };
 use super::{
-    WireConfigInfo, WireListWithUsage, WireListing, config_info_from_wire, config_to_wire,
-    decode_error, from_wire_with_usage, listing_from_wire,
+    WireConfigInfo, WireListWithUsage, config_info_from_wire, config_to_wire, decode_error,
+    from_wire_with_usage,
 };
 use crate::config::{Config, ConfigInfo};
 use crate::error::{Error, Result};
+use crate::job::{self, Job, WireJob};
 use crate::model::SnapshotList;
 use crate::progress::Progress;
-use crate::restore::{Listing, Request};
 
 /// The applet's side of `apsis-helper`, on the system bus.
 ///
@@ -56,7 +56,7 @@ impl HelperClient {
         let wire: WireListWithUsage = self
             .proxy()
             .await?
-            .call(METHOD_NATIVE_LIST_WITH_USAGE, &())
+            .call(METHOD_LIST, &())
             .await
             .map_err(from_zbus)?;
         from_wire_with_usage(wire)
@@ -71,7 +71,7 @@ impl HelperClient {
         self.create_with_progress(comment, &mut |_| {}).await
     }
 
-    /// [`HelperClient::create`], handing each `Progress` signal to `on_progress`.
+    /// [`HelperClient::create`], handing its progress (from `JobChanged`) to `on_progress`.
     ///
     /// # Errors
     ///
@@ -81,11 +81,12 @@ impl HelperClient {
         comment: &str,
         on_progress: &mut (dyn FnMut(Progress) + Send),
     ) -> Result<()> {
-        self.operate_on(METHOD_NATIVE_CREATE, OP_CREATE, comment, on_progress)
+        self.operate_on(METHOD_CREATE, OP_CREATE, comment, on_progress)
             .await
     }
 
-    /// Deletes the snapshot `name` and waits until it's done.
+    /// Deletes the snapshot `name` (or the interrupted create's folder `name`) and waits until
+    /// it's done.
     ///
     /// # Errors
     ///
@@ -95,60 +96,73 @@ impl HelperClient {
             .await
     }
 
-    /// One folder of snapshot `snapshot`, compared with the running system. Asks for the
-    /// password (cached a few minutes).
+    /// Stops the running create if it is making `snapshot`. Returns once stopping has begun;
+    /// the create's own call ends with [`Error::Stopped`]. No password for the user who
+    /// started it; anyone else is asked.
     ///
     /// # Errors
     ///
-    /// What the helper reported (see [`Error`]), or a bad reply.
-    pub async fn browse(&self, snapshot: &str, path: &str) -> Result<Listing> {
-        let wire: WireListing = self
+    /// Nothing to stop, another snapshot, too late ([`Error::InvalidInput`]), or not allowed.
+    pub async fn stop(&self, snapshot: &str) -> Result<()> {
+        self.proxy()
+            .await?
+            .call(METHOD_STOP, &(snapshot,))
+            .await
+            .map_err(from_zbus)
+    }
+
+    /// What the helper is doing now; `None` when it's idle. Doesn't start the helper just to
+    /// ask: if it isn't running, it's idle.
+    ///
+    /// # Errors
+    ///
+    /// What the helper reported, or a bad reply.
+    pub async fn job(&self) -> Result<Option<Job>> {
+        let bus = DBusProxy::new(&self.connection).await.map_err(from_zbus)?;
+        let name = BusName::try_from(BUS_NAME).map_err(|e| Error::Helper(e.to_string()))?;
+        let running = bus
+            .name_has_owner(name)
+            .await
+            .map_err(|e| Error::Helper(e.to_string()))?;
+        if !running {
+            return Ok(None);
+        }
+        let wire: WireJob = self
             .proxy()
             .await?
-            .call(METHOD_BROWSE, &(snapshot, path))
+            .call(METHOD_JOB, &())
             .await
             .map_err(from_zbus)?;
-        listing_from_wire(wire)
+        Ok(job::from_wire(wire))
     }
 
-    /// Runs `request` (a dry run, or for real) and waits until it's done. Returns the plan's or
-    /// the result's text. Asks for the password: cached for dry runs and folder mode, every
-    /// time for original mode.
+    /// Every change to the helper's job, from anyone's: [`JobEvent::Changed`] for each
+    /// `JobChanged`, [`JobEvent::HelperGone`] when the helper leaves the bus. Subscribing
+    /// doesn't start the helper.
     ///
     /// # Errors
     ///
-    /// What the helper reported (see [`Error`]).
-    pub async fn restore(&self, request: &Request) -> Result<String> {
-        self.restore_with_progress(request, &mut |_| {}).await
+    /// The subscription couldn't be made.
+    pub async fn job_changes(&self) -> Result<impl Stream<Item = JobEvent> + use<>> {
+        let proxy = self.proxy().await?;
+        let changes = proxy
+            .receive_signal(SIGNAL_JOB_CHANGED)
+            .await
+            .map_err(from_zbus)?
+            .filter_map(|message| async move {
+                let (wire,) = message.body().deserialize::<(WireJob,)>().ok()?;
+                job::from_wire(wire).map(JobEvent::Changed)
+            });
+        let gone = proxy
+            .receive_owner_changed()
+            .await
+            .map_err(from_zbus)?
+            .filter_map(|owner| async move { owner.is_none().then_some(JobEvent::HelperGone) });
+        Ok(stream::select(changes, gone))
     }
 
-    /// [`HelperClient::restore`], handing each `Progress` signal to `on_progress` (a real run
-    /// only; a dry run copies nothing).
-    ///
-    /// # Errors
-    ///
-    /// What the helper reported (see [`Error`]).
-    pub async fn restore_with_progress(
-        &self,
-        request: &Request,
-        on_progress: &mut (dyn FnMut(Progress) + Send),
-    ) -> Result<String> {
-        let args = (
-            request.snapshot.clone(),
-            request.paths.clone(),
-            request.destination.word().to_owned(),
-            request.dry_run,
-        );
-        self.operate(
-            OP_RESTORE,
-            move |proxy| async move { proxy.call::<_, _, ()>(METHOD_RESTORE, &args).await },
-            on_progress,
-        )
-        .await
-    }
-
-    /// Apsis's config (or, before there is one, what was imported from Timeshift's settings),
-    /// the devices and the users. No password for the active session.
+    /// Apsis's config (converted from the old format, or imported from Timeshift's settings,
+    /// until it's saved) and the devices. No password for the active session.
     ///
     /// # Errors
     ///
@@ -202,8 +216,8 @@ impl HelperClient {
     }
 
     /// Starts an operation with `start`, then waits for its `Finished` (returning its message),
-    /// or for the helper to leave the bus without sending one. Its `Progress` signals go to
-    /// `on_progress` meanwhile.
+    /// or for the helper to leave the bus without sending one. Its progress (`JobChanged` for
+    /// the same kind of job) goes to `on_progress` meanwhile.
     async fn operate<F, Fut>(
         &self,
         op: &str,
@@ -228,14 +242,14 @@ impl HelperClient {
             });
         // Undecodable ones are skipped: progress is only for show.
         let progress = proxy
-            .receive_signal(SIGNAL_PROGRESS)
+            .receive_signal(SIGNAL_JOB_CHANGED)
             .await
             .map_err(from_zbus)?
             .filter_map(|message| async move {
-                message
-                    .body()
-                    .deserialize::<(String, f64, i64, String)>()
-                    .ok()
+                let ((kind, state, _, _, percent, eta),) =
+                    message.body().deserialize::<(WireJob,)>().ok()?;
+                // The end is `Finished`'s to say.
+                (state == "running").then_some((kind, percent, eta, String::new()))
             });
         let gone = proxy
             .receive_owner_changed()
@@ -248,8 +262,17 @@ impl HelperClient {
     }
 }
 
-/// A `Progress` signal's body: `(op, percent, eta_seconds, text)`.
+/// A job's progress: `(kind, percent, eta_seconds, text)`.
 type WireProgress = (String, f64, i64, String);
+
+/// What [`HelperClient::job_changes`] reports.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JobEvent {
+    /// A job started, got further, is stopping, or ended (see [`crate::job::JobState`]).
+    Changed(Job),
+    /// The helper left the bus: whatever it was doing is over.
+    HelperGone,
+}
 
 /// What the helper told us while an operation ran.
 enum Event {
@@ -319,7 +342,7 @@ fn from_zbus(error: zbus::Error) -> Error {
                 ERROR_NOT_AUTHORIZED => Error::NotAuthorized,
                 ERROR_BUSY => Error::Busy,
                 ERROR_CHANGED => Error::ConfigChanged,
-                // A config or a restore request: the message says why.
+                // A config or a refused delete: the message says why.
                 ERROR_INVALID_INPUT => Error::InvalidInput(message),
                 ERROR_FAILED | ERROR_DEVICE_NOT_FOUND => decode_error(&message),
                 _ if message.is_empty() => Error::Helper(name.to_string()),

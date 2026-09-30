@@ -6,8 +6,10 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::error::{Error, Result};
+use crate::native::Cancel;
 
 /// Longest snapshot comment, in characters (Apsis's own limit).
 pub const MAX_COMMENT_CHARS: usize = 200;
@@ -47,6 +49,27 @@ pub trait Runner {
     ) -> io::Result<RunOutput> {
         let _ = on_segment;
         self.run(argv)
+    }
+
+    /// Like [`Runner::run_streaming`], but `cancel` can stop the command while it runs (see
+    /// [`crate::native::Cancel`]).
+    ///
+    /// The default only looks before starting (test fakes finish at once).
+    ///
+    /// # Errors
+    ///
+    /// When the program can't be started, or `cancel` was asked to stop first
+    /// ([`io::ErrorKind::Interrupted`]).
+    fn run_cancellable(
+        &self,
+        argv: &[OsString],
+        on_segment: &mut dyn FnMut(&str) -> bool,
+        cancel: &Arc<Cancel>,
+    ) -> io::Result<RunOutput> {
+        if cancel.is_stopping() {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        self.run_streaming(argv, on_segment)
     }
 }
 

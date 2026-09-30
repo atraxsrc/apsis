@@ -4,31 +4,30 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-only</project_license>
   <name>Apsis</name>
-  <summary>Simple system snapshots and file restore for the COSMIC™ desktop</summary>
+  <summary>System snapshot and restore</summary>
   <developer id="io.github.atraxsrc">
     <name>atraxsrc</name>
   </developer>
   <description>
     <p>
-      Apsis is a panel applet for the COSMIC desktop that creates, lists and deletes system
-      snapshots on a backup disk with rsync, and restores single files from them. Its panel popup
-      is a read-only overview and its window does the work; both look like a small terminal,
-      work with the keyboard or the mouse, and follow the live COSMIC theme.
+      Apsis takes rsync snapshots of your system onto a backup disk, lists them and deletes
+      them. It lives in the COSMIC panel, where it shows when the last snapshot was taken and how
+      full the backup disk is, and opens a window laid out like Timeshift's: a toolbar, the
+      snapshot list, and a status area with the progress of a running snapshot.
     </p>
     <ul>
       <li>Snapshots with rsync: later ones only copy what changed and hard-link the rest, at idle I/O priority</li>
-      <li>Snapshot list with comments and a details pane, and a bar of the backup disk's free space</li>
-      <li>Create and delete snapshots, one or several at a time, with one password prompt per few minutes through a small polkit-guarded helper</li>
-      <li>Browse a snapshot's files and restore them to a folder in your home, or back to their original place</li>
-      <li>Optional: keep the last N snapshots (preview, then confirm), and a reminder when the last snapshot is old</li>
-      <li>Settings: backup disk, home folders and filters</li>
-      <li>Vim-style keys and a command line, or the mouse; also opens as a resizable window from the app launcher</li>
+      <li>Choose whether /root and /home go into a snapshot; the system always does</li>
+      <li>A filter list to leave out or keep folders, files and patterns</li>
+      <li>Delete one snapshot or several; stop a snapshot while it's being made</li>
+      <li>A reminder when the last snapshot is old, and a warning when the backup disk is nearly full</li>
+      <li>One password prompt per few minutes, through a small polkit-guarded helper</li>
     </ul>
     <p>
       Snapshots use Timeshift's on-disk layout, so snapshots Timeshift made keep working, but
       Apsis doesn't need or run Timeshift. Manual only: there is no schedule, and snapshots are
-      only deleted when you delete them. Encrypted (LUKS) backup disks and full-system restore
-      aren't supported.
+      only deleted when you delete them. Restoring the whole system comes in a later version;
+      encrypted (LUKS) backup disks aren't supported.
     </p>
   </description>
   <icon type="stock">io.github.atraxsrc.Apsis</icon>
@@ -80,6 +79,36 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.4.0" date="2026-09-30">
+      <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.4.0</url>
+      <description>
+        <p>A window laid out like Timeshift's, and a simpler Apsis.</p>
+        <ul>
+          <li>New window: a toolbar (Create, Delete, Settings), the snapshot list, and a status area</li>
+          <li>Settings as tabs: Location, Include (/root, /home), Filters, Misc</li>
+          <li>Stop a snapshot while it's being made</li>
+          <li>Every window and the panel popup show a snapshot being made elsewhere</li>
+          <li>Leftovers of an interrupted snapshot are removed by the next one, or with Delete</li>
+          <li>A backup disk pulled out during a snapshot is named as such</li>
+          <li>Removed: restoring single files, keep last N, per-user home folder modes</li>
+        </ul>
+      </description>
+    </release>
+    <release version="0.3.1" date="2026-09-30">
+      <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.3.1</url>
+      <description>
+        <p>Fixes from the first test on a clean machine.</p>
+        <ul>
+          <li>Opening Apsis again brings the open window forward instead of opening another</li>
+          <li>A window opened while a snapshot job runs says it is busy and waits for the job</li>
+          <li>The backup disk being unplugged or plugged in shows without refreshing</li>
+          <li>A create that loses its disk says so plainly; the raw error goes to the log</li>
+          <li>The create room shows whether your home folder is included</li>
+          <li>The file browser says when a home folder was not included in a snapshot</li>
+          <li>After a restore to a folder, Apsis says where the files went and can open it</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-09-29">
       <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.3.0</url>
       <description>

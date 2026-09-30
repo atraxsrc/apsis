@@ -38,7 +38,22 @@ once the tag is pushed.
 
 User steps, in order: as for v0.2.0 below, with `v0.3.0` (commit, push and check CI, tag and
 push, wait for the Release workflow, paste the `0.3.0` section of `CHANGELOG.md` as the
-notes, publish). `CLAUDE.md` still has the old "Timeshift-style" listing line; update it.
+notes, publish). (The listing line was updated in 0.4.0, see below.)
+
+## v0.4.0 checklist
+
+Prepared (2026-09-30): version 0.4.0 (`Cargo.toml`, `Cargo.lock`), metainfo `<release>` and
+summary ("System snapshot and restore"), desktop `Comment=`, `resources/deb/changelog`, the man
+page, `CHANGELOG.md`, README, SECURITY.md (0.4.x supported). The collection drafts below use
+the new listing line.
+
+Before tagging:
+
+1. The user's checks on the HP (PLAN "0.4.0", J, items 1 to 10).
+2. New screenshots: the old `docs/screenshot-*.png` show the 0.3 terminal look. The README no
+   longer shows them; the metainfo still points at the `v0.3.0` copies until new ones replace
+   them.
+3. Then as for v0.2.0 below, with `v0.4.0`.
 
 ## v0.2.0 checklist (done)
 
@@ -166,7 +181,7 @@ names and order from a neighbouring entry in each file and adjust these to match
 ```ron
 (
     name: "Apsis",
-    description: "Simple system snapshots and file restore for the COSMIC™ desktop",
+    description: "System snapshot and restore",
     repository: "https://github.com/atraxsrc/apsis",
     app_id: "io.github.atraxsrc.Apsis",
     icon: "https://raw.githubusercontent.com/atraxsrc/apsis/v0.3.0/resources/icons/hicolor/scalable/apps/io.github.atraxsrc.Apsis.svg",
@@ -180,7 +195,7 @@ names and order from a neighbouring entry in each file and adjust these to match
 ```ron
 (
     name: "Apsis",
-    description: "Simple system snapshots and file restore for the COSMIC™ desktop, in a window (apsis --window)",
+    description: "System snapshot and restore, in a window (apsis --window)",
     repository: "https://github.com/atraxsrc/apsis",
     app_id: "io.github.atraxsrc.Apsis",
     icon: "https://raw.githubusercontent.com/atraxsrc/apsis/v0.3.0/resources/icons/hicolor/scalable/apps/io.github.atraxsrc.Apsis.svg",
@@ -193,8 +208,8 @@ mode in its description instead.
 
 PR text (draft):
 
-> Add Apsis, a panel applet for simple system snapshots: create, list and delete rsync
-> snapshots and restore single files from them, in a terminal-style window that follows the
-> COSMIC theme, with a read-only overview in the panel popup. It uses Timeshift's on-disk layout, so existing Timeshift snapshots keep
+> Add Apsis, a panel applet and window for system snapshots: create, list and delete rsync
+> snapshots, choose /root and /home and a filter list, in a window laid out like Timeshift's
+> that follows the COSMIC theme, with a read-only overview in the panel popup. It uses Timeshift's on-disk layout, so existing Timeshift snapshots keep
 > working, but doesn't need Timeshift. It opens as a window from the app launcher
 > (`apsis --window`). GPL-3.0-only.

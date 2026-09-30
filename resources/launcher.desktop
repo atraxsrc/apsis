@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=Apsis
-Comment=Simple system snapshots and file restore for the COSMIC™ desktop
+Comment=System snapshot and restore
 Type=Application
 Icon=io.github.atraxsrc.Apsis
 Exec=apsis --window

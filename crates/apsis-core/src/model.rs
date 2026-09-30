@@ -118,9 +118,12 @@ pub struct SnapshotList {
     pub uuid: Option<String>,
     pub mode: Option<Mode>,
     pub snapshots: Vec<Snapshot>,
-    /// Problems in an otherwise good list: folders that aren't complete snapshots, a leftover
-    /// staging folder. Shown to the user; they don't fail the list.
+    /// Problems in an otherwise good list: folders that aren't complete snapshots, anything
+    /// odd in the staging folder. Shown to the user; they don't fail the list.
     pub warnings: Vec<String>,
+    /// Names of interrupted creates' folders in `timeshift/apsis-staging/` (each a snapshot
+    /// name: when that create started). The next create removes them; so does `Delete`.
+    pub leftovers: Vec<String>,
     /// The backup filesystem's size, used and free space from `statvfs` while `apsis-helper`
     /// has it mounted. `None` means unknown: the applet shows no bar then.
     pub usage: Option<DiskUsage>,

@@ -30,6 +30,13 @@ pub enum Error {
     /// `device` is its UUID.
     #[error("backup device not found: {device}")]
     DeviceNotFound { device: String },
+    /// The backup disk left while a create or delete ran (its `/dev/disk/by-uuid` link is
+    /// gone). `reason` is what failed because of it (rsync's I/O error, usually).
+    #[error("backup disk removed: {reason}")]
+    DeviceRemoved { device: String, reason: String },
+    /// A create was stopped (`Stop`); what it had copied is gone.
+    #[error("stopped")]
+    Stopped,
     /// A config file that can't be read safely (`/etc/apsis/config.toml`, or the
     /// `timeshift.json` a first run imports).
     #[error("{0}")]
@@ -44,13 +51,10 @@ pub enum Error {
     /// taken, the repository is in a state it won't touch, ...).
     #[error("{0}")]
     Native(String),
-    /// A request that is refused before anything runs (a restore path, destination, or a
-    /// backup name in the way; a delete that isn't a plain snapshot folder). The text says why.
+    /// A request that is refused before anything runs (a delete that isn't a plain snapshot
+    /// folder). The text says why.
     #[error("{0}")]
     InvalidInput(String),
-    /// A file-level restore ran and failed (rsync's exit code and last lines).
-    #[error("restore failed: {0}")]
-    Restore(String),
     #[error(transparent)]
     Io(#[from] io::Error),
 }

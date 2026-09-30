@@ -1,3 +1,25 @@
+apsis (0.4.0-1) noble; urgency=medium
+
+  * New upstream release, see CHANGELOG.md: a window laid out like
+    Timeshift's in standard COSMIC widgets, settings as tabs (/root and /home
+    choices, filter list), stop a running snapshot, jobs shown in every window
+    and the panel, leftovers of interrupted snapshots removed, a real "backup
+    disk removed" error. Removed: file restore, keep last N, per-user home
+    modes. The helper's D-Bus interface is now Helper2; the config file is
+    version 2 (converted on the first save; the old one is kept as .bak).
+
+ -- atraxsrc <92285717+atraxsrc@users.noreply.github.com>  Wed, 30 Sep 2026 22:00:00 +1000
+
+apsis (0.3.1-1) noble; urgency=medium
+
+  * New upstream release, see CHANGELOG.md: one window at a time, busy state
+    for jobs started elsewhere, backup disk presence without refreshing,
+    clearer create failure when the disk is removed, home folder mode in the
+    create room and the browser, open the folder after a folder restore,
+    helper unit description.
+
+ -- atraxsrc <92285717+atraxsrc@users.noreply.github.com>  Wed, 30 Sep 2026 18:00:00 +1000
+
 apsis (0.3.0-1) noble; urgency=medium
 
   * New upstream release, see CHANGELOG.md: read-only panel overview, window

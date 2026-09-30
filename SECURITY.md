@@ -19,7 +19,8 @@ credit to you, unless you'd rather not be named.
 
 | Version | Supported |
 |---|---|
-| 0.3.x | yes |
+| 0.4.x | yes |
+| 0.3.x | no |
 | 0.2.x | no |
 | 0.1.x and older | no |
 
@@ -36,8 +37,8 @@ nothing without it. Apsis doesn't run `timeshift`.
 The helper:
 
 - checks every input again (snapshot names must match `YYYY-MM-DD_HH-MM-SS`, comments are
-  length-limited, restore paths are validated, a config is checked like the applet checks
-  it), since the applet isn't trusted;
+  length-limited, a config is checked like the applet checks it), since the applet isn't
+  trusted;
 - asks polkit for every call, with the caller's unique bus name as the subject (not a PID);
 - runs one operation at a time;
 - runs `rsync`, `mount`, `umount`, `lsblk` and `findmnt` with a fixed argv (no shell), a fixed
@@ -52,7 +53,8 @@ It is not sandboxed by systemd: a snapshot reads the whole filesystem and the he
 devices, which hardening options would break.
 
 **Deleting a snapshot** is a recursive delete as root, so it refuses anything that isn't plainly
-one snapshot folder, before deleting anything:
+one snapshot folder, before deleting anything (the unfinished copy of a stopped or interrupted
+snapshot, under `timeshift/apsis-staging/`, is removed by the same rules):
 
 - the name must match `YYYY-MM-DD_HH-MM-SS` (so it can't be `snapshots/` itself, `..` or a
   path), and the fresh list must have it;
@@ -66,17 +68,24 @@ one snapshot folder, before deleting anything:
   symlinks as links, and stops at any folder on another filesystem;
 - afterwards only that snapshot's links in `timeshift/snapshots-<tag>/` are removed.
 
-**The config** `/etc/apsis/config.toml` (backup device UUID and rsync filters) is written only
+**The config** `/etc/apsis/config.toml` (backup device UUID, `/root` and `/home` includes, and
+rsync filters) is written only
 by the helper, after polkit `configure`: a temporary file, `fsync`, `rename` over the old one,
 mode 0644, owned by root, with the previous file kept as `config.toml.bak`. A write is refused
 if the file changed since the applet read it, or if a newly chosen device isn't connected and a
 plain, unencrypted Linux filesystem. Timeshift's `/etc/timeshift/timeshift.json` is only read,
 once, to import its settings while there is no `config.toml`.
 
-File-level restore is where root writes into places a user controls. See
-[docs/PLAN.md](docs/PLAN.md) (Phase 6a) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for
-how the helper avoids following symlinks, never overwrites, and drops setuid bits, device nodes
-and `security.*` xattrs from files it hands to a user.
+**Stopping a snapshot** sends `SIGTERM` to the rsync process group the helper started (only
+that group, and only while its leader is known not to be reaped, so a reused pid is never
+signalled), then `SIGKILL` after 10 seconds; the unfinished copy is removed as above. The user
+who started a snapshot may stop it without a password; anyone else needs polkit `stop`. The
+rename that puts a finished snapshot in place can't be interrupted by a stop.
+
+**Job status** (`Job`, and the `JobChanged` signal every process on the system bus can
+receive) carries the kind of job, its state, the snapshot's name (a time), when it started and
+its progress: no comment, caller, error text or path. The error text goes only to the caller
+that started the job.
 
 ## polkit actions
 
@@ -85,13 +94,11 @@ a local, active session; everyone else (remote, inactive) gets `auth_admin` for 
 
 | Action | What it allows | Active session |
 |---|---|---|
-| `io.github.atraxsrc.Apsis.list` | List snapshots (with the disk's usage), read the config | `yes` (no password) |
+| `io.github.atraxsrc.Apsis.list` | List snapshots (with the disk's usage), read the config, ask what the helper is doing | `yes` (no password) |
 | `io.github.atraxsrc.Apsis.create` | Create a snapshot | `auth_admin_keep` |
-| `io.github.atraxsrc.Apsis.delete` | Delete a snapshot (with the checks above) | `auth_admin_keep` |
+| `io.github.atraxsrc.Apsis.delete` | Delete a snapshot or an unfinished copy (with the checks above) | `auth_admin_keep` |
+| `io.github.atraxsrc.Apsis.stop` | Stop a snapshot another user started (the starter isn't asked) | `auth_admin_keep` |
 | `io.github.atraxsrc.Apsis.configure` | Write `/etc/apsis/config.toml` | `auth_admin_keep` |
-| `io.github.atraxsrc.Apsis.browse` | Browse a snapshot's files, restore dry runs | `auth_admin_keep` |
-| `io.github.atraxsrc.Apsis.restore` | Copy files from a snapshot into `~/Apsis-restored/` | `auth_admin_keep` |
-| `io.github.atraxsrc.Apsis.restore-original` | Put files back over the live system | `auth_admin` (every time) |
 
 `auth_admin_keep` means an administrator's password, remembered by polkit for a few minutes.
 An administrator can tighten any of these with a polkit rule in `/etc/polkit-1/rules.d/`.

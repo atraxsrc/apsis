@@ -4,6 +4,7 @@
 //! the reminder, and how full the backup device is. Pure math and no UI, so it is unit-tested;
 //! `apsis` turns it into the panel label, tooltip and icon colour.
 
+use std::path::Path;
 use std::time::Duration;
 
 use jiff::civil::DateTime;
@@ -94,6 +95,17 @@ impl ApsisStatus {
         }
     }
 
+    /// The same, with the backup disk gone since the list (its UUID left `/dev/disk/by-uuid`):
+    /// the disk reads `not connected`; the time side stays as the list showed it (time and disk
+    /// fail independently).
+    #[must_use]
+    pub fn disk_gone(self) -> Self {
+        Self {
+            disk: DiskStatus::NotMounted,
+            ..self
+        }
+    }
+
     #[must_use]
     pub fn due(&self) -> Due {
         let Some(days) = self.remind else {
@@ -178,6 +190,21 @@ fn age(then: DateTime, now: DateTime) -> Duration {
     Duration::from_secs(u64::try_from(secs).unwrap_or(0))
 }
 
+/// Where udev links filesystems by UUID.
+pub const BY_UUID: &str = "/dev/disk/by-uuid";
+
+/// Whether the filesystem `uuid` is connected: its link in `by_uuid` ([`BY_UUID`]) resolves.
+/// No root and no mount, so the applet can ask every few seconds. `None` when `uuid` can't be a
+/// file name there (empty, `.`, `..`, a `/`), so nothing is claimed about it.
+#[must_use]
+pub fn disk_connected(by_uuid: &Path, uuid: &str) -> Option<bool> {
+    if uuid.is_empty() || uuid == "." || uuid == ".." || uuid.contains(['/', '\0']) {
+        return None;
+    }
+    // `exists` follows the link: a link left behind to a device node that's gone is "no".
+    Some(by_uuid.join(uuid).exists())
+}
+
 /// `now`, `5m`, `47h`, `3d`: the same steps as the popup's "5m ago".
 #[must_use]
 pub fn age_short(age: Duration) -> String {
@@ -232,6 +259,39 @@ mod tests {
 
     use super::*;
     use crate::{Snapshot, Tag};
+
+    #[test]
+    fn the_backup_disk_is_there_while_its_uuid_link_resolves() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp/by-uuid");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let device = dir.join("sdx1");
+        std::fs::write(&device, "").unwrap();
+        std::os::unix::fs::symlink(&device, dir.join("1a2b")).unwrap();
+        assert_eq!(disk_connected(&dir, "1a2b"), Some(true));
+        assert_eq!(disk_connected(&dir, "3c4d"), Some(false));
+        // Unplugged: udev removes the device; a link left behind doesn't count.
+        std::fs::remove_file(&device).unwrap();
+        assert_eq!(disk_connected(&dir, "1a2b"), Some(false));
+        // Not a UUID it can look up: no claim either way.
+        for bad in ["", ".", "..", "../sdx1", "a/b"] {
+            assert_eq!(disk_connected(&dir, bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_gone_disk_keeps_the_time_side() {
+        let status = ApsisStatus {
+            last: Some(Duration::from_secs(12 * 3600)),
+            remind: Some(7),
+            disk: DiskStatus::Unknown,
+        };
+        let gone = status.clone().disk_gone();
+        assert_eq!(gone.disk, DiskStatus::NotMounted);
+        assert_eq!((gone.last, gone.remind), (status.last, status.remind));
+        assert_eq!(gone.label_short(), "12h · -");
+        assert!(!gone.disk_warning());
+    }
 
     fn usage(used: u64, free: u64) -> DiskUsage {
         DiskUsage {

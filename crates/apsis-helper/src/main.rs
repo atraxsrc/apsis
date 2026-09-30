@@ -4,15 +4,14 @@
 //!
 //! A system D-Bus service, started as root by D-Bus activation (through
 //! `apsis-helper.service`) when the applet calls it, and gone again after a minute idle. It
-//! offers exactly `NativeListWithUsage`, `NativeCreate(comment)`, `Delete(name)`, `ReadConfig`,
-//! `WriteConfig`, and file-level restore's `Browse` and `Restore`; each checks its own polkit
-//! action for the caller, checks its input again, and runs `rsync`, `lsblk`, `findmnt` and
+//! offers exactly `List`, `Create(comment)`, `Delete(name)`, `Stop(snapshot)`, `Job`,
+//! `ReadConfig` and `WriteConfig`, and announces every job change with `JobChanged`; each
+//! method checks its own polkit action for the caller, checks its input again, and runs `rsync`, `lsblk`, `findmnt` and
 //! `mount` with a fixed argv, no shell. `WriteConfig` writes `/etc/apsis/config.toml`, nothing
 //! else. See `docs/ARCHITECTURE.md`.
 
 mod native;
 mod polkit;
-mod restore;
 mod runner;
 mod service;
 mod settings;
@@ -25,10 +24,10 @@ use std::time::Duration;
 
 use apsis_core::helper::names::{BUS_NAME, OBJECT_PATH};
 
-use crate::service::Helper;
+use crate::service::{Helper, announce_jobs};
 use crate::state::State;
 
-/// Exit after this long with nothing to do. Never while Timeshift runs.
+/// Exit after this long with nothing to do. Never while a job runs.
 const IDLE: Duration = Duration::from_secs(60);
 
 #[tokio::main]
@@ -43,13 +42,14 @@ async fn main() -> ExitCode {
 }
 
 async fn serve() -> zbus::Result<()> {
-    let state = State::new();
+    let (state, changes) = State::new();
     // Only root may own the name (the bus policy says so), so this fails for anyone else.
-    let _connection = zbus::connection::Builder::system()?
+    let connection = zbus::connection::Builder::system()?
         .serve_at(OBJECT_PATH, Helper::new(Arc::clone(&state)))?
         .name(BUS_NAME)?
         .build()
         .await?;
+    tokio::spawn(announce_jobs(connection.clone(), changes));
     state.idle_for(IDLE).await;
     Ok(())
 }
@@ -58,8 +58,8 @@ async fn serve() -> zbus::Result<()> {
 #[cfg(test)]
 mod resource_tests {
     use apsis_core::helper::names::{
-        ACTION_BROWSE, ACTION_CONFIGURE, ACTION_CREATE, ACTION_DELETE, ACTION_LIST, ACTION_RESTORE,
-        ACTION_RESTORE_ORIGINAL, BUS_NAME, INTERFACE, SYSTEMD_UNIT,
+        ACTION_CONFIGURE, ACTION_CREATE, ACTION_DELETE, ACTION_LIST, ACTION_STOP, BUS_NAME,
+        INTERFACE, SYSTEMD_UNIT,
     };
 
     const ACTIVATION: &str =
@@ -117,30 +117,18 @@ mod resource_tests {
     #[test]
     fn polkit_actions_match_and_prompt_as_apsis() {
         assert!(action(ACTION_LIST).contains("<allow_active>yes</allow_active>"));
-        for id in [
-            ACTION_CREATE,
-            ACTION_DELETE,
-            ACTION_CONFIGURE,
-            ACTION_BROWSE,
-            ACTION_RESTORE,
-        ] {
+        for id in [ACTION_CREATE, ACTION_DELETE, ACTION_STOP, ACTION_CONFIGURE] {
             assert!(
                 action(id).contains("<allow_active>auth_admin_keep</allow_active>"),
                 "{id}"
             );
         }
-        // Putting files back over the running system asks every time.
-        let original = action(ACTION_RESTORE_ORIGINAL);
-        assert!(original.contains("<allow_active>auth_admin</allow_active>"));
-        assert!(!original.contains("keep"));
         for id in [
             ACTION_LIST,
             ACTION_CREATE,
             ACTION_DELETE,
+            ACTION_STOP,
             ACTION_CONFIGURE,
-            ACTION_BROWSE,
-            ACTION_RESTORE,
-            ACTION_RESTORE_ORIGINAL,
         ] {
             let action = action(id);
             assert!(action.contains("<message>Apsis "), "{id}");
@@ -148,6 +136,6 @@ mod resource_tests {
             assert!(!action.contains("<allow_any>yes"), "{id}");
             assert!(!action.contains("<allow_inactive>yes"), "{id}");
         }
-        assert_eq!(POLKIT.matches("<action id=").count(), 7);
+        assert_eq!(POLKIT.matches("<action id=").count(), 5);
     }
 }

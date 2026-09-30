@@ -4,7 +4,7 @@
 //! mounted at [`MOUNT_POINT`] for the length of one call, and the rest of what a snapshot is
 //! taken with (this system's `/` UUID, distribution, `/etc/fstab`, the filters).
 //!
-//! List, browse and restore mount the device read-only; create and delete read-write.
+//! List mounts the device read-only; create and delete read-write.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use apsis_core::settings::{self, Device};
 use apsis_core::{Error, Result, Runner};
 
 use crate::runner::SAFE_PATH;
-use crate::settings::{Files, lsblk};
+use crate::settings::{Files, lsblk, system};
 
 /// Where the helper mounts the backup device. Under `/run`, which Timeshift's own filters
 /// exclude (`/run/*`), like its `/run/timeshift/<pid>/backup`.
@@ -32,7 +32,7 @@ pub const FINDMNT_ROOT_UUID: [&str; 5] = [
     "--mountpoint",
 ];
 
-/// Read-only (list, browse, restore) or read-write (create, delete).
+/// Read-only (list) or read-write (create, delete).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
     ReadOnly,
@@ -62,7 +62,13 @@ pub fn config(
         source: PathBuf::from("/"),
         sys_uuid: root_uuid.trim().to_owned(),
         sys_distro: distro,
-        exclude: exclude::for_backup(&apsis.filters, fstab, users),
+        exclude: exclude::for_backup(
+            &apsis.filters,
+            apsis.include_root,
+            apsis.include_home,
+            fstab,
+            users,
+        ),
         dry_run: false,
     };
     Ok((config, device))
@@ -125,7 +131,11 @@ pub struct Mounted<R: Runner> {
 impl<R: Runner> Drop for Mounted<R> {
     fn drop(&mut self) {
         if let Err(error) = run(&self.runner, &["umount", MOUNT_POINT]) {
-            eprintln!("apsis-helper: couldn't unmount {MOUNT_POINT}: {error}");
+            // A disk pulled out mid-job: detach it lazily, so the next plug-in mounts cleanly.
+            eprintln!("apsis-helper: couldn't unmount {MOUNT_POINT}: {error}; unmounting lazily");
+            if let Err(error) = run(&self.runner, &["umount", "--lazy", MOUNT_POINT]) {
+                eprintln!("apsis-helper: couldn't unmount {MOUNT_POINT} lazily: {error}");
+            }
         }
     }
 }
@@ -144,7 +154,7 @@ pub fn open<R: Runner + Clone>(
     log: impl Fn(&str) + Send + Sync + 'static,
 ) -> Result<(NativeRsync<QuietRunner>, Mounted<R>)> {
     let devices = lsblk(runner)?;
-    let (apsis, _) = Files::system().effective(&settings::parse_lsblk(&devices)?, &[])?;
+    let (apsis, _) = Files::system().effective(&settings::parse_lsblk(&devices)?, &system()?)?;
     let root_uuid = run(runner, &[&FINDMNT_ROOT_UUID[..], &["/"]].concat())?;
     let distro = native::distro::full_name(Path::new("/"));
     // Timeshift reads a missing fstab or passwd as empty.
@@ -170,19 +180,6 @@ fn mount<R: Runner + Clone>(runner: &R, device: &Device, access: Access) -> Resu
     Ok(Mounted {
         runner: runner.clone(),
     })
-}
-
-/// The backup device from Apsis's config, mounted read-only (and `noexec`) at
-/// [`MOUNT_POINT`] while the guard lives: for browsing and restoring.
-///
-/// # Errors
-///
-/// See [`backup_device`]; also a failed `lsblk` or `mount`.
-pub fn mount_backup<R: Runner + Clone>(runner: &R) -> Result<Mounted<R>> {
-    let devices = lsblk(runner)?;
-    let (apsis, _) = Files::system().effective(&settings::parse_lsblk(&devices)?, &[])?;
-    let device = backup_device(&apsis, &devices)?;
-    mount(runner, &device, Access::ReadOnly)
 }
 
 /// Runs a fixed argv; its stdout, or an error with its stderr.
@@ -211,7 +208,9 @@ mod tests {
     fn apsis(uuid: &str) -> Config {
         Config {
             backup_device_uuid: uuid.to_owned(),
-            filters: vec!["+ /home/user1/**".to_owned(), "*.iso".to_owned()],
+            include_root: true,
+            include_home: false,
+            filters: vec!["+ /home/user1/**".to_owned(), "- *.iso".to_owned()],
         }
     }
 
@@ -234,7 +233,7 @@ mod tests {
         assert!(!config.dry_run);
         assert_eq!(
             config.exclude,
-            exclude::for_backup(&apsis(BACKUP_UUID).filters, "", &[])
+            exclude::for_backup(&apsis(BACKUP_UUID).filters, true, false, "", &[])
         );
     }
 

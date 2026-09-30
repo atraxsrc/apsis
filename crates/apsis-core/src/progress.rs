@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Progress of a long operation (a create or a restore): the percent and time left that
+//! Progress of a snapshot being made: the percent and time left that
 //! rsync prints while it runs, read from its output as it arrives.
 //!
 //! rsync redraws one terminal line with `\r`, so its stdout is split on `\r` as well as `\n`
@@ -26,21 +26,6 @@ impl Progress {
     #[must_use]
     pub fn has_estimate(&self) -> bool {
         self.percent.is_some_and(|p| p > 0.0)
-    }
-
-    /// This progress as part `index` (from 0) of `count` equal parts: a restore that runs
-    /// rsync once per path. The time left is only known for the last part.
-    #[must_use]
-    pub fn part_of(mut self, index: usize, count: usize) -> Self {
-        if count > 1 {
-            #[allow(clippy::cast_precision_loss, reason = "a handful of paths")]
-            let (index, count) = (index as f64, count as f64);
-            self.percent = self.percent.map(|p| (index * 100.0 + p) / count);
-            if index + 1.0 < count {
-                self.eta_seconds = None;
-            }
-        }
-        self
     }
 }
 
@@ -234,20 +219,6 @@ mod tests {
         ] {
             assert_eq!(parse_rsync(other), None, "{other}");
         }
-    }
-
-    #[test]
-    fn parts_of_a_restore() {
-        let half = Progress {
-            percent: Some(50.0),
-            eta_seconds: Some(10),
-            text: String::new(),
-        };
-        let first = half.clone().part_of(0, 2);
-        assert_eq!((first.percent, first.eta_seconds), (Some(25.0), None));
-        let last = half.clone().part_of(1, 2);
-        assert_eq!((last.percent, last.eta_seconds), (Some(75.0), Some(10)));
-        assert_eq!(half.clone().part_of(0, 1), half);
     }
 
     #[test]

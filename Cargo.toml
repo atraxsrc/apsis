@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/atraxsrc/apsis"
@@ -43,12 +43,19 @@ features = [
     "dbus-config",
     # Support creating additional application windows.
     "multi-window",
+    # The About page (`widget::about`).
+    "about",
     # Detached process spawning (`cosmic-settings panel`, `xdg-open`)
     "process",
+    # One window: a second `apsis --window` hands over to the first over D-Bus and exits.
+    "single-instance",
     # Uses tokio as the executor for the runtime
     "tokio",
     # Add Wayland support to winit
     "wayland",
+    # The file chooser for Add Folder / Add File in the filter settings, through the XDG
+    # portal (ashpd, already in Cargo.lock).
+    "xdg-portal",
     # Windowing support for X11, Windows, Mac, & Redox
     "winit",
 ]

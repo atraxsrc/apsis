@@ -16,7 +16,7 @@ const BTRFS_UUID: &str = "44444444-4444-4444-4444-444444444444";
 
 /// The real file's filter list, as the import takes it.
 fn imported_filters() -> Vec<String> {
-    import_timeshift(CONFIG, &[], &[]).unwrap().config.filters
+    import_timeshift(CONFIG, &[]).unwrap().legacy.filters
 }
 
 #[test]
@@ -68,41 +68,34 @@ fn filters_take_what_timeshift_takes() {
 }
 
 #[test]
-fn home_states_use_timeshifts_patterns() {
+fn home_states_read_timeshifts_patterns() {
     let user = User {
         name: "user1".to_owned(),
         home: "/home/user1".to_owned(),
         encrypted_home: false,
     };
-    let mut exclude = imported_filters();
-    assert_eq!(user.home_state(&exclude), HomeState::All);
-
-    user.set_home_state(&mut exclude, HomeState::Hidden);
-    assert_eq!(user.home_state(&exclude), HomeState::Hidden);
+    let list = |patterns: &[&str]| patterns.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
+    assert_eq!(user.home_state(&imported_filters()), HomeState::All);
     assert_eq!(
-        exclude,
-        [
-            "+ /root/**",
-            "/var/lib/libvirt/**",
-            "+ /home/user2/**",
-            "+ /home/user1/.**"
-        ]
+        user.home_state(&list(&["+ /home/user1/.**"])),
+        HomeState::Hidden
     );
-    user.set_home_state(&mut exclude, HomeState::Excluded);
-    assert_eq!(user.home_state(&exclude), HomeState::Excluded);
-    assert_eq!(exclude.last().unwrap(), "/home/user1/**");
-    assert!(!exclude.iter().any(|p| p.starts_with("+ /home/user1")));
-    user.set_home_state(&mut exclude, HomeState::All);
-    assert_eq!(exclude.last().unwrap(), "+ /home/user1/**");
-    assert!(user.owns("+ /home/user1/**") && !user.owns("+ /home/user2/**"));
-
+    assert_eq!(
+        user.home_state(&list(&["/home/user1/**"])),
+        HomeState::Excluded
+    );
+    assert_eq!(user.home_state(&list(&[])), HomeState::Excluded);
+    // Hidden files only wins over everything, as Timeshift reads it.
+    let both = list(&["+ /home/user1/**", "+ /home/user1/.**"]);
+    assert_eq!(user.home_state(&both), HomeState::Hidden);
     let encrypted = User {
         encrypted_home: true,
         ..user
     };
-    let mut exclude = Vec::new();
-    encrypted.set_home_state(&mut exclude, HomeState::All);
-    assert_eq!(exclude, ["+ /home/.ecryptfs/user1/***"]);
+    assert_eq!(
+        encrypted.home_state(&list(&["+ /home/.ecryptfs/user1/***"])),
+        HomeState::All
+    );
 }
 
 #[test]

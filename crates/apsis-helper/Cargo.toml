@@ -1,6 +1,6 @@
 [package]
 name = "apsis-helper"
-description = "Root D-Bus service that takes, deletes and restores snapshots for Apsis, guarded by polkit"
+description = "Root D-Bus service that takes and deletes snapshots for Apsis, guarded by polkit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

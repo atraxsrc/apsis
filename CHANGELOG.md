@@ -4,6 +4,92 @@ All notable changes to Apsis are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-09-30
+
+Apsis does four things: snapshot the system (with `/root` and `/home` as choices), a filter
+list, delete snapshots, and (in 0.5.0) restore the whole system. The window is now laid out
+like Timeshift's, in standard COSMIC widgets.
+
+### Upgrading
+
+- Open the settings once and click **Save**. Settings from 0.3 (version 1 of
+  `/etc/apsis/config.toml`) are shown converted: a home folder set to "everything" for every
+  user becomes the `/home` choice, "hidden files only" becomes a `+ <home>/.**` filter, and
+  plain excludes get a `-`. The converted settings take the same files (checked with rsync in
+  the tests). One exception: a `+` filter that a later filter used to hide now works, because
+  the folders above a kept path are let in.
+- Going back to 0.3: `sudo cp /etc/apsis/config.toml.bak /etc/apsis/config.toml` (0.3 can't read
+  version 2).
+- File restore is gone. Anything in `~/Apsis-restored/`, and any `*.apsis-before-*` file next to
+  an original, is yours; delete it by hand when you don't need it.
+- The helper's D-Bus interface is now `io.github.atraxsrc.Apsis.Helper2`. After upgrading, log
+  out and in (or re-add the applet) so the panel runs the new version.
+
+### Added
+
+- A window like Timeshift's: a toolbar (Create, Delete, Settings), the snapshot list (date and
+  comment; Ctrl-click and Shift-click select several), and a status area with the last
+  snapshot, the backup disk and its bar, and a running snapshot's progress.
+- Settings as tabs: **Location** (the backup disk), **Include** (`/root`, on by default; `/home`,
+  off by default), **Filters** (`+`/`-` list with Add Folder, Add File, Add Pattern, Remove,
+  Move Up, Move Down; new lines go on top), **Misc** (reminder, panel label).
+- **Stop** a snapshot while it's being made: rsync's process group is ended and what it copied
+  removed. The user who started it isn't asked for a password (new polkit action `stop` for
+  anyone else).
+- Every window and the panel popup show a snapshot being made or deleted elsewhere, and list
+  again when it ends.
+- What an interrupted snapshot leaves behind is shown in the list, removed by the next
+  snapshot, and can be deleted.
+- A backup disk pulled out during a snapshot or delete is reported as such by the helper.
+- Keyboard shortcuts: Ctrl+N, Delete, Ctrl+R / F5, Ctrl+,, Ctrl+A, arrows, Esc (man page and
+  README).
+
+### Changed
+
+- No terminal look: no prompt line, no key-hint footer, no rooms or dock.
+- The panel popup uses standard widgets: last snapshot, backup disk, a running job, the newest
+  snapshots, Open Apsis and Refresh.
+- A failed create's staging folder is removed with the delete's safe walk.
+- rsync gets `--delete-excluded` once (Timeshift passes it twice).
+- Summary: "System snapshot and restore".
+
+### Removed
+
+- Restoring single files (the browser, both restore modes, `Apsis-restored`, `.apsis-before`
+  backups) and the polkit actions `browse`, `restore` and `restore-original`.
+- Keep last N snapshots, and its preview.
+- Per-user home folder modes (excluded / hidden files only / everything).
+
+## [0.3.1] - 2026-09-30
+
+Fixes from the first test on a clean machine.
+
+### Fixed
+
+- One window: "open apsis" in the panel and the app launcher bring the open window forward
+  instead of opening another (libcosmic's single-instance support; the panel asks the
+  compositor for an activation token first). `--settings` and `--about` switch the open window
+  to that view when nothing is in progress there.
+- A window opened while a snapshot job runs (started by another window, or by one that was
+  closed) no longer looks idle: the activity pane says `busy · a job is running in the
+  background`, and Apsis lists again every few seconds until the job is over, then goes back to
+  idle.
+- A create that fails because the backup disk was unplugged says `create failed · backup disk
+  removed`; rsync's raw error ("Input/output error (os error 5)") goes to the log room only.
+- The helper's systemd unit no longer says it runs Timeshift: `Apsis snapshot helper`.
+
+### Added
+
+- The create room shows whether your home folder goes into the snapshot: `home  included`,
+  `home  hidden files only` or `home  excluded` (muted; changed in settings).
+- The file browser says `home not included in this snapshot` for an empty home folder, instead
+  of `empty folder`.
+- After a folder-mode restore, the activity pane says where the files went (`restored to
+  ~/Apsis-restored/<snapshot>/...`), and `o` (or `[o]pen folder`) opens that folder.
+- The backup disk is watched without `r`: every 5 seconds and when the popup or window opens,
+  Apsis looks for it in `/dev/disk/by-uuid` (no root, no mount). When it's gone, the strip and
+  the tooltip say `disk  not connected` and creating waits; when it's back, Apsis lists again.
+
 ## [0.3.0] - 2026-09-29
 
 A status you can read at a glance, and a window that does the work. The panel popup is now a
@@ -170,6 +256,8 @@ First release.
   password every time.
 - App and symbolic icons, AppStream metainfo, desktop entries, `just install` / `just uninstall`.
 
+[0.4.0]: https://github.com/atraxsrc/apsis/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/atraxsrc/apsis/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/atraxsrc/apsis/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/atraxsrc/apsis/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/atraxsrc/apsis/compare/v0.1.1...v0.1.2
