@@ -1878,6 +1878,14 @@ Checks:
       `start` awaits, 2 s at most); the `ready` plan next to the lock (refuses writes, not
       reads; a job of kind `restore`; keeps the helper alive; removed when the starter's bus
       name goes); `JobKind::Restore`. **This is where the build starts.**
+      **Status (2026-10-02): done**, `state.rs` and core's `job.rs` (DECISIONS 2026-10-02):
+      `JobKind::Restore` (`changes_the_list` false, the UI slice decides what another window
+      shows), `Running::ready`, `State::{is_ready, ready, take_ready, starter_left}`,
+      `Ready::end`, `ReadyInfo::is_too_old` (`READY_MAX_AGE`, 30 min), Busy for writes and
+      `Stop` while ready, reads through, `Job()` reports the plan, no idle exit, a restore
+      preparation stoppable like a create. Unused by the service until items 5 to 7, so the
+      new items carry `#[cfg_attr(not(test), expect(dead_code, ..))]` for now. Next: item 3
+      (`DeleteMany` moves with the rest of `Helper3`'s names) and item 4 (`CheckRestore`).
    3. **`DeleteMany`**: shipped in 0.4.2 on `Helper2`; here it only moves to `Helper3` with
       the other methods.
    4. **`CheckRestore`**: read-only mount, the reads (mountinfo, lsblk, `findmnt`, the ESP's

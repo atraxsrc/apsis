@@ -3409,3 +3409,49 @@ its place in `filter::PROTECTED`) is built as designed. The helper slice build c
 (PLAN 6b.13 step 3 item 2). For the runbook of the first real apply: use `systemctl cat` for
 the drop-in, expect fwupd and packagekit to run and finish at once, and compare `is-enabled`
 answers with a baseline.
+
+## 2026-10-02 - 6b helper slice: `State` keeps the ready plan next to the lock (step 3 item 2)
+
+Built as PLAN 6b.9 describes, tests first (`state::ready_tests`, 7 tests; `job::tests` extended).
+Nothing in `service.rs` calls it yet: the `Restore`, `RestartToRestore` and `CancelRestore`
+methods (items 5 to 7) will, and until then the new items carry
+`#[cfg_attr(not(test), expect(dead_code, ..))]`, which fails the build the moment they're used
+with the attribute still on.
+
+- **`JobKind::Restore`** (core), word `restore`: the preparation under the lock and then the
+  ready plan. `changes_the_list()` is **false** for it: a window that hears another window's
+  restore end would otherwise show "Deleted elsewhere" or "A delete started elsewhere failed"
+  (`app.rs` `on_job`'s fallback arms). What a window shows for a restore job that isn't its own,
+  and when it refreshes the list for the safety snapshot, is the UI slice's (6b.13 step 4; the
+  "Restore ready in another window" line in PLAN step 3's list for it). The applet's
+  `from_wire` test used `restore` as its unknown kind; it now uses `upgrade`.
+- **`Running::ready(starter_uid, starter_bus_name) -> Announced`**: takes the job out from under
+  the lock, sets `running`, 100%, no ETA, puts it in `State::ready` and announces it **with the
+  on-bus hook**, then releases the lock. So `Finished("restore", true, ..)` follows the ready
+  announcement on the bus the way an end does (`Announced::wait`). The plan is put in before the
+  lock is released, so no write slips in between.
+- **While a plan is ready**: `begin` of every kind, and `stop_target`, return `Busy`; `read`
+  goes through; `Job()` reports the plan (`restore`, `running`, the snapshot, 100); `idle_for`
+  never returns. Since a plan can only become ready from under the lock, `begin`'s check
+  before the compare-exchange is race-free: no plan appears while a write runs.
+- **Ending it**: `State::take_ready() -> Option<Ready>` empties the slot at once (writes are
+  admitted again from there; the service removes the plan's files between take and end, and
+  a write that sneaks in meanwhile finds nothing mounted and a plan that's cancelled anyway),
+  and `Ready::end(JobState)` announces `stopped` or `done` once, with the hook.
+  `State::starter_left(unique_name)` is `take_ready` only when the name is the plan's
+  starter's; the service's `NameOwnerChanged` listener (item 7) calls it.
+- **`ReadyInfo`** (`State::ready()`, `Ready::info()`): snapshot, starter uid, starter bus
+  name, `prepared` (a tokio `Instant`, so the paused-clock tests can age it) and
+  `is_too_old()` against `READY_MAX_AGE` = 30 min (6b.5). The uid is for the starter
+  exemption of `RestartToRestore` and `CancelRestore`; `request.json` keeps it too for a
+  helper restarted meanwhile (6b.9).
+- **`stop_target` accepts a `Restore` job** as it does a create (6b.5: stoppable until ready);
+  its name is known from the start (`State::named`), so the "another snapshot" check applies
+  unchanged. The refusal words became "only a create or a restore can be stopped" / "the
+  running job is about another snapshot" (helper-internal; the applet shows its own text).
+- `announce_end(&Active)` became `announce_then_finished(&Job)`, shared by `Running::end`,
+  `Running::ready` and `Ready::end`.
+- Test helpers `state()` and `drain()` in `state::tests` are `pub(super)` for the new module.
+
+Gate: `cargo test --workspace` (all green), `cargo clippy --workspace --all-targets -D warnings`,
+`cargo fmt --check`. Not committed; the checklist in PRIVACY.md comes first.

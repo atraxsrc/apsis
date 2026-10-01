@@ -12,6 +12,11 @@
 //! - **Reads aren't jobs.** A [`Reading`] announces nothing and never shows in `Job()`.
 //! - **The lock is released before the end is announced** ([`Running::end`]), so the refresh
 //!   the announcement sets off is never refused by the job it refreshes for.
+//! - **A ready restore plan isn't the lock** (6b.9). While a plan waits at the ready prompt
+//!   the helper keeps it next to the lock: writes and `Stop` get `Busy`, reads go through, and
+//!   `Job()` shows it as a running `restore` at 100%. It ends `stopped` (cancel, the disarm
+//!   timer, the starter leaving the bus, too old) or `done` (right before the restart). The
+//!   helper doesn't idle-exit while a plan is ready.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -55,6 +60,16 @@ impl Announced {
 /// second or two (mount, a few `info.json` files, `statvfs`, unmount).
 pub const WRITE_WAIT: Duration = Duration::from_secs(15);
 
+/// A plan left at the ready prompt longer than this is too old to restart with (6b.5).
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
+    )
+)]
+pub const READY_MAX_AGE: Duration = Duration::from_secs(30 * 60);
+
 /// The job holding the lock, and what `Stop` needs about it.
 struct Active {
     job: Job,
@@ -63,6 +78,74 @@ struct Active {
     /// The uid that started it; it may stop it without a password.
     starter: Option<u32>,
     throttle: Throttle,
+}
+
+/// The restore plan waiting at the ready prompt (see [`Running::ready`]).
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
+    )
+)]
+struct ReadyPlan {
+    job: Job,
+    starter: u32,
+    starter_name: String,
+    prepared: tokio::time::Instant,
+}
+
+/// What's known about the ready plan: who may restart or cancel it without a password, and
+/// how old it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
+    )
+)]
+pub struct ReadyInfo {
+    pub snapshot: String,
+    /// The uid that prepared it.
+    pub starter: u32,
+    /// The unique bus name of the connection that prepared it: when it leaves the bus, the
+    /// plan goes ([`State::starter_left`]).
+    pub starter_name: String,
+    pub prepared: tokio::time::Instant,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
+    )
+)]
+impl ReadyInfo {
+    /// Older than [`READY_MAX_AGE`]: "The preparation is too old. Start the restore again."
+    #[must_use]
+    pub fn is_too_old(&self) -> bool {
+        self.prepared.elapsed() > READY_MAX_AGE
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
+    )
+)]
+impl ReadyPlan {
+    fn info(&self) -> ReadyInfo {
+        ReadyInfo {
+            snapshot: self.job.snapshot.clone(),
+            starter: self.starter,
+            starter_name: self.starter_name.clone(),
+            prepared: self.prepared,
+        }
+    }
 }
 
 pub struct State {
@@ -74,6 +157,9 @@ pub struct State {
     /// Wakes [`State::idle_for`] whenever any of the above changes.
     activity: Notify,
     job: Mutex<Option<Active>>,
+    /// The restore plan at the ready prompt, next to the lock (never while a write runs: it's
+    /// set from under the lock, and refuses every write until it ends).
+    ready: Mutex<Option<ReadyPlan>>,
     /// Each change of the job, for the task that sends `JobChanged`.
     changes: mpsc::UnboundedSender<Announcement>,
     /// Readers in: [`Reading`] guards alive.
@@ -96,6 +182,7 @@ impl State {
             calls: AtomicUsize::new(0),
             activity: Notify::new(),
             job: Mutex::new(None),
+            ready: Mutex::new(None),
             changes,
             readers: Mutex::new(0),
             readers_gone: Notify::new(),
@@ -115,6 +202,12 @@ impl State {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    fn lock_ready(&self) -> MutexGuard<'_, Option<ReadyPlan>> {
+        self.ready
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Sends the job as it is now (nobody listening is fine).
     fn announce(&self, active: &Active) {
         let _ = self.changes.send(Announcement {
@@ -123,11 +216,12 @@ impl State {
         });
     }
 
-    /// Sends the job's end, with a way to hear when it's on the bus.
-    fn announce_end(&self, active: &Active) -> Announced {
+    /// Sends a job the caller's `Finished` follows (an end, or the ready plan), with a way to
+    /// hear when it's on the bus.
+    fn announce_then_finished(&self, job: &Job) -> Announced {
         let (sent, on_bus) = oneshot::channel();
         let announced = self.changes.send(Announcement {
-            job: job::to_wire(Some(&active.job)),
+            job: job::to_wire(Some(job)),
             sent: Some(sent),
         });
         Announced(announced.is_ok().then_some(on_bus))
@@ -177,6 +271,11 @@ impl State {
     /// [`Error::Busy`] if a write holds the lock (a second write is refused, not queued), or
     /// the readers didn't leave in time.
     pub async fn begin(self: &Arc<Self>, kind: JobKind) -> Result<Running> {
+        // A plan can only become ready from under the lock, so once this passes none appears
+        // while the write runs.
+        if self.is_ready() {
+            return Err(Error::Busy);
+        }
         self.running
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .map_err(|_| Error::Busy)?;
@@ -221,9 +320,68 @@ impl State {
         }
     }
 
-    /// The job holding the lock; `None` when idle.
+    /// The job holding the lock, else the ready plan (a running `restore` at 100%); `None`
+    /// when idle.
     pub fn job(&self) -> Option<Job> {
-        self.lock_job().as_ref().map(|a| a.job.clone())
+        self.lock_job()
+            .as_ref()
+            .map(|a| a.job.clone())
+            .or_else(|| self.lock_ready().as_ref().map(|p| p.job.clone()))
+    }
+
+    /// A restore plan waits at the ready prompt.
+    pub fn is_ready(&self) -> bool {
+        self.lock_ready().is_some()
+    }
+
+    /// The ready plan, if one waits.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
+        )
+    )]
+    pub fn ready(&self) -> Option<ReadyInfo> {
+        self.lock_ready().as_ref().map(ReadyPlan::info)
+    }
+
+    /// Takes the ready plan out (to cancel, disarm or restart with it); the caller removes
+    /// its files and then ends it with [`Ready::end`]. Writes are admitted again from here.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
+        )
+    )]
+    pub fn take_ready(self: &Arc<Self>) -> Option<Ready> {
+        let plan = self.lock_ready().take()?;
+        self.activity.notify_waiters();
+        Some(Ready {
+            state: Arc::clone(self),
+            plan,
+        })
+    }
+
+    /// The connection `name` left the bus: if it prepared the ready plan, the plan is taken
+    /// out (the window is gone without an answer) for the caller to clean up and end
+    /// `stopped`. `None` for any other name, or no plan.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
+        )
+    )]
+    pub fn starter_left(self: &Arc<Self>, name: &str) -> Option<Ready> {
+        {
+            let ready = self.lock_ready();
+            if ready.as_ref().is_none_or(|p| p.starter_name != name) {
+                return None;
+            }
+        }
+        self.take_ready()
     }
 
     /// The running create can be stopped with `cancel`; `starter` started it.
@@ -264,22 +422,27 @@ impl State {
         }
     }
 
-    /// What `Stop(snapshot)` would stop: the running create's cancel and who started it.
+    /// What `Stop(snapshot)` would stop: the running create's (or restore preparation's)
+    /// cancel and who started it.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`]: nothing runs, it isn't a create, or it's making another
-    /// snapshot (or its name isn't known yet).
+    /// [`Error::Busy`] while a plan is ready (it's cancelled, not stopped).
+    /// [`Error::InvalidInput`]: nothing runs, it isn't a create or a restore, or it's about
+    /// another snapshot (or the name isn't known yet).
     pub fn stop_target(&self, snapshot: &str) -> Result<(Arc<Cancel>, Option<u32>)> {
+        if self.is_ready() {
+            return Err(Error::Busy);
+        }
         let guard = self.lock_job();
         let Some(active) = guard.as_ref() else {
             return Err(refuse("nothing is running"));
         };
-        if active.job.kind != JobKind::Create {
-            return Err(refuse("only a create can be stopped"));
+        if !matches!(active.job.kind, JobKind::Create | JobKind::Restore) {
+            return Err(refuse("only a create or a restore can be stopped"));
         }
         if active.job.snapshot.is_empty() || active.job.snapshot != snapshot {
-            return Err(refuse("the running create is making another snapshot"));
+            return Err(refuse("the running job is about another snapshot"));
         }
         let cancel = active
             .cancel
@@ -304,11 +467,14 @@ impl State {
     }
 
     fn is_idle(&self) -> bool {
-        !self.is_running() && self.readers() == 0 && self.calls.load(Ordering::SeqCst) == 0
+        !self.is_running()
+            && !self.is_ready()
+            && self.readers() == 0
+            && self.calls.load(Ordering::SeqCst) == 0
     }
 
     /// Returns once nothing has happened for `idle` and nothing is in progress. Never while an
-    /// operation runs or a call is open, however long that takes.
+    /// operation runs, a plan is ready or a call is open, however long that takes.
     pub async fn idle_for(&self, idle: Duration) {
         loop {
             let activity = self.activity.notified();
@@ -377,9 +543,78 @@ impl Running {
         self.ended = true;
         self.state.release();
         match ended {
-            Some(active) => self.state.announce_end(&active),
+            Some(active) => self.state.announce_then_finished(&active.job),
             None => Announced(None),
         }
+    }
+
+    /// The restore's preparation is done: the plan moves next to the lock as the ready plan
+    /// (a running job at 100%), the lock is released, and the plan is announced. The caller
+    /// sends `Finished("restore", true, ..)` after [`Announced::wait`]. `starter` (uid) and
+    /// `starter_name` (unique bus name) are who prepared it.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
+        )
+    )]
+    pub fn ready(mut self, starter: u32, starter_name: &str) -> Announced {
+        let plan = self.state.lock_job().take().map(|active| {
+            let mut job = active.job;
+            job.state = JobState::Running;
+            job.percent = Some(100.0);
+            job.eta_seconds = None;
+            ReadyPlan {
+                job,
+                starter,
+                starter_name: starter_name.to_owned(),
+                prepared: tokio::time::Instant::now(),
+            }
+        });
+        self.ended = true;
+        let announced = plan.map(|plan| {
+            let announced = self.state.announce_then_finished(&plan.job);
+            *self.state.lock_ready() = Some(plan);
+            announced
+        });
+        self.state.release();
+        announced.unwrap_or(Announced(None))
+    }
+}
+
+/// The ready plan, taken out of the state (see [`State::take_ready`]) to be ended.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
+    )
+)]
+pub struct Ready {
+    state: Arc<State>,
+    plan: ReadyPlan,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
+    )
+)]
+impl Ready {
+    #[must_use]
+    pub fn info(&self) -> ReadyInfo {
+        self.plan.info()
+    }
+
+    /// The plan is over: `stopped` (cancelled, disarmed, the starter gone, too old) or `done`
+    /// (right before the restart). Announced once.
+    pub fn end(mut self, state: JobState) -> Announced {
+        self.plan.job.state = state;
+        self.state.activity.notify_waiters();
+        self.state.announce_then_finished(&self.plan.job)
     }
 }
 
@@ -395,11 +630,13 @@ impl Drop for Running {
 mod tests {
     use super::*;
 
-    fn state() -> (Arc<State>, mpsc::UnboundedReceiver<Announcement>) {
+    pub(super) fn state() -> (Arc<State>, mpsc::UnboundedReceiver<Announcement>) {
         State::new()
     }
 
-    fn drain(changes: &mut mpsc::UnboundedReceiver<Announcement>) -> Vec<(String, String, String)> {
+    pub(super) fn drain(
+        changes: &mut mpsc::UnboundedReceiver<Announcement>,
+    ) -> Vec<(String, String, String)> {
         let mut seen = Vec::new();
         while let Ok(Announcement {
             job: (kind, state, snapshot, ..),
@@ -686,5 +923,162 @@ mod tests {
         drop(call);
         tokio::time::sleep(idle * 2).await;
         assert!(waiter.is_finished());
+    }
+}
+
+#[cfg(test)]
+mod ready_tests {
+    use super::tests::{drain, state};
+    use super::*;
+
+    const NAME: &str = "2026-09-30_14-02-11";
+    const STARTER: &str = ":1.42";
+
+    /// A restore prepared to the ready prompt: the lock held while preparing, then released
+    /// with the plan kept next to it.
+    async fn ready_plan(state: &Arc<State>) -> Announced {
+        let running = state.begin(JobKind::Restore).await.unwrap();
+        state.named(NAME);
+        running.ready(1000, STARTER)
+    }
+
+    #[tokio::test]
+    async fn a_ready_plan_refuses_writes_and_stop_but_not_reads() {
+        let (state, mut changes) = state();
+        ready_plan(&state).await;
+        assert!(
+            !state.is_running(),
+            "the lock is free while a plan is ready"
+        );
+        assert!(state.is_ready());
+        for kind in [
+            JobKind::Create,
+            JobKind::Delete,
+            JobKind::DeleteMany,
+            JobKind::Configure,
+            JobKind::Restore,
+        ] {
+            assert!(
+                matches!(state.begin(kind).await, Err(Error::Busy)),
+                "{kind:?}"
+            );
+        }
+        assert!(matches!(state.stop_target(NAME), Err(Error::Busy)));
+        let _reader = state.read().expect("reads aren't refused");
+        // The plan is a job: running, the snapshot's name, 100%.
+        let job = state.job().unwrap();
+        assert_eq!(job.kind, JobKind::Restore);
+        assert_eq!(job.state, JobState::Running);
+        assert_eq!(job.snapshot, NAME);
+        assert_eq!(job.percent, Some(100.0));
+        let seen = drain(&mut changes);
+        assert_eq!(
+            seen.last().unwrap(),
+            &("restore".to_owned(), "running".to_owned(), NAME.to_owned())
+        );
+        let info = state.ready().unwrap();
+        assert_eq!(info.snapshot, NAME);
+        assert_eq!(info.starter, 1000);
+        assert_eq!(info.starter_name, STARTER);
+    }
+
+    /// `Finished("restore", true)` follows the ready announcement on the bus, as an end does.
+    #[tokio::test(start_paused = true)]
+    async fn finished_follows_the_ready_announcement() {
+        let (state, mut changes) = state();
+        let announced = ready_plan(&state).await;
+        let sent = drain_last_sent(&mut changes).expect("the ready announcement has a hook");
+        let waiter = tokio::spawn(announced.wait());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!waiter.is_finished());
+        sent.send(()).unwrap();
+        waiter.await.unwrap();
+    }
+
+    fn drain_last_sent(
+        changes: &mut mpsc::UnboundedReceiver<Announcement>,
+    ) -> Option<oneshot::Sender<()>> {
+        let mut last = None;
+        while let Ok(Announcement { sent, .. }) = changes.try_recv() {
+            last = sent;
+        }
+        last
+    }
+
+    #[tokio::test]
+    async fn a_ready_plan_ends_stopped_or_done_and_frees_the_writes() {
+        let (state, mut changes) = state();
+        ready_plan(&state).await;
+        drain(&mut changes);
+        let ready = state.take_ready().expect("the plan");
+        assert!(state.take_ready().is_none(), "taken once");
+        ready.end(JobState::Stopped);
+        assert_eq!(
+            drain(&mut changes),
+            [("restore".to_owned(), "stopped".to_owned(), NAME.to_owned())]
+        );
+        assert_eq!(state.job(), None);
+        assert!(!state.is_ready());
+        let running = state.begin(JobKind::Create).await.expect("writes again");
+        running.end(JobState::Done);
+        // Right before the restart: done.
+        ready_plan(&state).await;
+        drain(&mut changes);
+        state.take_ready().unwrap().end(JobState::Done);
+        assert_eq!(
+            drain(&mut changes),
+            [("restore".to_owned(), "done".to_owned(), NAME.to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_plan_goes_when_its_starter_leaves_the_bus() {
+        let (state, _changes) = state();
+        assert!(state.starter_left(STARTER).is_none(), "no plan");
+        ready_plan(&state).await;
+        assert!(state.starter_left(":1.43").is_none(), "another name");
+        assert!(state.is_ready());
+        let ready = state.starter_left(STARTER).expect("the starter's own");
+        assert_eq!(ready.info().starter_name, STARTER);
+        ready.end(JobState::Stopped);
+        assert!(!state.is_ready());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_ready_plan_is_too_old_after_half_an_hour() {
+        let (state, _changes) = state();
+        ready_plan(&state).await;
+        tokio::time::sleep(READY_MAX_AGE - Duration::from_secs(1)).await;
+        assert!(!state.ready().unwrap().is_too_old());
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(state.ready().unwrap().is_too_old());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_exit_waits_while_a_plan_is_ready() {
+        let idle = Duration::from_secs(60);
+        let (state, _changes) = state();
+        ready_plan(&state).await;
+        let waiter = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move { state.idle_for(idle).await }
+        });
+        tokio::time::sleep(idle * 10).await;
+        assert!(!waiter.is_finished(), "exited while a plan was ready");
+        state.take_ready().unwrap().end(JobState::Stopped);
+        tokio::time::sleep(idle * 2).await;
+        assert!(waiter.is_finished());
+    }
+
+    /// Until ready, a restore's preparation is stopped like a create.
+    #[tokio::test]
+    async fn a_restore_preparation_can_be_stopped_until_ready() {
+        let (state, _changes) = state();
+        let _running = state.begin(JobKind::Restore).await.unwrap();
+        state.stoppable(Cancel::new(), 1000);
+        assert!(state.stop_target(NAME).is_err(), "name not known yet");
+        state.named(NAME);
+        let (_, starter) = state.stop_target(NAME).unwrap();
+        assert_eq!(starter, Some(1000));
     }
 }

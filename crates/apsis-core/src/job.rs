@@ -10,8 +10,8 @@
 /// eta_seconds)`. Idle is `("", "", "", 0, -1, -1)`.
 pub type WireJob = (String, String, String, i64, f64, i64);
 
-/// What the helper's one lock is held for. Writes only: a list isn't a job (it shares a
-/// read-only mount with other lists and is never announced).
+/// What the helper's one lock is held for, or the ready restore plan next to it. Writes only:
+/// a list isn't a job (it shares a read-only mount with other lists and is never announced).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobKind {
     Create,
@@ -19,6 +19,10 @@ pub enum JobKind {
     /// Several snapshots deleted in order as one job (`DeleteMany`).
     DeleteMany,
     Configure,
+    /// A restore's preparation (checks, dry runs, the safety snapshot, the plan), and then the
+    /// ready plan waiting at the prompt: `running` at 100% until the restart (`done`) or a
+    /// cancel (`stopped`). Not the apply itself, which runs offline (6b).
+    Restore,
 }
 
 impl JobKind {
@@ -29,6 +33,7 @@ impl JobKind {
             Self::Delete => "delete",
             Self::DeleteMany => "delete-many",
             Self::Configure => "configure",
+            Self::Restore => "restore",
         }
     }
 
@@ -39,6 +44,7 @@ impl JobKind {
             "delete" => Some(Self::Delete),
             "delete-many" => Some(Self::DeleteMany),
             "configure" => Some(Self::Configure),
+            "restore" => Some(Self::Restore),
             _ => None,
         }
     }
@@ -174,8 +180,14 @@ mod tests {
         assert_eq!(from_wire(to_wire(Some(&many))), Some(many));
         // A list is never a job on the bus.
         assert_eq!(JobKind::from_word("list"), None);
+        // A ready restore plan is a running job at 100%.
+        let mut ready = Job::new(JobKind::Restore, 1_790_000_000);
+        ready.snapshot = "2026-09-30_14-02-11".to_owned();
+        ready.percent = Some(100.0);
+        assert_eq!(from_wire(to_wire(Some(&ready))), Some(ready));
+        assert_eq!(JobKind::Restore.word(), "restore");
         let unknown = (
-            "restore".to_owned(),
+            "upgrade".to_owned(),
             "running".to_owned(),
             String::new(),
             0,
@@ -191,6 +203,8 @@ mod tests {
         assert!(JobKind::Delete.changes_the_list());
         assert!(JobKind::DeleteMany.changes_the_list());
         assert!(!JobKind::Configure.changes_the_list());
+        // A restore's end is the restart (or a cancel); the UI slice says what a window shows.
+        assert!(!JobKind::Restore.changes_the_list());
     }
 
     #[test]
