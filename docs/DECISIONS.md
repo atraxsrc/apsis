@@ -4003,3 +4003,28 @@ the layout test on), clippy `-D warnings` on all targets, fmt check: all clean.
 **PLAN 6b.13 steps 1 to 5 are built and documented.** What's left is the owner's: the
 locale check and the `has_root` reading (DECISIONS 2026-10-02, the four answers), the fresh
 baseline on 0.5.0, check 1's runbook (next), checks 1 to 13, the version and the release.
+
+## 2026-10-02 - 6b: check 1's runbook and `tools/restore-check.sh`
+
+- **`notes/check-1-runbook.md`** (untracked, like check 0.4's: it names the test machine's
+  account and disk by placeholders, and the owner fills them in): the first real apply, keep
+  home with the safety snapshot. 1a installs the .deb on apsis-test; 1b runs the owner's two
+  read-only checks (the `C.UTF-8` charmap, and `pkaction` for the `restore` action: check 10);
+  1c takes the fresh baseline on 0.5.0 and saves the "before" numbers (`/home`'s mode,
+  cryptswap, ping's capability, the Flatpak list and size); 1d makes the changes the restore
+  must undo (the marker, cowsay) and the one it must keep (a file in `~`); 1e drives the
+  dialog and the preparation from apsis-test's screen while the helper's journal is followed,
+  and checks the plan files and the recovery note with the prompt up (and that nothing is
+  armed yet); 1f is Restart now with the boot id recorded and the screen watched; 1g the
+  window after login; 1h the offline boot's journal (the apply's steps, `pop-upgrade-init`
+  skipped), `tools/restore-check.sh`, the 1c comparison and `result.json`; 1i the cleanup.
+  "Passes when" and what to record follow the 0.4 runbook's shape.
+- **`tools/restore-check.sh`** (tracked; the small read-only script PLAN 6b.12's harness
+  names): run as root after a restore. It checks the arm is gone (the link, both names, the
+  unit, its wants link, the drop-in and its folder, the helper copy, `state.json`, the disarm
+  timer), prints `result.json`, compares the ESP's `vmlinuz.efi` and `initrd.img` byte for
+  byte with the files `/boot`'s links point to, checks the modules for the booted and the
+  running kernel and the loader entries, `dpkg --audit`, failed units, `acpid` and
+  `pop-upgrade`'s `is-enabled`, Pop's upgrade leftovers, and prints the previous boot's
+  journal for `apsis-restore.service` and `pop-upgrade-init.service`. `FAIL` lines are what to
+  look at; it changes nothing. POSIX sh, `sh -n` clean.
