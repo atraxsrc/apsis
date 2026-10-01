@@ -1854,3 +1854,37 @@ passes them in. What the plan left open:
   runs `update-initramfs` after the copy.
 - **Verified** with apsis-core's tests and clippy only; the workspace test and clippy run is
   the owner's.
+
+## 2026-10-01 - 6b: snapshot format and the Apsis in a snapshot (core)
+
+- **Format detection needs no new code.** `Info::is_old_format` (0.4.1) is what 6b asks: old
+  means `info.json` has no `apsis-rsync-flags`, or the flags name neither `-A` nor `-X`
+  (Timeshift's snapshots, Apsis 0.4.0's and older). `restore::argv::rsync` already takes it.
+  As PLAN 6b.6 step 3 says, an old-format snapshot is restored with `-a --numeric-ids` and
+  the rest, without `-A -X`, so the live extended attributes aren't stripped; the dialog
+  shows the "Older format" line (6b.8). It isn't a refusal. A snapshot whose `info.json`
+  can't be read has no format: it's refused first (6b.7).
+- **The Apsis in a snapshot:** `restore::apsis::in_snapshot(dpkg_status)` reads the text of
+  the snapshot's `var/lib/dpkg/status` (PLAN 6b.2) and gives one of the table's four cases:
+  `Current` (no line), `NotInstalled`, `NoRestore { version }` (0.4.x), `OldSettings
+  { version }` (0.3.x or older). It has no text: the lines are the UI's strings (6b.8), and
+  how the helper's `apsis_note` carries the case is the helper slice's.
+
+What the plan left open:
+
+- **"This Apsis version" is any 0.5 or later**, not only the running one: such an Apsis can
+  restore and show the result, so there's nothing to say. A different 0.5.x or a newer one
+  gets no line.
+- **No `var/lib/dpkg/status` in the snapshot** reads as no Apsis, as does a database without
+  an `apsis` stanza. An Apsis installed without dpkg (`just install`) isn't seen: the plan
+  reads dpkg's record only.
+- **Installed** means the stanza's state (the last word of `Status`) is anything but
+  `not-installed` or `config-files`: unpacked and half-configured have the files on disk.
+  The first such stanza for the package `apsis` counts.
+- **The version shown** is dpkg's upstream part: an epoch (`1:`) and a revision (`-1`) are
+  dropped, so `0.4.1-1` is shown as `0.4.1`. Only the first two numbers are compared.
+- **A version that can't be read** (no `Version` field, not two numbers) counts as 0.3.x or
+  older, with the text as written, which can be empty. That's the cautious line (install
+  Apsis again). How an empty one is shown is the UI slice's.
+- **Verified** with apsis-core's tests and clippy only; the workspace test and clippy run is
+  the owner's.

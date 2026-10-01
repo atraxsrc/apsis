@@ -6,6 +6,7 @@
 //! refresh are Apsis's own, not Timeshift's. Everything here works on text and paths it's
 //! given, so it's tested without root.
 
+pub mod apsis;
 pub mod argv;
 pub mod filter;
 pub mod refusal;
