@@ -23,8 +23,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
-use apsis_core::restore::apply::{Copied, CopyEnd};
+use apsis_core::native::Info;
+use apsis_core::restore::apply::{self, Copied, CopyEnd, SnapshotFound};
 use apsis_core::restore::filter::{self, Home};
+use apsis_core::restore::plan::Plan;
 use apsis_core::restore::refusal::Refusal;
 use apsis_core::restore::{argv, space};
 use rustix::process::{Pid, Signal};
@@ -204,6 +206,20 @@ fn fill(lab: &Lab) {
     write(s, "home/user/doc.txt", "the old document\n");
     write(s, "home/user/.config/app.conf", "old settings\n");
     write(s, "home/user/only-in-snapshot", "comes back with home\n");
+    let info = Info {
+        created: CREATED,
+        sys_uuid: ROOT_UUID.to_owned(),
+        sys_distro: "Pop 24.04 (noble)".to_owned(),
+        app_version: "apsis 0.5.0".to_owned(),
+        file_count: 40,
+        tags: vec!["ondemand".to_owned()],
+        comments: String::new(),
+        live: false,
+        kind: "rsync".to_owned(),
+        rsync_flags: Some("-aAX --numeric-ids".to_owned()),
+    };
+    fs::write(s.with_file_name("info.json"), info.to_text()).unwrap();
+    fs::write(s.with_file_name("exclude.list"), EXCLUDE_LIST).unwrap();
     age(s);
 
     // ---- the live root ----
@@ -412,10 +428,41 @@ fn text(output: &Output) -> String {
     )
 }
 
+/// A finished rsync as core takes it: the exit code, all of the standard output, the errors.
 fn copied(output: &Output) -> Copied {
-    Copied {
-        exit: output.status.code(),
-        tail: String::from_utf8_lossy(&output.stderr).into_owned(),
+    Copied::new(
+        output.status.code(),
+        &String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// The snapshot's `created`, in its `info.json` and in the plan.
+const CREATED: i64 = 1_789_990_080;
+const ROOT_UUID: &str = "11111111-2222-3333-4444-555555555555";
+
+fn plan() -> Plan {
+    Plan {
+        snapshot: "2026-09-25_11-28-00".to_owned(),
+        snapshot_created: CREATED,
+        backup_uuid: "99999999-8888-7777-6666-555555555555".to_owned(),
+        home: Home::Keep,
+        old_format: false,
+        safety_snapshot: None,
+        root_uuid: ROOT_UUID.to_owned(),
+        running_kernel: NEW.to_owned(),
+        root_needs: 1,
+        separate_home: None,
+        starter_uid: 1000,
+        prepared_at: 1_790_000_000,
+    }
+}
+
+/// What the runner reads at the snapshot's place before a copy, from the lab's disk.
+fn find_snapshot(lab: &Lab) -> SnapshotFound {
+    SnapshotFound {
+        has_localhost: fs::symlink_metadata(&lab.snapshot).is_ok_and(|meta| meta.is_dir()),
+        info: fs::read_to_string(lab.snapshot.with_file_name("info.json")).ok(),
     }
 }
 
@@ -1006,8 +1053,8 @@ fn a_clean_copy_exits_0_and_ends() {
     assert_eq!(copied(&output).end(), CopyEnd::Ended { problems: false });
 }
 
-/// Exit 23: a file of the snapshot that can't be read. The rest is copied, and what the
-/// snapshot lacks is still deleted.
+/// Plain exit 23: a file of the snapshot that can't be read. The rest is copied, and what
+/// the snapshot lacks is still deleted: a restore with problems.
 #[test]
 fn a_file_that_cant_be_read_exits_23_and_ends_with_problems() {
     let Some(lab) = lab("exit-23") else { return };
@@ -1021,6 +1068,8 @@ fn a_file_that_cant_be_read_exits_23_and_ends_with_problems() {
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
 
     assert_eq!(output.status.code(), Some(23), "{}", text(&output));
+    // Plain 23: rsync went on deleting, so this is a restore with problems.
+    assert!(!copied(&output).deletions_skipped, "{}", text(&output));
     assert_eq!(copied(&output).end(), CopyEnd::Ended { problems: true });
     let tail = copied(&output).tail;
     assert!(tail.contains("Permission denied (13)"), "{tail}");
@@ -1034,10 +1083,10 @@ fn a_file_that_cant_be_read_exits_23_and_ends_with_problems() {
 /// Exit 23 is also what rsync gives when a whole folder of the snapshot can't be read, as
 /// when the backup disk goes away under it. From there on it deletes nothing ("IO error
 /// encountered -- skipping file deletion"), so the tree isn't the snapshot's: what came
-/// after the snapshot stays. Core takes 23 as "ended, with problems" (PLAN 6b.6 step 3);
-/// this is what that covers.
+/// after the snapshot stays. Core takes 23 with that line as a copy that broke (PLAN 6b.6
+/// step 3): no boot refresh, and another attempt.
 #[test]
-fn a_folder_that_cant_be_read_exits_23_and_skips_the_deletions_after_it() {
+fn a_folder_that_cant_be_read_exits_23_skips_deletions_and_is_a_copy_that_broke() {
     let Some(lab) = lab("exit-23-folder") else {
         return;
     };
@@ -1057,36 +1106,69 @@ fn a_folder_that_cant_be_read_exits_23_and_skips_the_deletions_after_it() {
     let _ = fs::set_permissions(lab.live.join("a-first"), fs::Permissions::from_mode(0o755));
 
     assert_eq!(output.status.code(), Some(23), "{}", text(&output));
-    assert_eq!(copied(&output).end(), CopyEnd::Ended { problems: true });
-    // rsync says so on its standard output, not with the errors.
+    // rsync says so on its standard output, not with the errors, and core reads it there.
     let said = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        said.contains("IO error encountered -- skipping file deletion"),
-        "{}",
-        text(&output)
-    );
+    assert!(said.contains(apply::DELETIONS_SKIPPED), "{}", text(&output));
+    assert!(!copied(&output).tail.contains(apply::DELETIONS_SKIPPED));
+    assert!(copied(&output).deletions_skipped);
+    assert_eq!(copied(&output).end(), CopyEnd::Broke);
     // Copied, but nothing deleted.
     assert_eq!(read(&lab.live, "etc/hostname"), "snapshot\n");
     assert!(exists(&lab.live, "usr/bin/newer"));
     assert!(exists(&lab.live, "opt/app/bin/run"));
 }
 
-/// And exit 23 is what a snapshot that isn't there at all gives: nothing is copied and
-/// nothing deleted, and core would still go on to the boot files. The apply's step 2 checks
-/// the snapshot before the copy; this is why it must.
+/// Plain exit 23 is also what a snapshot that isn't there at all gives: nothing is copied,
+/// nothing deleted, and no line about deletions. rsync can't tell that from a restore with
+/// problems, so the apply checks the snapshot before every copy (`check_snapshot`): held
+/// here against the same lab, it passes while the snapshot is there and refuses once it's
+/// gone.
 #[test]
-fn a_snapshot_that_is_gone_exits_23_with_nothing_done() {
+fn a_snapshot_that_is_gone_exits_plain_23_and_is_what_the_check_before_the_copy_catches() {
     let Some(lab) = lab("exit-23-gone") else {
         return;
     };
+    assert_eq!(apply::check_snapshot(&plan(), &find_snapshot(&lab)), Ok(()));
     let before = shape(&lab.live);
     fs::rename(&lab.snapshot, lab.snapshot.with_file_name("gone")).unwrap();
+
+    assert_eq!(
+        apply::check_snapshot(&plan(), &find_snapshot(&lab)),
+        Err("the snapshot's folder isn't on the backup disk".to_owned())
+    );
+    // What rsync does if it's run all the same.
     let output = lab.restore(Run::default());
     assert_eq!(output.status.code(), Some(23), "{}", text(&output));
+    assert!(!copied(&output).deletions_skipped, "{}", text(&output));
     assert_eq!(copied(&output).end(), CopyEnd::Ended { problems: true });
     let mut after = shape(&lab.live);
     after.remove("var/lib/apsis/restore/restore.filter");
     assert_eq!(after, before);
+}
+
+/// The check holds the snapshot's own `info.json` against the plan: another snapshot at the
+/// same name (another creation time) isn't restored.
+#[test]
+fn another_snapshot_at_the_same_name_fails_the_check_before_the_copy() {
+    let Some(lab) = lab("check-other") else {
+        return;
+    };
+    let other = Plan {
+        snapshot_created: CREATED + 3600,
+        ..plan()
+    };
+    assert_eq!(
+        apply::check_snapshot(&other, &find_snapshot(&lab)),
+        Err(
+            "the snapshot on the backup disk isn't the one this restore was prepared for"
+                .to_owned()
+        )
+    );
+    fs::remove_file(lab.snapshot.with_file_name("info.json")).unwrap();
+    assert_eq!(
+        apply::check_snapshot(&plan(), &find_snapshot(&lab)),
+        Err("the snapshot's info.json can't be read".to_owned())
+    );
 }
 
 /// Exit 24: a file that was in the snapshot when rsync listed it and is gone when it gets
@@ -1156,10 +1238,7 @@ fn a_killed_copy_has_no_exit_code_and_broke() {
     rustix::process::kill_process_group(group, Signal::KILL).unwrap();
     let status = child.wait().unwrap();
     assert_eq!(status.code(), None);
-    let broke = Copied {
-        exit: status.code(),
-        tail: String::new(),
-    };
+    let broke = Copied::new(status.code(), "", String::new());
     assert_eq!(broke.end(), CopyEnd::Broke);
 }
 

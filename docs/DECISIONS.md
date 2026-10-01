@@ -2707,3 +2707,55 @@ been needed: the names are in the crate's docs.
   `--copy-links`, rule 10, the home rule, `-X` for an old format, a runtime path, the mount
   rules, the snapshot's own excludes. The ESP breakage wasn't caught at first (finding 5);
   the test without mounts was added for it.
+
+## 2026-10-01 - 6b: exit 23, the snapshot check before the copy, never --ignore-errors (owner)
+
+Settles "exit 23 is wider than PLAN says" in the entry above.
+
+1. **The snapshot is checked before every copy.** `apply::check_snapshot(plan, found)` is
+   pure; the runner reads what's there (`Runner::find_snapshot`: whether `localhost/` is a
+   folder, and `info.json`'s text). Failing it is never started: `not-started`, or `failed`
+   if an earlier copy wrote. No attempt is counted and nothing is touched in that boot.
+   - **Picked: what "info.json names the plan's snapshot" means.** `info.json` is
+     Timeshift's format and has no name in it (`created`, `sys-uuid`, `type`, ...). The name
+     is the folder's. So `request.json` has a new field, `snapshot_created` (version 1,
+     unshipped): the snapshot's `created` when the plan was made. The check needs
+     `info.json` to parse and to have that same `created`, the plan's root UUID, and the
+     type `rsync`. The helper fills the field when preparing.
+   - The alternative was to work the time out of the folder's name. That's local time, so
+     it would depend on the time zone of the boot the apply runs in.
+   - **Picked: before every copy**, not only the first (the owner wrote "before the first
+     copy step"): a retry three boots later has the same question to ask.
+2. **Exit 23 with rsync's "IO error encountered -- skipping file deletion" is a copy that
+   broke.** `Copied` has `deletions_skipped`, set by `Copied::new(exit, stdout, tail)` from
+   a whole line of rsync's standard output (`apply::DELETIONS_SKIPPED`). `Copied::end` gives
+   `Broke` for it: no boot refresh, the attempt counted, the link kept, a retry, `failed`
+   after the third. The message adds that rsync skipped its deletions, "so the system may be
+   a mix of the snapshot and what was there before". Plain 23 stays `problems`.
+   - The line alone, with another exit, decides nothing.
+   - **For the helper slice:** the line can be anywhere in the output, so the runner hands
+     core all of rsync's standard output, not a tail.
+3. **Never `--ignore-errors`.** With it rsync deletes even after a read error. `argv::NEVER`
+   names the options the restore never runs with, a unit test checks both argvs against
+   it, and PLAN 6b.10 says why.
+4. **Known limitation: a file changed in place with the same size and modification time as
+   in the snapshot isn't restored.** rsync's quick check compares size and time only.
+   `--checksum` would read every file on both sides, which is too slow for a full system
+   (and Timeshift doesn't use it either). In practice this needs something that rewrites a
+   file and sets its time back. PLAN's README notes (6b.13 step 5) now list it.
+
+The pinned tests, updated:
+
+- Real rsync: a file that can't be read is plain 23 and `problems`. A folder that can't be
+  read is 23 with the line (on standard output, not in the errors) and `Broke`. A snapshot
+  that's gone is plain 23 from rsync with nothing done, and the same lab fails
+  `check_snapshot`; another snapshot at the same name fails it too.
+- Fake runner: a snapshot that fails the check never starts, before every copy and after a
+  broken one; exit 23 with the deletions skipped retries, ends `failed` after three, and
+  can be finished by a later attempt.
+
+- **Verified** with apsis-core's tests (336 unit, 27 in `tests/restore.rs`, 3 ignored) and
+  clippy `-D warnings` through the scratch workspace; the workspace run is the owner's. The
+  new tests failed first as compile errors on the missing API. Three deliberate breakages
+  then failed on assertions in both suites and were undone: the 23 rule switched off, the
+  check's result ignored, the creation time not compared.

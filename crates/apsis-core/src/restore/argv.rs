@@ -9,6 +9,19 @@ use std::path::Path;
 /// every run of it is in the C locale.
 pub const LOCALE: (&str, &str) = ("LC_ALL", "C");
 
+/// Options the restore never runs with, each for its own reason (PLAN 6b.6, 6b.10):
+/// `--delete-excluded` would delete what the filter protects; `--ignore-errors` would delete
+/// even after a read error, when rsync can't know what the snapshot holds; `-L` and
+/// `--copy-links` would follow links; `--link-dest` and `-H` are for making snapshots.
+pub const NEVER: [&str; 6] = [
+    "--delete-excluded",
+    "--ignore-errors",
+    "-L",
+    "--copy-links",
+    "--link-dest",
+    "-H",
+];
+
 /// rsync from a snapshot's `localhost/` over `target` (`/` for real), with the restore's
 /// filter and its own log.
 ///
@@ -16,8 +29,7 @@ pub const LOCALE: (&str, &str) = ("LC_ALL", "C");
 /// `-A -X`. With `-X`, rsync would strip the live extended attributes (file capabilities)
 /// even from unchanged files, to match a snapshot that never stored them.
 ///
-/// Never `--delete-excluded` (an excluded path stays as it is on the live system), `-L`,
-/// `--link-dest` or `-H`.
+/// Never any of [`NEVER`].
 #[must_use]
 pub fn rsync(
     localhost: &Path,
@@ -157,6 +169,28 @@ mod tests {
                 without(argv(old_format), &["--info=progress2", "--log-file="])
             );
         }
+    }
+
+    /// With `--ignore-errors` rsync deletes even after a read error, when it can't know what
+    /// the snapshot holds. Never, for the restore or its dry run (PLAN 6b.10).
+    #[test]
+    fn errors_are_never_ignored() {
+        for old_format in [false, true] {
+            let dry = rsync_dry_run(
+                Path::new(LOCALHOST),
+                Path::new("/"),
+                Path::new(FILTER),
+                old_format,
+            );
+            for argv in [argv(old_format), dry] {
+                for arg in argv {
+                    let arg = arg.to_str().unwrap().to_owned();
+                    assert!(!arg.starts_with("--ignore-errors"), "{arg}");
+                    assert!(!arg.starts_with("--force-delete"), "{arg}");
+                }
+            }
+        }
+        assert!(NEVER.contains(&"--ignore-errors"));
     }
 
     #[test]

@@ -20,8 +20,9 @@ pub const MAX_AGE_SECS: i64 = 30 * 60;
 /// How far ahead of the clock `prepared_at` may be before the plan's age counts as unknown.
 pub const MAX_FUTURE_SECS: i64 = 2 * 60;
 
-const KEYS: [&str; 11] = [
+const KEYS: [&str; 12] = [
     "snapshot",
+    "snapshot_created",
     "backup_uuid",
     "home",
     "old_format",
@@ -39,6 +40,10 @@ const KEYS: [&str; 11] = [
 pub struct Plan {
     /// The snapshot to restore.
     pub snapshot: String,
+    /// Its `info.json`'s `created` (Unix seconds) when the plan was made. `info.json` has no
+    /// name in it, so this is what tells the apply that the snapshot at that name is still
+    /// the same one ([`super::apply::check_snapshot`]).
+    pub snapshot_created: i64,
     /// The backup disk's filesystem UUID.
     pub backup_uuid: String,
     pub home: Home,
@@ -82,6 +87,7 @@ impl Plan {
             .ok_or_else(|| FileError::Invalid("\"starter_uid\" isn't a user id".to_owned()))?;
         let plan = Self {
             snapshot: file::text(&map, "snapshot")?.to_owned(),
+            snapshot_created: file::time(&map, "snapshot_created")?,
             backup_uuid: file::text(&map, "backup_uuid")?.to_owned(),
             home: file::home(&map)?,
             old_format: file::flag(&map, "old_format")?,
@@ -110,6 +116,7 @@ impl Plan {
         );
         Ok(file::to_text([
             ("snapshot", self.snapshot.as_str().into()),
+            ("snapshot_created", self.snapshot_created.into()),
             ("backup_uuid", self.backup_uuid.as_str().into()),
             ("home", file::home_word(self.home).into()),
             ("old_format", self.old_format.into()),
@@ -154,6 +161,7 @@ impl Plan {
 
     fn validate(&self) -> Result<(), FileError> {
         file::check_snapshot("snapshot", &self.snapshot)?;
+        file::check_time("snapshot_created", self.snapshot_created)?;
         file::check_uuid("backup_uuid", &self.backup_uuid)?;
         if let Some(safety) = &self.safety_snapshot {
             file::check_snapshot("safety_snapshot", safety)?;
@@ -220,6 +228,7 @@ mod tests {
     fn plan() -> Plan {
         Plan {
             snapshot: SNAPSHOT.to_owned(),
+            snapshot_created: 1_789_990_080,
             backup_uuid: BACKUP.to_owned(),
             home: Home::Keep,
             old_format: false,
@@ -247,6 +256,7 @@ mod tests {
     const TEXT: &str = r#"{
   "version": 1,
   "snapshot": "2026-09-25_11-28-00",
+  "snapshot_created": 1789990080,
   "backup_uuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
   "home": "keep",
   "old_format": false,
@@ -259,6 +269,19 @@ mod tests {
   "prepared_at": 1790000000
 }
 "#;
+
+    /// The snapshot's `created` from its `info.json`, so the apply can tell it's the same
+    /// snapshot at that name.
+    #[test]
+    fn the_snapshots_creation_time_must_be_a_time() {
+        for value in ["0", "-5", "\"1789990080\"", "null"] {
+            assert_eq!(
+                invalid(Plan::parse(&text_with("snapshot_created", value))),
+                "\"snapshot_created\" isn't a time",
+                "{value}"
+            );
+        }
+    }
 
     fn invalid(result: Result<Plan, FileError>) -> String {
         match result {

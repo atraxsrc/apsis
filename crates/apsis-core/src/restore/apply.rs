@@ -20,6 +20,7 @@ use super::file::FileError;
 use super::filter::Home;
 use super::plan::Plan;
 use super::state::{MAX_ATTEMPTS, MAX_BOOTS, Outcome, Report, State, Step};
+use crate::native::Info;
 
 /// The message of the report of last resort (PLAN 6b.10).
 pub const MINIMAL_MESSAGE: &str = "result could not be saved, see journal";
@@ -39,6 +40,10 @@ pub struct Paths<'a> {
     pub root: &'a Path,
 }
 
+/// What rsync prints on its standard output when a read error made it stop deleting: from
+/// there on, what the snapshot lacks stays.
+pub const DELETIONS_SKIPPED: &str = "IO error encountered -- skipping file deletion";
+
 /// How pass 1 ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Copied {
@@ -46,25 +51,92 @@ pub struct Copied {
     pub exit: Option<i32>,
     /// Its last lines, for the result of a copy that broke.
     pub tail: String,
+    /// rsync said [`DELETIONS_SKIPPED`].
+    pub deletions_skipped: bool,
+}
+
+/// What's at the snapshot's place on the backup disk, read right before a copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotFound {
+    /// `snapshots/<name>/localhost/` is a folder (not followed).
+    pub has_localhost: bool,
+    /// The text of `snapshots/<name>/info.json`. `None`: missing or unreadable.
+    pub info: Option<String>,
+}
+
+/// The check before every copy: the snapshot's folder is there, and its `info.json` is the
+/// plan's snapshot's. rsync itself only exits 23 when the folder is gone, having done
+/// nothing, and the apply would go on from that.
+///
+/// `info.json` has no name in it. What it's held against is the creation time the plan
+/// recorded, the root UUID, and the type.
+///
+/// # Errors
+///
+/// Why the copy isn't started, in words for the result.
+pub fn check_snapshot(plan: &Plan, found: &SnapshotFound) -> Result<(), String> {
+    if !found.has_localhost {
+        return Err("the snapshot's folder isn't on the backup disk".to_owned());
+    }
+    let Some(info) = found.info.as_deref().and_then(Info::parse) else {
+        return Err("the snapshot's info.json can't be read".to_owned());
+    };
+    let wrong = if info.created != plan.snapshot_created {
+        "isn't the one this restore was prepared for"
+    } else if info.sys_uuid != plan.root_uuid {
+        "is of another installation"
+    } else if info.kind != "rsync" {
+        "isn't an rsync snapshot"
+    } else {
+        return Ok(());
+    };
+    Err(format!("the snapshot on the backup disk {wrong}"))
 }
 
 /// What a copy's exit means (PLAN 6b.6 step 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopyEnd {
-    /// Exit 0, or 24 (source files that vanished): the apply goes on. `problems` is exit 23:
-    /// some files couldn't be written or deleted.
+    /// Exit 0, or 24 (source files that vanished): the apply goes on. `problems` is exit 23
+    /// by itself: some files couldn't be written or deleted.
     Ended { problems: bool },
-    /// Any other exit, or none: the copy broke (PLAN 6b.10).
+    /// Any other exit, or none, or exit 23 with the deletions skipped: the copy broke (PLAN
+    /// 6b.10).
     Broke,
 }
 
 impl Copied {
+    /// From a finished rsync: its exit code, all of its standard output, and the last lines
+    /// of its errors.
+    #[must_use]
+    pub fn new(exit: Option<i32>, stdout: &str, tail: String) -> Self {
+        Self {
+            exit,
+            tail,
+            deletions_skipped: stdout.lines().any(|line| line == DELETIONS_SKIPPED),
+        }
+    }
+
     #[must_use]
     pub fn end(&self) -> CopyEnd {
         match self.exit {
             Some(0 | 24) => CopyEnd::Ended { problems: false },
+            // A folder of the snapshot couldn't be read: the tree isn't the snapshot's.
+            Some(23) if self.deletions_skipped => CopyEnd::Broke,
             Some(23) => CopyEnd::Ended { problems: true },
             _ => CopyEnd::Broke,
+        }
+    }
+
+    /// The copy's last lines, and that the system may be mixed if deletions were skipped.
+    fn why(&self) -> String {
+        if self.deletions_skipped {
+            format!(
+                "{}; rsync skipped its deletions after a read error, so the system may be a \
+                 mix of the snapshot and what was there before",
+                self.tail
+            )
+        } else {
+            self.tail.clone()
         }
     }
 }
@@ -82,6 +154,10 @@ pub trait Runner {
     ///
     /// Why the restore can't start in this boot, in words for the result.
     fn open_backup(&mut self, plan: &Plan) -> Result<(), String>;
+
+    /// Reads what's at the snapshot's place, for [`check_snapshot`]. Asked right before
+    /// every copy.
+    fn find_snapshot(&mut self, plan: &Plan) -> SnapshotFound;
 
     /// Step 3: pass 1, rsync over `/`. It returns only when what rsync wrote is on disk
     /// (`sync`): a copy that ended is never run again after a power cut.
@@ -300,6 +376,11 @@ fn run(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
                 message,
             );
         }
+        // The snapshot, right before the copy: gone or another one, and nothing is touched.
+        if let Err(reason) = check_snapshot(&plan, &runner.find_snapshot(&plan)) {
+            let outcome = unstarted(state);
+            return finish(paths, runner, Some(&plan), Some(state), outcome, reason);
+        }
         let copying = State {
             attempts: state.attempts + 1,
             written: true,
@@ -329,7 +410,7 @@ fn run(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
             CopyEnd::Broke if state.attempts >= MAX_ATTEMPTS => {
                 let message = format!(
                     "the copy broke on each of {MAX_ATTEMPTS} tries: {}",
-                    copied.tail
+                    copied.why()
                 );
                 return finish(
                     paths,
@@ -345,7 +426,7 @@ fn run(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
                 runner.say(&format!(
                     "the copy broke ({}): restarting to try again, attempt {attempt} of \
                      {MAX_ATTEMPTS}",
-                    copied.tail
+                    copied.why()
                 ));
                 return End::Retry { attempt };
             }
@@ -762,16 +843,20 @@ mod tests {
     use super::super::plan;
     use super::super::state::{MAX_BOOTS, RESULT_FILE, STATE_FILE};
     use super::*;
+    use crate::native::Info;
 
     const SNAPSHOT: &str = "2026-09-25_11-28-00";
     const SAFETY: &str = "2026-10-01_09-15-42";
     const NOW: i64 = 1_790_000_600;
+    /// The snapshot's `created`, in its `info.json` and in the plan.
+    const CREATED: i64 = 1_789_990_080;
 
     /// The lab's machine runs `NEW` (previous `OLD`). The snapshot is from before the kernel
     /// update: `OLD` (previous `OLDER`), and it doesn't have `NEW`.
     fn plan() -> Plan {
         Plan {
             snapshot: SNAPSHOT.to_owned(),
+            snapshot_created: CREATED,
             backup_uuid: "99999999-8888-7777-6666-555555555555".to_owned(),
             home: Home::Keep,
             old_format: false,
@@ -790,6 +875,29 @@ mod tests {
         plan().save(&lab.state).unwrap();
         State::default().save(&lab.state).unwrap();
         std::os::unix::fs::symlink(&lab.state, lab.root.join("system-update")).unwrap();
+    }
+
+    /// The snapshot's `info.json` as a create writes it.
+    fn info() -> Info {
+        Info {
+            created: CREATED,
+            sys_uuid: UUID.to_owned(),
+            sys_distro: "Pop 24.04 (noble)".to_owned(),
+            app_version: "apsis 0.5.0".to_owned(),
+            file_count: 1234,
+            tags: vec!["ondemand".to_owned()],
+            comments: String::new(),
+            live: false,
+            kind: "rsync".to_owned(),
+            rsync_flags: Some("-aAX --numeric-ids".to_owned()),
+        }
+    }
+
+    fn found(info: &Info) -> SnapshotFound {
+        SnapshotFound {
+            has_localhost: true,
+            info: Some(info.to_text()),
+        }
     }
 
     fn armed(name: &str) -> Lab {
@@ -838,6 +946,10 @@ mod tests {
         count: usize,
         cut: Option<Cut>,
         backup: Result<(), String>,
+        /// What's at the snapshot's place on the backup disk.
+        snapshot: SnapshotFound,
+        /// rsync said it skipped its deletions, in every copy that exits 23.
+        deletions_skipped: bool,
         /// The exit codes of the copies to come; exit 0 when it's empty.
         exits: VecDeque<Option<i32>>,
         refresh: Refresh,
@@ -869,6 +981,8 @@ mod tests {
                 count: 0,
                 cut: None,
                 backup: Ok(()),
+                snapshot: found(&info()),
+                deletions_skipped: false,
                 exits: VecDeque::new(),
                 refresh: Refresh::Works,
                 fail_esp_backup: false,
@@ -937,6 +1051,10 @@ mod tests {
             })
         }
 
+        fn find_snapshot(&mut self, _plan: &Plan) -> SnapshotFound {
+            self.call("find_snapshot", |fake| fake.snapshot.clone())
+        }
+
         fn copy(&mut self, _plan: &Plan) -> Copied {
             self.call("copy", |fake| {
                 fake.note_state("copy");
@@ -951,6 +1069,7 @@ mod tests {
                 Copied {
                     exit,
                     tail: format!("rsync error: code {exit:?}"),
+                    deletions_skipped: fake.deletions_skipped && exit == Some(23),
                 }
             })
         }
@@ -1189,6 +1308,7 @@ mod tests {
             [
                 "is_armed",
                 "open_backup",
+                "find_snapshot",
                 "copy",
                 "back_up_esp",
                 "refresh_boot",
@@ -1514,6 +1634,9 @@ mod tests {
         fn open_backup(&mut self, plan: &Plan) -> Result<(), String> {
             self.0.open_backup(plan)
         }
+        fn find_snapshot(&mut self, plan: &Plan) -> SnapshotFound {
+            self.0.find_snapshot(plan)
+        }
         fn copy(&mut self, plan: &Plan) -> Copied {
             self.0.copy(plan)
         }
@@ -1587,11 +1710,15 @@ mod tests {
         fn open_backup(&mut self, plan: &Plan) -> Result<(), String> {
             self.0.open_backup(plan)
         }
+        fn find_snapshot(&mut self, plan: &Plan) -> SnapshotFound {
+            self.0.find_snapshot(plan)
+        }
         fn copy(&mut self, _plan: &Plan) -> Copied {
             self.0.calls.push("copy");
             Copied {
                 exit: Some(0),
                 tail: String::new(),
+                deletions_skipped: false,
             }
         }
         fn back_up_esp(&mut self, plan: &Plan) -> Result<Manifest, EspError> {
@@ -1639,13 +1766,19 @@ mod tests {
     /// PLAN 6b.6 step 3: which exits of pass 1 go on, and which are a copy that broke.
     #[test]
     fn a_copys_exit_says_whether_it_ended() {
-        let end = |exit| {
-            Copied {
-                exit,
-                tail: String::new(),
-            }
-            .end()
+        let copied = |exit, deletions_skipped| Copied {
+            exit,
+            tail: String::new(),
+            deletions_skipped,
         };
+        let end = |exit| copied(exit, false).end();
+        // Exit 23 with rsync's deletions skipped isn't a copy with problems: it broke.
+        assert_eq!(copied(Some(23), true).end(), CopyEnd::Broke);
+        // The line alone decides nothing.
+        assert_eq!(
+            copied(Some(0), true).end(),
+            CopyEnd::Ended { problems: false }
+        );
         assert_eq!(end(Some(0)), CopyEnd::Ended { problems: false });
         assert_eq!(end(Some(24)), CopyEnd::Ended { problems: false });
         assert_eq!(end(Some(23)), CopyEnd::Ended { problems: true });
@@ -1660,6 +1793,184 @@ mod tests {
         ] {
             assert_eq!(end(exit), CopyEnd::Broke, "{exit:?}");
         }
+    }
+
+    /// What rsync prints on its standard output when a read error made it skip deletions.
+    #[test]
+    fn a_copys_output_says_whether_deletions_were_skipped() {
+        let stdout = "sending incremental file list\n\
+                      IO error encountered -- skipping file deletion\n\
+                      \nNumber of files: 3\n";
+        assert!(Copied::new(Some(23), stdout, "x".to_owned()).deletions_skipped);
+        assert_eq!(Copied::new(Some(23), stdout, "x".to_owned()).tail, "x");
+        assert!(!Copied::new(Some(23), "Number of files: 3\n", String::new()).deletions_skipped);
+        assert!(!Copied::new(Some(23), "", String::new()).deletions_skipped);
+    }
+
+    // ---- the snapshot, before the copy ----
+
+    /// The pure check: the snapshot's folder is there, and its `info.json` is the plan's
+    /// snapshot's (the same creation time), of this installation, an rsync one.
+    #[test]
+    fn the_snapshot_is_checked_against_the_plan() {
+        let plan = plan();
+        assert_eq!(check_snapshot(&plan, &found(&info())), Ok(()));
+        let no_folder = SnapshotFound {
+            has_localhost: false,
+            ..found(&info())
+        };
+        let no_info = SnapshotFound {
+            has_localhost: true,
+            info: None,
+        };
+        let not_json = SnapshotFound {
+            has_localhost: true,
+            info: Some("{".to_owned()),
+        };
+        let other = Info {
+            created: CREATED + 1,
+            ..info()
+        };
+        let elsewhere = Info {
+            sys_uuid: "99999999-2222-3333-4444-555555555555".to_owned(),
+            ..info()
+        };
+        let btrfs = Info {
+            kind: "btrfs".to_owned(),
+            ..info()
+        };
+        for (snapshot, reason) in [
+            (no_folder, "the snapshot's folder isn't on the backup disk"),
+            (no_info, "the snapshot's info.json can't be read"),
+            (not_json, "the snapshot's info.json can't be read"),
+            (
+                found(&other),
+                "the snapshot on the backup disk isn't the one this restore was prepared for",
+            ),
+            (
+                found(&elsewhere),
+                "the snapshot on the backup disk is of another installation",
+            ),
+            (
+                found(&btrfs),
+                "the snapshot on the backup disk isn't an rsync snapshot",
+            ),
+        ] {
+            assert_eq!(
+                check_snapshot(&plan, &snapshot),
+                Err(reason.to_owned()),
+                "{snapshot:?}"
+            );
+        }
+    }
+
+    /// A snapshot that isn't there, or isn't the plan's, never starts: no copy, no attempt,
+    /// nothing touched.
+    #[test]
+    fn a_snapshot_that_fails_the_check_never_starts() {
+        let lab = armed("apply-snapshot-gone");
+        let before = lab.esp_tree();
+        let mut fake = Fake::new(&lab);
+        fake.snapshot = SnapshotFound {
+            has_localhost: false,
+            info: None,
+        };
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::NotStarted));
+        assert_eq!(fake.count_of("copy"), 0);
+        assert_eq!(fake.count_of("back_up_esp"), 0);
+        assert_eq!(
+            report(&lab).message,
+            "the snapshot's folder isn't on the backup disk"
+        );
+        assert_eq!(State::load(&lab.state).unwrap(), state(0, Step::End, false));
+        assert!(!is_linked(&lab));
+        assert_eq!(lab.esp_tree(), before);
+    }
+
+    /// The same after an earlier boot's copy broke: no further copy, and a restore that
+    /// didn't finish.
+    #[test]
+    fn a_snapshot_that_is_gone_after_a_broken_copy_ends_failed() {
+        let lab = armed("apply-snapshot-gone-later");
+        let mut fake = Fake::new(&lab);
+        fake.exits = [Some(12)].into();
+        assert_eq!(boot(&mut fake), End::Retry { attempt: 2 });
+        fake.snapshot = found(&Info {
+            created: CREATED + 60,
+            ..info()
+        });
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::Failed));
+        assert_eq!(fake.count_of("copy"), 1);
+        assert_eq!(
+            report(&lab).message,
+            "the snapshot on the backup disk isn't the one this restore was prepared for"
+        );
+    }
+
+    /// The check runs before every copy, not only the first.
+    #[test]
+    fn the_snapshot_is_checked_before_every_copy() {
+        let lab = armed("apply-snapshot-each");
+        let mut fake = Fake::new(&lab);
+        fake.exits = [Some(11), Some(11)].into();
+        boot_to_the_end(&mut fake);
+        assert_eq!(fake.count_of("copy"), 3);
+        assert_eq!(fake.count_of("find_snapshot"), 3);
+        let copies: Vec<_> = fake
+            .calls
+            .iter()
+            .enumerate()
+            .filter(|(_, call)| **call == "copy")
+            .map(|(index, _)| {
+                fake.calls[..index]
+                    .iter()
+                    .rev()
+                    .find(|call| **call != "say")
+            })
+            .collect();
+        assert_eq!(copies, [Some(&"find_snapshot"); 3]);
+    }
+
+    // ---- exit 23 with the deletions skipped ----
+
+    /// rsync exited 23 and said it skipped its deletions: a folder of the snapshot couldn't
+    /// be read. That's a copy that broke, not one with problems: it counts, the link stays,
+    /// the boot files aren't touched, and it's tried again.
+    #[test]
+    fn exit_23_with_the_deletions_skipped_is_a_copy_that_broke() {
+        let lab = armed("apply-23-skipped");
+        let before = lab.esp_tree();
+        let mut fake = Fake::new(&lab);
+        fake.deletions_skipped = true;
+        fake.exits = [Some(23), Some(23), Some(23)].into();
+        assert_eq!(boot(&mut fake), End::Retry { attempt: 2 });
+        assert!(is_linked(&lab));
+        assert_eq!(
+            State::load(&lab.state).unwrap(),
+            state(1, Step::Copy, false)
+        );
+        assert_eq!(boot(&mut fake), End::Retry { attempt: 3 });
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::Failed));
+        assert_eq!(fake.count_of("back_up_esp"), 0);
+        assert_eq!(fake.count_of("refresh_boot"), 0);
+        assert_eq!(lab.esp_tree(), before);
+        assert_eq!(
+            report(&lab).message,
+            "the copy broke on each of 3 tries: rsync error: code Some(23); rsync skipped its \
+             deletions after a read error, so the system may be a mix of the snapshot and what \
+             was there before"
+        );
+    }
+
+    /// The next attempt can end well: the disk was back.
+    #[test]
+    fn a_copy_that_broke_on_skipped_deletions_is_finished_by_the_next_attempt() {
+        let lab = armed("apply-23-skipped-retry");
+        let mut fake = Fake::new(&lab);
+        fake.deletions_skipped = true;
+        fake.exits = [Some(23), Some(0)].into();
+        assert_eq!(boot(&mut fake), End::Retry { attempt: 2 });
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::Done));
     }
 
     // ---- the boot counter ----
@@ -1757,6 +2068,7 @@ mod tests {
     fn a_helper_that_dies_at_any_point_after_the_count_is_bounded() {
         for (die_at, refresh) in [
             ("open_backup", Refresh::Works),
+            ("find_snapshot", Refresh::Works),
             ("copy", Refresh::Works),
             ("back_up_esp", Refresh::Works),
             ("refresh_boot", Refresh::Works),

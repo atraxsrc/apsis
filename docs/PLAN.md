@@ -684,9 +684,11 @@ the saved step** (6b.10).
    `-A -X` only for a new-format snapshot (0.4.1). An old-format one is restored with `-a
    --numeric-ids` and the rest, without `-A -X`. With `-X`, rsync would strip the live xattrs
    (file capabilities) even from unchanged files, to match a snapshot that never stored them.
-   Never `--delete-excluded`, `-L` or `--link-dest`. Exit 0 or 24: go on. 23 (some files
+   Never `--delete-excluded`, `--ignore-errors`, `-L` or `--link-dest`. Before every copy
+   the snapshot itself is checked (6b.10, "Exit 23"). Exit 0 or 24: go on. 23 (some files
    couldn't be written or deleted): go on; the result is "restored with problems" and names
-   the log. Anything else, or no exit code (a signal): **copy broke** (6b.10).
+   the log. **23 with rsync's "skipping file deletion" line**, anything else, or no exit code
+   (a signal): **copy broke** (6b.10).
    The copy step returns only after a `syncfs` of each filesystem it wrote to (`/`, and a
    separate `/home` that's restored): rsync doesn't sync. Only then is step `boot-files`
    saved, so a copy that `state.json` records as ended is on disk and is **never run again**,
@@ -1120,7 +1122,7 @@ the one lock (a ready plan counts as held for everything but its own restart and
   mount. The helper runs every 6b.7 check itself; the applet isn't trusted.
 - The starter's uid (`GetConnectionUnixUser`) is kept in `request.json`, so it survives the
   helper's idle exit.
-- `/var/lib/apsis/restore/` (root, 0700): `request.json` (snapshot, backup UUID, home choice,
+- `/var/lib/apsis/restore/` (root, 0700): `request.json` (snapshot, its `created` from `info.json`, backup UUID, home choice,
   format, safety snapshot name, root UUID, running kernel, space needed per destination
   partition, the separate `/home`'s filesystem UUID when home is restored and `/home` is its
   own mount (else none), starter uid, prepared-at), `restore.filter`, `state.json`, `rsync-log`, `esp-backup/`, `result.json`, and
@@ -1141,8 +1143,8 @@ the one lock (a ready plan counts as held for everything but its own restart and
 
 | state | when | what happens | counted as an attempt? |
 |---|---|---|---|
-| **never started** | Step 1 or 2 fails: the backup disk isn't there after 60 s, the mount fails, a path check or refusal fails, the snapshot is gone, a separate `/home` being restored isn't mounted or has another UUID than the plan's | Nothing is written in this boot. Remove `/system-update`, the unit and the helper copy; write `result.json` `not-started` with the reason; boot normally. The boot screen says "The restore didn't start: the backup disk wasn't found. Starting normally." After login: the result line (6b.8) | **No** |
-| **copy broke** | Pass 1 exits with anything but 0, 23 or 24 (disk pulled out, I/O error, disk full), or the power goes during pass 1 | `/system-update` stays. The boot screen says "The restore was interrupted. Restarting to try again (attempt 2 of 3)." and restarts; the next boot runs from step 1 (rsync picks up where the files differ) | **Yes** |
+| **never started** | Step 1 or 2 fails, or the snapshot check right before the copy: the backup disk isn't there after 60 s, the mount fails, a path check or refusal fails, the snapshot is gone or isn't the plan's (`info.json`), a separate `/home` being restored isn't mounted or has another UUID than the plan's | Nothing is written in this boot. Remove `/system-update`, the unit and the helper copy; write `result.json` `not-started` with the reason; boot normally. The boot screen says "The restore didn't start: the backup disk wasn't found. Starting normally." After login: the result line (6b.8) | **No** |
+| **copy broke** | Pass 1 exits with anything but 0, 23 or 24 (disk pulled out, I/O error, disk full), or with 23 and rsync's "skipping file deletion" line, or the power goes during pass 1 | `/system-update` stays. The boot screen says "The restore was interrupted. Restarting to try again (attempt 2 of 3)." and restarts; the next boot runs from step 1 (rsync picks up where the files differ) | **Yes** |
 | **boot files failed** | Step 4 or 6 | The ESP files are put back, the protected kernel is kept, `boot-kept` (or `boot-broken`), end (6b.6) | Not retried |
 
 **A result that can't be saved** (owner, 2026-10-01; decided in the state machine slice): if
@@ -1159,18 +1161,28 @@ minimal one instead.
   clock in local time makes them disagree).
 - `RestoreResult` (6b.9) gives `""` and `0` for a `null` snapshot or time.
 
-**What exit 23 really covers** (found with real rsync, 2026-10-01; **open, for the owner**).
-PLAN takes 23 as "some files couldn't be written or deleted": go on, `problems`. rsync 3.2.7
-also exits 23, and nothing else, when:
+**Exit 23** (found with real rsync, decided by the owner, 2026-10-01). rsync 3.2.7 exits 23,
+and nothing else, in three cases that aren't the same:
+- some files couldn't be read or written: the rest is copied and deleted as usual. **Plain
+  23 stays `problems`**, and the apply goes on.
 - a whole folder of the snapshot can't be read (the backup disk going away under it looks
-  like this). From there on rsync **deletes nothing** ("IO error encountered -- skipping
-  file deletion"), so what was installed after the snapshot stays;
-- the snapshot's folder is missing altogether: nothing is copied and nothing deleted.
+  like this). From there on rsync deletes nothing, and says so on its standard output: "IO
+  error encountered -- skipping file deletion". **Exit 23 together with that line is a copy
+  that broke**: no boot refresh, the attempt counts, the link stays, and it's tried again
+  like any other broken copy. After the third, `failed`, and the message says the system may
+  be a mix of the snapshot and what was there before.
+- the snapshot's folder is missing altogether: nothing is copied or deleted, and there's no
+  such line. rsync can't tell this from the first case, so **the apply checks the snapshot
+  itself right before every copy** (`apply::check_snapshot`, pure): its `localhost/` is a
+  folder, and its `info.json` reads, has the creation time the plan recorded
+  (`snapshot_created`; `info.json` has no name in it), this root's UUID, and the type
+  `rsync`. Failing any of these is **never started** (or `failed` after an earlier copy
+  wrote): nothing is touched in that boot.
 
-Both end as `problems` today, with the boot refresh run on a tree that isn't the snapshot's.
-The table above lists "disk pulled out, I/O error" under **copy broke**; with real rsync
-those can arrive as 23. Not changed here. One way: the runner treats 23 as a broken copy when
-rsync's output has the "skipping file deletion" line.
+**Never `--ignore-errors`**, for the restore or its dry run: with it rsync would go on
+deleting after a read error, when it can't know what the snapshot holds. That refusal to
+delete is what the rule above reads. `argv::NEVER` lists it with the other options the
+restore never uses, and a test holds it.
 
 **The boot cap** (owner, 2026-10-01): a restore may begin 5 offline boots (`MAX_BOOTS`:
 three copies, and two to spare for power cuts). Each boot is counted in `state.json` before
@@ -1306,7 +1318,8 @@ No root (run by Claude):
   `loader.conf`, the random seed, `entries.srel`, `EFI/BOOT` and `EFI/systemd` alone.
 - **Apply state machine** (fake runner and fake ESP, temp root): never started does not count
   and removes the link (also for a separate `/home` that's missing or has another UUID, with
-  rsync never run); copy broke counts and keeps it; the third break gives up with `failed`;
+  rsync never run, and for a snapshot that's gone or isn't the plan's, checked before every
+  copy); copy broke counts and keeps it, also exit 23 with the deletions skipped; the third break gives up with `failed`;
   23 vs 11; ESP backup, a failed check puts the files back and keeps the protected kernel
   (`boot-kept`); a put-back that doesn't compare gives `boot-broken`; cleanup only after a
   passed check and only when the snapshot lacks the kernel; a power cut at each step
@@ -1338,8 +1351,11 @@ No root (run by Claude):
     files; without rule 10 they're deleted.
   - A copy killed partway (the whole process group, mid-file) and run again ends with the
     same tree as an uncut copy; rsync's leftover temporary file is gone.
-  - Real exits mapped by core (`Copied::end`): 0, 23 (a file that can't be read), 24 (a file
-    that vanished), 11 (no filter file), 20 (SIGTERM), none (SIGKILL).
+  - Real exits mapped by core (`Copied::end`): 0, plain 23 (a file that can't be read:
+    `problems`), 23 with the deletions skipped (a folder that can't be read: a copy that
+    broke), 24 (a file that vanished), 11 (no filter file), 20 (SIGTERM), none (SIGKILL).
+  - A snapshot that's gone gives plain 23 from rsync, and is what `check_snapshot` refuses
+    before the copy, on the same lab; another snapshot at the same name is refused too.
   - The dry run's size read by `space::dry_run_size` from real output, equal to what the
     files add up to and to the real run's; nothing written. Human-readable output, and a dry
     run that failed, refuse.
@@ -1442,12 +1458,12 @@ Checks:
      so the `--stats` sizes are plain byte counts;
    - the size is read with `space::dry_run_size`: no readable size is `Refusal::SizeUnknown`,
      never zero;
-   - a copy's exit is judged by `Copied::end`. **rsync prints "IO error encountered --
-     skipping file deletion" on its standard output**, not with the errors: the runner keeps
-     both for the result's message and the journal;
-   - **open, for the owner (6b.10): what exit 23 covers.** The runner's step 2 must have
-     checked the snapshot's folder right before the copy, since rsync itself exits 23, not a
-     hard failure, when it's missing;
+   - a copy is handed to core as `Copied::new(exit, stdout, tail)` with **all of rsync's
+     standard output**, not its last lines: the "skipping file deletion" line is printed
+     there, anywhere in the run, and `Copied::end` needs it (6b.10, "Exit 23");
+   - `Runner::find_snapshot` reads `snapshots/<name>/localhost` (a folder, not followed) and
+     `info.json`'s text from the mounted backup disk; core's `check_snapshot` judges them
+     before every copy. Preparing records the snapshot's `created` in `request.json`;
    - free space is `statvfs` `f_bavail`, not `f_bfree`;
    - the plan and state files are read and written only through `apsis_core::restore::{plan,
      state}` (version 1, refused whole when invalid; DECISIONS.md, 2026-10-01). The helper
@@ -1479,7 +1495,9 @@ Checks:
 4. **UI**, rebuilt from the preview (6b.8) in the real code: the toolbar's Restore (no key, no
    tooltip), the dialog, refusals, preparing status, ready prompt, results in the status line. The preview branch stays unmerged.
 5. Docs: README (experimental; "If a restore goes wrong"; how it differs from Timeshift, never
-   "restores like Timeshift"), man page (the key), UI.md, ARCHITECTURE.md, CHANGELOG,
+   "restores like Timeshift"; **known limitation: a file changed in place with the same size
+   and modification time as in the snapshot isn't restored**, since rsync compares size and
+   time, and `--checksum` would read every file on both sides, too slow for a full system), man page (the key), UI.md, ARCHITECTURE.md, CHANGELOG,
    DECISIONS.md. Then the owner's checks 1 to 10. Version 0.5.0.
 
 Each slice ends with `cargo test --workspace`, clippy `-D warnings`, `cargo fmt` and a summary.
