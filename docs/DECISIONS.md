@@ -3399,9 +3399,9 @@ steps were the owner's over `ssh apsis-test`; everything was cleaned up and veri
 
 **The screen** (owner, same evening): the plymouth text "Apsis check 0.4: offline boot" and the
 progress were seen; the offline boot was fast, as in 0.3, and the machine rebooted normally on
-its own. The owner did not single out unit text over the splash; with `StandardOutput=journal`
-nothing is written to the console, and nothing was reported. Taken as: plymouth is what the
-person sees. The first real apply (6b.12 check 1) runs for minutes and is the long look at the
+its own. **The splash was clean: no unit text over it** (the owner looked). That is the
+observation 0.3 couldn't make: with `StandardOutput=journal` nothing reaches the console, and
+plymouth is all the person sees. The first real apply (6b.12 check 1) runs for minutes and is the long look at the
 splash.
 
 **What changes in the design**: nothing. The drop-in (`restore::unit::drop_in_text`, its path,
