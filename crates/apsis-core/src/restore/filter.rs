@@ -130,7 +130,7 @@ const JOURNAL: [&str; 1] = ["/var/log/journal/***"];
 const KERNEL_FILES: [&str; 4] = ["vmlinuz", "initrd.img", "config", "System.map"];
 
 /// `uname -r`, and nothing that could be a path or a pattern.
-fn is_kernel_version(version: &str) -> bool {
+pub(super) fn is_kernel_version(version: &str) -> bool {
     !version.is_empty()
         && version
             .bytes()

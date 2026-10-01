@@ -72,6 +72,21 @@ pub fn mounts_under(mountinfo: &str, path: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The filesystem type of what's mounted at exactly `path`, from the text of
+/// `/proc/self/mountinfo`. A later mount covers an earlier one, so it's the last such line.
+#[must_use]
+pub fn fstype_at<'a>(mountinfo: &'a str, path: &Path) -> Option<&'a str> {
+    mountinfo
+        .lines()
+        .filter_map(|line| {
+            let (fields, rest) = line.split_once(" - ")?;
+            let point = unescape(fields.split(' ').nth(4)?);
+            let fstype = rest.split(' ').next().filter(|t| !t.is_empty())?;
+            (Path::new(&point) == path).then_some(fstype)
+        })
+        .next_back()
+}
+
 /// mountinfo writes space, tab, newline and backslash as `\040`, `\011`, `\012`, `\134`.
 fn unescape(field: &str) -> String {
     let bytes = field.as_bytes();
@@ -161,6 +176,19 @@ mod tests {
         assert!(under("/mnt/po").is_empty());
         assert!(under("/srv").is_empty());
         assert!(mounts_under("garbage line\n1 2", Path::new("/")).is_empty());
+    }
+
+    #[test]
+    fn the_filesystem_type_at_a_mount_point_is_the_last_ones() {
+        let at = |path: &str| fstype_at(MOUNTINFO, Path::new(path));
+        assert_eq!(at("/"), Some("btrfs"));
+        assert_eq!(at("/media/user1/Backup Disk"), Some("ext4"));
+        // Exactly there: not a mount above or below it.
+        assert_eq!(at("/media"), None);
+        assert_eq!(at("/home/user1"), None);
+        let covered = format!("{MOUNTINFO}99 22 8:33 / /mnt/pool rw - xfs /dev/sdd1 rw\n");
+        assert_eq!(fstype_at(&covered, Path::new("/mnt/pool")), Some("xfs"));
+        assert_eq!(fstype_at("garbage line\n1 2 - ", Path::new("/")), None);
     }
 
     #[test]

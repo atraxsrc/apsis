@@ -1813,3 +1813,44 @@ file, the apply state machine).
   plan time, `/home` must be mounted with that UUID. If not, the apply stops before rsync
   runs: otherwise the home files would land on the system disk under `/home`, or in another
   disk mounted there.
+
+## 2026-10-01 - 6b: the refusals (core)
+
+`restore::refusal::check(system, snapshot)` gives the first failed check of PLAN 6b.7 as a
+`Refusal`, or `Ok`. It opens and runs nothing: the helper reads mountinfo, lsblk, `findmnt`'s
+root UUID, the names in `/boot/efi/EFI`, the snapshot's `info.json`, its kernelstub
+configuration, its `boot/vmlinuz` link and the names in its `boot` and `usr/lib/modules`, and
+passes them in. What the plan left open:
+
+- **Not here:** the two space lines (they come with space parsing, 6b.4) and Busy (the
+  existing error). `Refusal` has no text: the lines are the UI's strings (6b.8), and how a
+  refusal crosses the bus is the helper slice's.
+- **Order:** the table's, with one change: the snapshot must be readable (`info.json`, rsync,
+  `localhost/`, `exclude.list`) before its UUID is compared, since the UUID comes from
+  `info.json`. So the computer's reasons come first, then the snapshot's, the pending update
+  last.
+- **The root device** is the lsblk device whose UUID is `findmnt`'s root UUID, and its `TYPE`
+  must be `part`. A root lsblk doesn't show is refused with the same line. An empty root
+  UUID matches no device (a disk without a filesystem has an empty UUID too), so it can never
+  pass by comparing empty with empty.
+- **The root's filesystem type** is the last mountinfo line mounted at `/` (a later mount
+  covers an earlier one), read by the new `usage::fstype_at`. With no line for `/` the
+  restore is refused as "root not ext4" (`RootFilesystem`), with `unknown` as the type.
+- **Split system:** something mounted at exactly `/boot`, `/usr` or `/var`. A mount below one
+  (`/var/lib/docker`, `/usr/local`) or a separate `/home` isn't one.
+- **The snapshot's kernelstub configuration** is parsed as JSON (serde_json, already a
+  dependency), and only `kernel_options` of its `default` and `user` sections is read, as a
+  list or as one string. Any `root=` option that isn't `root=UUID=<live root UUID>` refuses
+  as another installation: another UUID, `PARTUUID=`, `LABEL=`, a device path. kernelstub
+  adds `root=UUID=` itself from the mounted root, so most configurations have no `root=`,
+  and that passes. A snapshot with no configuration file also passes (the plan asks only
+  for the `kernelstub` program in the snapshot). A file that isn't a JSON object is refused
+  as incomplete kernel files: kernelstub can't read it either, so the boot refresh would
+  fail after the copy.
+- **The snapshot's kernel** is the file name its `boot/vmlinuz` link points to, less
+  `vmlinuz-`. It must read as a kernel version (the filter's rule), the file itself must be
+  in the snapshot's `boot/`, and a folder of that name in its `usr/lib/modules`. The initrd
+  isn't asked for: 6b.7's row lists the kernel, its modules and the two tools, and step 5
+  runs `update-initramfs` after the copy.
+- **Verified** with apsis-core's tests and clippy only; the workspace test and clippy run is
+  the owner's.

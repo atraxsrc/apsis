@@ -427,7 +427,8 @@ restore can't bring back what the snapshot doesn't have.
 **Status: design approved with changes (owner, 2026-09-30); this version has them. 0.4.1 is
 released; the core slice (6b.13 step 1) started 2026-10-01 on branch `restore-6b-core`.**
 Core so far: the filter and protect list, home detection (`apsis_core::restore::filter`), the
-restore's rsync argv (`apsis_core::restore::argv`).
+restore's rsync argv (`apsis_core::restore::argv`), the refusals of 6b.7 except the two space
+lines and Busy (`apsis_core::restore::refusal`).
 
 Goal: pick a snapshot, click Restore, and after a restart the system is back to that state.
 One person at the keyboard. The copy is rsync over `/` with excludes, like Timeshift's. When
