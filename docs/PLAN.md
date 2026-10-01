@@ -2077,6 +2077,10 @@ Checks:
    kernel hooks do, and the snapshot's initrds are used as they are), man page (the key),
    UI.md, ARCHITECTURE.md (Helper3, the restore's files), CHANGELOG, DECISIONS.md. Then the
    owner's checks 0.4 and 1 to 13. Version 0.5.0.
+   **Status (2026-10-02): the docs are done** (DECISIONS 2026-10-02 "step 5"); left for the
+   owner at release: the version bump, the Debian changelog entry, the man page's `.TH`
+   line, the metainfo's release. Check 0.4 passed 2026-10-01; checks 1 to 13 need the fresh
+   baseline on 0.5.0 and check 1's runbook.
 
 Each slice ends with `cargo test --workspace`, clippy `-D warnings`, `cargo fmt` and a summary.
 

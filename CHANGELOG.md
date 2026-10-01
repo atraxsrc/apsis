@@ -4,6 +4,46 @@ All notable changes to Apsis are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] - 0.5.0
+
+Restoring the whole system to a snapshot, at the next start. Experimental; Pop!_OS 24.04
+with systemd-boot only.
+
+### Added
+
+- **Restore** in the window's toolbar: Apsis checks the snapshot fits this computer (the
+  same installation, UEFI, Pop!_OS with systemd-boot, a plain ext4 system disk, the
+  snapshot's kernel files, no update waiting, the same `crypttab`), offers to keep or
+  restore the home folders and to take a safety snapshot first (on by default), prepares
+  (the space is measured with dry runs, the safety snapshot taken, the plan written), and
+  asks once more at "Ready to restore". "Restart now" arms the next start and restarts;
+  "Cancel restore", Esc or closing the window drops the plan and keeps the safety snapshot.
+- The restore itself runs at the next start with the desktop stopped (systemd's
+  offline-update mode, with plymouth), keeps the live `fstab` and `crypttab`, the boot and
+  recovery partitions, other mounts and the kernel the computer started with, refreshes the
+  boot files with kernelstub as Pop!_OS's own hooks do, checks them byte for byte, and puts
+  the old ones back if they don't check out. A copy that breaks is tried again at the next
+  start, three times at most. After login, the window's status line says how it went.
+- A recovery note with this machine's UUIDs on the backup disk
+  (`timeshift/apsis-restore-RECOVER.txt`), and "If a restore goes wrong" in the README.
+- Each snapshot's row says in its tooltip when it was made in the older format (without
+  ACLs and extended attributes), and the restore dialog says what that means.
+- `/root` is restored with the system only when the snapshot has it with content; otherwise
+  it's kept as it is.
+
+### Changed
+
+- `apsis-helper`'s D-Bus interface is `io.github.atraxsrc.Apsis.Helper3`: `List` carries
+  each snapshot's format, and `CheckRestore`, `Restore`, `RestartToRestore`,
+  `CancelRestore` and `RestoreResult` are new. A panel applet still running from 0.4.x shows
+  an error until it's re-added (log out and in).
+- A sixth polkit action, `io.github.atraxsrc.Apsis.restore` (`auth_admin`, asked every
+  time).
+- `apsis-helper --apply-restore` and `--disarm` are the offline entry points; the .deb's
+  purge removes the restore's state folder and anything an unfinished restore left.
+- While a restore plan waits at its prompt, creating, deleting and saving the settings are
+  refused as busy in every window, and lists go on.
+
 ## [0.4.2] - 2026-10-01
 
 Deleting several snapshots works again with more than one display, and lists never get in

@@ -18,7 +18,8 @@ apsis \- system snapshot and restore for the COSMIC desktop
 .B \-\-about
 .SH DESCRIPTION
 .B apsis
-takes rsync snapshots of the system onto a backup disk, lists them and deletes them.
+takes rsync snapshots of the system onto a backup disk, lists them, deletes them, and (since
+0.5.0, experimental) restores the whole system to one at the next start.
 It is a COSMIC panel applet and a window, in standard COSMIC widgets that follow the theme.
 .PP
 Snapshots are kept in Timeshift's on\-disk layout
@@ -40,15 +41,75 @@ is a panel button whose popup shows the last snapshot, the backup disk and the n
 snapshots, read\-only, with a button that opens the window.
 Started anywhere else (the app launcher, a terminal), or with
 .BR \-\-window ,
-it opens the window: a toolbar (Create, Delete, Settings), the snapshot list, and a status area
-with the last snapshot, the backup disk and, while a snapshot is being made, its progress and
-a Stop button.
+it opens the window: a toolbar (Create, Restore, Delete, Settings), the snapshot list, and a
+status area with the last snapshot, the backup disk and, while a snapshot is being made or a
+restore prepared, its progress and a Stop button; after a restore, how it went.
 .PP
-Everything that needs root (listing, creating, stopping, deleting, writing the settings) goes
-through
+Everything that needs root (listing, creating, stopping, deleting, restoring, writing the
+settings) goes through
 .BR apsis\-helper ,
 a small system service started on demand over D\-Bus, and polkit asks for the password.
 Apsis doesn't work without it.
+.SH RESTORE
+.B Restore
+(one snapshot selected; no keyboard shortcut) first asks the helper whether the snapshot fits
+this computer: the same installation (the snapshot's root filesystem UUID), UEFI, Pop!_OS with
+systemd\-boot (kernelstub), a plain ext4 system disk, no separate
+.IR /boot ", " /usr " or " /var ,
+the snapshot's kernel files complete, no other system update waiting for a restart, no Pop!_OS
+release upgrade in progress, and the snapshot's
+.I /etc/crypttab
+the same as the live one.
+Anything else is refused with the reason and what to do.
+.PP
+The dialog offers two choices: keep the home folders as they are now (the default; then
+.I /home
+isn't touched at all) or restore them too (then files created or changed since the snapshot are
+deleted or put back), and a safety snapshot of the current system first (on by default; it
+includes
+.I /home
+when the home folders are restored).
+.B Restore
+then prepares, with the password asked every time: the space on each disk is measured with a
+dry run, the safety snapshot is taken (Stop ends it like any snapshot), the plan is written to
+.IR /var/lib/apsis/restore/ ,
+and a recovery note to
+.I timeshift/apsis\-restore\-RECOVER.txt
+on the backup disk.
+.PP
+.B Ready to restore
+is the last word, and nothing is armed before it.
+.B Restart now
+checks the space and the boot files once more, arms the next start (a systemd unit in
+.IR /etc/systemd/system/ ,
+a copy of the helper, and the
+.I /system\-update
+link that puts systemd into offline\-update mode) and restarts;
+.BR "Cancel restore" ,
+Esc or closing the window removes the plan (a finished safety snapshot stays).
+A plan left at the prompt for more than 30 minutes is refused as too old.
+If the computer hasn't restarted ten minutes after Restart now, a timer disarms it.
+.PP
+At the next start the restore runs with the desktop stopped (plymouth shows its progress):
+rsync puts the system files back (the live
+.IR /etc/fstab " and " /etc/crypttab ,
+the boot partition, the recovery partition, other mounts and the kernel the computer started
+with are kept), the boot partition's files are backed up, kernelstub refreshes them exactly as
+Pop!_OS's kernel hooks do, and the result is checked byte for byte.
+If it doesn't check out, the old boot files are put back and the computer keeps the kernel it
+started with.
+A copy that breaks (the backup disk gone, an I/O error) is tried again at the next start, three
+times at most; then the restore gives up and the system may be partly restored.
+Then the computer restarts normally; after login the window's status line says how it went,
+with the details in its tooltip.
+Once it restarts, the restore can't be stopped: don't turn off the computer until it's done.
+.PP
+Not restored: anything the snapshot didn't include (its own exclude list is honoured), and
+.I /root
+unless the snapshot has it with content.
+Hard links aren't kept in snapshots, and a file changed in place with the same size and
+modification time isn't restored.
+See "If a restore goes wrong" in the README for the recovery steps.
 .SH OPTIONS
 .TP
 .B \-\-window
@@ -96,7 +157,11 @@ Move the selection.
 Ctrl\-click adds or removes a row, Shift\-click selects a range.
 .TP
 .B Esc
-Close a dialog, leave the settings or About, then clear the selection.
+Close a dialog (on the "Ready to restore" prompt: cancel the restore), leave the settings or
+About, then clear the selection.
+.PP
+.B Restore
+has no shortcut: click it, or Tab to it and press Enter.
 .SH SETTINGS
 Settings has four tabs.
 Location, Include and Filters are Apsis's config,
@@ -168,8 +233,44 @@ On the backup disk: where a snapshot is built before it's moved into
 What an interrupted snapshot leaves there is shown in the list and removed by the next
 snapshot (or with Delete).
 .TP
+.I timeshift/apsis\-restore\-RECOVER.txt
+On the backup disk: the recovery steps with this machine's disk UUIDs and the snapshot's name
+filled in, written while a restore is prepared.
+.TP
+.I /var/lib/apsis/restore/
+The restore's state folder (root only): the plan
+.RI ( request.json ),
+the rsync filter
+.RI ( restore.filter ),
+rsync's log, the attempt counter
+.RI ( state.json ),
+the boot partition's backup
+.RI ( esp\-backup/ ),
+the last result
+.RI ( result.json ,
+what the window shows after login) and, while a restore is armed, a copy of the helper.
+Removed on purge.
+.TP
+.I /etc/systemd/system/apsis\-restore.service
+.TQ
+.I /etc/systemd/system/system\-update.target.wants/apsis\-restore.service
+.TQ
+.I /etc/systemd/system/pop\-upgrade\-init.service.d/50\-apsis.conf
+.TQ
+.I /system\-update
+Written when a restore is armed and removed when it ends (the drop\-in keeps Pop!_OS's release
+upgrade from running in the restore's start; the link is what makes the next start an
+offline update).
+A restore that won't end: boot the recovery and remove
+.I /system\-update
+(README, "If a restore goes wrong").
+.TP
 .I /usr/libexec/apsis-helper
 The privileged helper.
+.B apsis\-helper \-\-apply\-restore
+is what the armed unit runs at the next start, and
+.B apsis\-helper \-\-disarm
+what the ten\-minute timer runs; neither is for hand use.
 .TP
 .I /usr/share/dbus-1/system-services/io.github.atraxsrc.Apsis.Helper.service
 .TQ
@@ -184,8 +285,10 @@ The polkit actions below.
 The applet runs as the user and never as root.
 .B apsis\-helper
 checks each call with polkit, against the caller's D\-Bus name, and runs one write (a create,
-a delete, a settings save) at a time; lists share a read\-only mount and run at the same time
-as each other, and a write waits for them (up to 15 seconds) before it mounts read\-write.
+a delete, a settings save, a restore's preparation) at a time; lists share a read\-only mount
+and run at the same time as each other, and a write waits for them (up to 15 seconds) before it
+mounts read\-write.
+While a restore plan waits at its prompt, every write is refused as busy and lists go on.
 It mounts the backup disk (by UUID, nosuid, nodev) for the length of the call, read\-only
 except for a create or a delete.
 A delete only removes a folder named like a snapshot under
@@ -214,6 +317,11 @@ Creating, deleting and writing the settings: the password, remembered for a few 
 .B io.github.atraxsrc.Apsis.stop
 Stopping a snapshot another user started (the user who started it isn't asked): the password,
 remembered for a few minutes.
+.TP
+.B io.github.atraxsrc.Apsis.restore
+Preparing a restore: the password, asked every time
+.RB ( auth_admin ).
+Restart now and Cancel restore aren't asked of the user who prepared the plan.
 .PP
 Inactive and remote sessions need the password for every action.
 .SH SEE ALSO

@@ -22,10 +22,12 @@ Apsis takes snapshots of your system, the way Timeshift does, and lives in the C
 The panel shows when the last snapshot was taken and how full the backup disk is; the window
 creates, lists and deletes snapshots and holds the settings.
 
-> **Status:** 0.4.2. Apsis takes rsync snapshots itself and doesn't need Timeshift. It uses
-> Timeshift's layout on the backup disk, so snapshots Timeshift made keep working in Apsis
-> (and the other way round). Manual only: there is no schedule, and a snapshot is only deleted
-> when you delete it. Restoring the whole system comes in 0.5.0.
+> **Status:** 0.5.0 (in development). Apsis takes rsync snapshots itself and doesn't need
+> Timeshift. It uses Timeshift's layout on the backup disk, so snapshots Timeshift made keep
+> working in Apsis (and the other way round). Manual only: there is no schedule, and a snapshot
+> is only deleted when you delete it. **Restoring the whole system is new in 0.5.0 and
+> experimental**: it works on Pop!_OS with systemd-boot, and the restore runs at the next
+> start, outside the desktop. Read "If a restore goes wrong" below before you rely on it.
 
 ## What it does
 
@@ -36,6 +38,10 @@ creates, lists and deletes snapshots and holds the settings.
 - **A filter list**, like Timeshift's Filters tab: folders, files or patterns to leave out
   (`-`) or keep (`+`).
 - **Delete snapshots**, one or several at once.
+- **Restore the whole system** to a snapshot (0.5.0, experimental). Apsis checks the snapshot
+  fits this computer, takes a safety snapshot of the system as it is now, and puts the system
+  files back at the next start, outside the desktop, then starts normally. Your home folders
+  are kept unless you choose to restore them too.
 - **Stop** a snapshot while it's being made; what it copied so far is removed.
 - **Status in the panel**: the tooltip shows the last snapshot and the backup disk; an optional
   label beside the icon shows both at a glance. The icon turns the warning colour when the last
@@ -44,6 +50,15 @@ creates, lists and deletes snapshots and holds the settings.
 
 Not in Apsis: scheduled snapshots, automatic deletion, restoring single files, btrfs
 snapshots, and encrypted backup disks.
+
+**How restore differs from Timeshift's.** Timeshift restores from the running system or a live
+USB and rebuilds the boot files for the bootloader it finds. Apsis restores at the next start
+(systemd's offline-update mode, like a Pop!_OS release upgrade), so no file is in use while it's
+replaced; it keeps the live `fstab` and `crypttab` and the boot partition's layout, refreshes
+the boot files with kernelstub exactly as Pop!_OS's own kernel hooks do, uses the snapshot's
+initrds as they are, keeps the kernel the computer started with until the new boot files have
+been checked, and puts the old boot files back if they don't check out. It never restores onto
+another installation, and it refuses rather than guesses.
 
 ## Requirements
 
@@ -112,9 +127,81 @@ confirm. Several are deleted in one go, in list order, and your password is aske
 fails, the rest are left alone and the status line says which were deleted. A dimmed "Interrupted snapshot" row is what's left of a snapshot that was cut off
 (power loss, a crash); the next snapshot removes it, or delete it yourself.
 
+4. **Restore the system** (0.5.0, experimental): select one snapshot, **Restore**. Apsis checks
+   that the snapshot fits this computer (same installation, UEFI, Pop!_OS with systemd-boot,
+   a plain ext4 system disk) and shows the choices: keep your home folders as they are now
+   (default) or restore them too, and take a safety snapshot first (on by default, so you can
+   come back). **Restore** then prepares: it measures the space, takes the safety snapshot and
+   writes the plan. **Ready to restore** is the last word: **Restart now** restarts the
+   computer, restores the system with the desktop stopped, and restarts once more; **Cancel
+   restore** (or Esc, or closing the window) drops the plan and keeps the safety snapshot.
+   Once it restarts, the restore can't be stopped: don't turn off the computer until it's
+   back at the login screen. After you log in, the window's status line says how it went.
+
 **Why does it ask for my password?** Snapshots touch system files, so creating, deleting and
 saving the settings run as root, and your system asks you (polkit) to confirm. It's remembered
 for a few minutes. Listing needs no password, and neither does stopping a snapshot you started.
+A restore asks every time.
+
+### Known limitations of restore
+
+- **Experimental**, and for **Pop!_OS 24.04 with systemd-boot (kernelstub) only**. Other
+  distributions, GRUB, BIOS boot, btrfs or an encrypted or LVM system disk, and a system split
+  over `/boot`, `/usr` or `/var` partitions are refused before anything happens.
+- **A snapshot from another installation is refused**: it must have been taken of this
+  system disk.
+- **A file changed in place with the same size and modification time** as in the snapshot
+  isn't restored. rsync compares size and time; checking every file's content on both sides
+  would take far too long for a whole system.
+- **Hard links aren't kept** in snapshots (as in Timeshift). Flatpak's data is hard-link
+  heavy, so it takes more room in a snapshot and can take more on the system disk after a
+  restore. After a restore that keeps your home folders, a user Flatpak app may say its
+  runtime isn't installed: `flatpak install` or `flatpak repair` fixes it.
+- **The live `/etc/fstab` and `/etc/crypttab` are kept**, not the snapshot's: they describe
+  the disks as they are now. A snapshot whose `crypttab` differs from the current one is
+  refused.
+- **The boot files are refreshed with kernelstub only**, as Pop!_OS's own kernel hooks do; the
+  snapshot's initrds are used as they are, not rebuilt. If the new boot files don't check
+  out, the ones from before are put back and the computer keeps the kernel it started with
+  ("still boots the previous kernel"); the next kernel update sets that right.
+- `/root` is restored with the system if the snapshot has it (with content); otherwise it's
+  left as it is.
+- Home folders restored "too" go back to the snapshot entirely: files created or changed
+  since are deleted or put back to their old version. The safety snapshot includes your home
+  folders in that case, so they're on the backup disk.
+
+### If a restore goes wrong
+
+The recovery partition and the boot menu's **Pop_OS-oldkern** entry are never touched by a
+restore. While preparing, Apsis also writes `timeshift/apsis-restore-RECOVER.txt` on the
+backup disk with these steps and this machine's disk UUIDs filled in.
+
+1. At power-on, hold Space for the systemd-boot menu and pick **Pop!_OS Recovery**, or boot
+   a Pop!_OS live USB of the same version.
+2. In a terminal (the UUIDs are in `RECOVER.txt`, or `lsblk -f`):
+
+   ```sh
+   sudo mount /dev/disk/by-uuid/<root-uuid> /mnt
+   sudo mount /dev/disk/by-uuid/<esp-uuid> /mnt/boot/efi
+   sudo mkdir -p /media/backup && sudo mount -o ro /dev/disk/by-uuid/<backup-uuid> /media/backup
+   # finish the same restore (or pick the safety snapshot to go back):
+   sudo rsync -a -A -X --numeric-ids --delete --force --sparse      --exclude-from=/mnt/var/lib/apsis/restore/restore.filter      /media/backup/timeshift/snapshots/<name>/localhost/ /mnt/
+   for d in dev proc sys run; do sudo mount --rbind /$d /mnt/$d; done
+   sudo chroot /mnt update-initramfs -u -k all
+   sudo chroot /mnt kernelstub --verbose
+   sudo rm -f /mnt/system-update
+   ```
+
+   (`-A -X` only for a snapshot made by Apsis 0.4.1 or later; `RECOVER.txt` has the right
+   line.) The last line matters: while `/system-update` exists, the next start would try the
+   restore again.
+3. Restart.
+
+If the status line after a restore says **incomplete**, the copy broke (most often the backup
+disk was disconnected): reconnect it and click **Restore again**, or restore the safety
+snapshot. **The restore didn't start** means nothing was changed. See the helper's log for
+the details: `journalctl -b -1 -u apsis-restore` (the restore's own boot) and
+`journalctl -u apsis-helper`.
 
 ### Keyboard shortcuts
 
@@ -126,7 +213,9 @@ for a few minutes. Listing needs no password, and neither does stopping a snapsh
 | `Ctrl+,` | Settings |
 | `Ctrl+A` | Select all |
 | `↑` `↓` | Move the selection |
-| `Esc` | Close a dialog, leave the settings, clear the selection |
+| `Esc` | Close a dialog (on the "Ready to restore" prompt: cancel the restore), leave the settings, clear the selection |
+
+Restore has no shortcut: click it, or Tab to it and press Enter.
 
 ## Settings
 
@@ -167,6 +256,11 @@ in the snapshot too.
 | No backup disk chosen | Settings → Location |
 | Apsis needs apsis-helper | reinstall the .deb, or `sudo just install` |
 | the applet doesn't show after installing | log out and back in, or re-add it in *Configure panel applets* |
+| Can't restore this snapshot | the dialog says why and what to do; see "Known limitations of restore" |
+| The preparation is too old / is gone | the "Ready to restore" prompt waited more than 30 minutes, or the helper was restarted; start the restore again |
+| Restore incomplete · system partly restored | the copy broke; reconnect the backup disk and **Restore again**, or restore the safety snapshot; see "If a restore goes wrong" |
+| System restored · still boots the previous kernel | the new boot files didn't check out and the old ones were put back; the next kernel update sets it right |
+| the computer keeps restarting into the restore | boot the recovery and `rm /mnt/system-update` as in "If a restore goes wrong" |
 | anything else | the helper's log: `journalctl -u apsis-helper -e` |
 
 ## Uninstall
@@ -186,7 +280,7 @@ cargo test --workspace
 just check           # clippy
 just deb             # build the .deb into target/debian/ (needs cargo-deb)
 just ext4-image      # an ext4 image for the rsync tests (then mount it, just test-ext4)
-APSIS_LAYOUT_TEST=1 cargo test -p apsis fit                     # layouts fit the smallest window
+APSIS_LAYOUT_TEST=1 cargo test -p apsis fit                     # layouts fit the smallest window (and every restore state)
 APSIS_SCREENSHOTS=/tmp/shots cargo test -p apsis screenshots    # renders the views to .rgba files
 ```
 

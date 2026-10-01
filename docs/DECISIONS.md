@@ -3974,3 +3974,32 @@ Gate: workspace tests (applet 90), clippy `-D warnings` on all targets, fmt chec
 
 **The UI slice is complete** but for step 5's docs. Gate: workspace tests (applet 91, with
 the layout test on), clippy `-D warnings` on all targets, fmt check: all clean.
+
+## 2026-10-02 - 6b step 5: the docs (README, man page, ARCHITECTURE, CHANGELOG)
+
+- **README**: the status note (0.5.0 in development; restore experimental, Pop!_OS with
+  systemd-boot, at the next start); a "What it does" bullet; "How restore differs from
+  Timeshift's" (never "restores like Timeshift"); step 4 of "Use" (the flow in the user's
+  words); the password note (a restore asks every time); **"Known limitations of restore"**
+  (the platform, another installation, same size and time, hard links and Flatpak, the live
+  `fstab` and `crypttab`, kernelstub only and the snapshot's initrds, `/root` with content,
+  home restored "too"); **"If a restore goes wrong"** (6b.11's steps, the recovery note, and
+  the "incomplete" / "didn't start" lines, with `journalctl -b -1 -u apsis-restore`); the
+  Esc row and "Restore has no shortcut"; five Troubleshooting rows; the layout test line.
+- **Man page** (`docs/apsis.1`, `man -l` parses it): the description, a **RESTORE** section
+  (the checks, the choices, the preparation, the prompt, the arm, the offline run, what isn't
+  restored), Esc and "no shortcut", FILES (the recovery note, `/var/lib/apsis/restore/` and
+  its files, the arm's four paths with the recovery hint, the helper's two offline modes),
+  SECURITY (a restore is a write; the ready plan refuses writes; the `restore` action). The
+  `.TH` line still says 0.4.2 and 2026-10-01: **the owner's at release**, with the version.
+- **ARCHITECTURE**: the `restore` action and the offline part in the privilege model; the
+  six actions; "The restore's files" under the installed files (the state folder's files,
+  the arm's files and the commit point, the recovery note, the transient timer).
+- **CHANGELOG.md**: an `[Unreleased] - 0.5.0` section (Added, Changed). **Not touched**:
+  `resources/deb/changelog`, whose entries carry an identity trailer; the 0.5.0 entry is the
+  owner's at release, with `Cargo.toml`'s version bump.
+- Also the owner's at release: the metainfo's release entry and screenshots.
+
+**PLAN 6b.13 steps 1 to 5 are built and documented.** What's left is the owner's: the
+locale check and the `has_root` reading (DECISIONS 2026-10-02, the four answers), the fresh
+baseline on 0.5.0, check 1's runbook (next), checks 1 to 13, the version and the release.

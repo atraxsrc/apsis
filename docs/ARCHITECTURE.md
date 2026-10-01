@@ -137,7 +137,13 @@ filters = [
   - `<app-id>.create`, `<app-id>.delete` → `auth_admin_keep`
   - `<app-id>.stop` → `auth_admin_keep`, not asked of the uid that started the create
   - `<app-id>.configure` (write `/etc/apsis/config.toml`) → `auth_admin_keep`
+  - `<app-id>.restore` (0.5.0: prepare a restore) → `auth_admin`, asked every time; "Restart
+    now" and "Cancel restore" aren't asked of the uid that prepared the plan
 - Without the helper the applet does nothing but say so; there's no `pkexec` fallback.
+- The restore's offline part runs from `apsis-restore.service` in `system-update.target`, as
+  root, with no D-Bus: `apsis-helper --apply-restore` from a copy of the helper in the state
+  folder (`apsis_core::restore::apply` is the state machine, the helper its `Runner`).
+  `apsis-helper --disarm` is the ten-minute timer's.
 - Input validation in the helper: snapshot names must match `YYYY-MM-DD_HH-MM-SS`; comments are
   length-limited (they go into `info.json`); configs are checked again.
 
@@ -232,10 +238,33 @@ until each `Finished` is sent. The next call starts it again.
 - `/usr/share/dbus-1/system.d/io.github.atraxsrc.Apsis.Helper.conf` - bus policy
 - `/usr/lib/systemd/system/apsis-helper.service` - `Type=dbus`, no `[Install]`, not sandboxed
   (a snapshot reads the whole filesystem, and the helper mounts devices)
-- `/usr/share/polkit-1/actions/io.github.atraxsrc.Apsis.policy` - the five actions
+- `/usr/share/polkit-1/actions/io.github.atraxsrc.Apsis.policy` - the six actions
 
 Made at run time: `/etc/apsis/config.toml` (and `.bak`), by the helper; the .deb's postrm
 removes `/etc/apsis/` on purge.
+
+**The restore's files** (0.5.0; PLAN 6b.5, 6b.6, 6b.9), all made by the helper, none packaged:
+
+- `/var/lib/apsis/restore/` (root, 0700): `request.json` (the plan: snapshot, its creation
+  time, the backup disk's UUID, the home choice, the format, the safety snapshot, the root
+  UUID, the running kernel, the space each destination needs, a separate `/home`'s UUID, the
+  starter's uid, when it was prepared), `restore.filter` (rsync's `--exclude-from`),
+  `rsync-log`, `state.json` (attempts, written, step, problems, boots), `esp-backup/` (the
+  boot partition's file set and its manifest), `result.json` (the outcome the window shows
+  after login; kept until the next apply or purge), and while armed `apsis-helper` (the copy
+  the unit runs). The texts are versioned (`version: 1`) and refused whole when invalid
+  (`apsis_core::restore::{plan, state, file}`).
+- Written on arm, removed when the restore ends or is disarmed, and by `postrm purge`:
+  `/etc/systemd/system/apsis-restore.service`, its link in
+  `system-update.target.wants/`, `/etc/systemd/system/pop-upgrade-init.service.d/50-apsis.conf`
+  (keeps Pop!_OS's release upgrade from running in the restore's boot), and last
+  `/system-update -> /var/lib/apsis/restore` (the single commit point: with it the next boot
+  restores; without it nothing does).
+- On the backup disk: `timeshift/apsis-restore-RECOVER.txt` (the recovery steps with the
+  UUIDs filled in), written while preparing; the safety snapshot is an ordinary snapshot.
+- Transient, this boot only: `apsis-disarm.timer` and `.service` (`systemd-run`,
+  `Conflicts=shutdown.target`), which disarm ten minutes after "Restart now" if no restart
+  followed.
 
 The activation file and unit come from `resources/helper/*.in` with `@libexecdir@` filled in.
 Afterwards `just install` runs `systemctl daemon-reload` and the bus's `ReloadConfig` (dbus-broker
