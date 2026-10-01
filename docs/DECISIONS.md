@@ -1618,3 +1618,87 @@ Remove / Move Up / Move Down. The screenshot test can render with the monospace 
   shared one `by-uuid` stand-in folder and raced to create its symlink on parallel threads.
   Each call now gets its own folder (pid and a counter); fixed in `7ee73fb`, test-only, no
   retag.
+
+## 2026-09-30 - 0.5.0 full restore: design approved with changes (owner)
+
+Design in PLAN.md, "0.4.1" and "Phase 6b". No code yet.
+
+- **Apsis's own design, not Timeshift's behaviour.** Timeshift restores an rsync snapshot
+  live and restarts. It copies whatever the snapshot has under `boot/efi`, and its boot refresh
+  is GRUB-oriented. Three parts of Apsis's restore are its own, and the README must present
+  them that way (never "restores like Timeshift"):
+  1. **Next-boot apply**: the copy runs in systemd's offline-update mode (`/system-update`,
+     `system-update.target`), not on the running desktop. Condition: check 0.3 on apsis-test
+     passes; otherwise the design comes back for review.
+  2. **The ESP skip**: the restore never writes `/boot/efi` (nor `/recovery`) with rsync.
+     Create keeps copying `/boot/efi` into snapshots, so a Timeshift restore of an Apsis
+     snapshot doesn't wipe the live ESP (Timeshift runs rsync `--delete` without `-x`).
+  3. **The kernelstub refresh and check**: `update-initramfs -u -k all` and `kernelstub` run on
+     the restored system. Before that, the ESP's kernel files are backed up. Afterwards they're
+     compared byte for byte with `/boot`, and put back if the check fails, with the running
+     kernel's files kept until the check passes.
+- **0.4.1 before 6b**: create adds `-A -X --numeric-ids` (not `-H`: Timeshift doesn't, a
+  full-system hard-link table costs memory and time, and the in-system hard links are few and
+  harmless as copies). `info.json` gets `apsis-rsync-flags`. Old-format snapshots are restored
+  without `-A -X`, since `-X` would strip live file capabilities from unchanged files.
+- **Keys** (answer 5): Enter and double-click stay as they are. The review cites
+  APSIS-UI-PROMPT §9/§11, which are the 0.3 contract's (git `25b1bbb`), where double-click is
+  reserved for details/browse. Full restore gets its own key: proposed Ctrl+Shift+R, clear of
+  0.4.0's Ctrl+N, Delete, Ctrl+R, F5, Ctrl+, (settings), Ctrl+A, Up, Down and Esc. Ctrl+E is the
+  alternative. Pending the owner's pick.
+- **Conflict with 0.4.0, open**: the review asks for a boxed Restore button "in details", and
+  for old-format snapshots to be marked "in details". 0.4.0 has no details pane (removed with
+  the terminal look), and the 6b brief says 0.4.0 wins over the contract. Proposed: the
+  toolbar Restore button is the boxed button, and the old format shows in the row's tooltip
+  and the Restore dialog. Waiting for the owner.
+- Other answers: one dialog (date, name, comment, one summary line; no typing the name); safety
+  snapshot on by default, space checked before the restart with a one-line refusal; home kept
+  by default, "keep" = `/home` fully excluded; Pop!_OS + kernelstub only, and the snapshot's
+  root UUID must be the current root's; live `fstab`/`crypttab` kept; `/etc/apsis/` protected.
+- **Test baseline on apsis-test**: taken only after Wi-Fi, the `sudoers.d` entry and the
+  test-only polkit rule exist, so a test restore can't cut the SSH link. Those files stay on
+  apsis-test only.
+
+## 2026-09-30 - 6b UI review (owner), from the throwaway preview
+
+The owner reviewed the 6b screens in a preview (branch `preview-6b-ui`, debug builds only,
+`apsis --window --preview <state>`, made-up data, no helper). PLAN 6b.8 is the reference now.
+This resolves the two open items of the entry above.
+
+- **Details conflict, resolved:** no details area. The old-format mark goes in the Restore
+  dialog (the main place) and the list row's tooltip; no glyph or column. The toolbar's Restore
+  is the one Restore button.
+- **One Restore, no choice step:** file restore went in 0.4.0, so "Files… / Whole system…" was
+  dropped after the preview showed it. The title says "Restore the system?".
+- **No key for Restore:** it's reached by a click, or Tab to the button and Enter. This closes
+  the key question of the entry above (Ctrl+Shift+R and Ctrl+E dropped). 0.4.0's rule stays:
+  keys only in the README and man page, none in tooltips.
+- **Armed only at Restart now** (reverses the owner's earlier "waiting for restart" point):
+  the safety snapshot is taken while preparing, so anything changed between then and a restart
+  hours later would be in no snapshot, and the restore would wipe it silently. The ready
+  prompt has only Cancel restore and Restart now, plus "Save your work and close your apps
+  first." (title and text as in the preview). Closing the pop-up counts as Cancel restore:
+  Esc, Cancel restore or closing the window cancel and clean up. No waiting state, no waiting
+  line in the status area.
+- **No forced focus:** dialogs open with libcosmic's default focus, which is none. In libcosmic,
+  Enter presses only the focused button, so Enter in a freshly opened dialog does nothing.
+  Restore and Restart now need a click or a deliberate Tab. The password prompt is the second
+  guard.
+- **Dialog fits the window:** the libcosmic dialog is centred over the whole window and doesn't
+  limit its own height. Its body now scrolls within the window height minus 216 px (measured
+  chrome of 196 px, plus 8 px margins), so the buttons always show. The window tracks its
+  height from resize events. A layout test checks every state at 720 x 520 and 640 x 440.
+- **Results after login:** in the window's status line only, where 0.4.0 shows job results
+  (full text in the tooltip; there's no Log since 0.4.0). No desktop notification, and no change
+  to the panel icon's colour or its tooltip. Roles on the phrase only: done plain; boot-kept
+  "still boots the previous kernel" in warning (it runs, but boot needs attention); failed
+  "incomplete" in destructive.
+- **Restore again** opens the normal dialog for the same snapshot, with the normal defaults
+  (home kept, safety snapshot on).
+- **Refusal dialog:** titled "Can't restore this snapshot", the reason in the error colour (as
+  in the first preview), one line on what to do in plain text, and Close.
+- **Building in Claude's sandbox:** cargo reads `~/.gitconfig` (libgit2) and writes to
+  `~/.cargo`, and the sandbox denies both. Claude builds with `HOME` and `CARGO_HOME` in its
+  scratch folder (the registry linked read-only, the git cache copied). The pinned libcosmic
+  commit was fetched once from github.com, as PRIVACY.md allows. The owner's own builds are
+  unaffected.
