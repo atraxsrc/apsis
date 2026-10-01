@@ -120,9 +120,10 @@ pub trait Runner {
     /// One line for the journal, the console and the boot screen.
     fn say(&mut self, line: &str);
 
-    /// Restarts the computer. Called once, last, unless the link couldn't be removed
-    /// ([`End::LinkStuck`]): with the link gone that's the normal boot, and with the link
-    /// kept on purpose it's the next attempt.
+    /// Restarts the computer. Called once, last, by [`apply`] alone: with the link gone
+    /// that's the normal boot, and with the link kept on purpose it's the next attempt. Not
+    /// called when the link couldn't be removed ([`End::LinkStuck`]) or isn't Apsis's
+    /// ([`End::NotArmed`]).
     fn restart(&mut self);
 }
 
@@ -138,7 +139,8 @@ pub enum End {
     /// The restore is over, with this outcome in `result.json`.
     Finished(Outcome),
     /// [`MAX_BOOTS`] boots began this restore and none ended it: it's given up. The link is
-    /// removed, `result.json` says `failed`, and [`Runner::restart`] wasn't called.
+    /// removed and `result.json` says `failed`. The machine is restarted: with the link
+    /// gone that's a normal boot.
     GaveUp,
     /// The restore is over with this outcome in `result.json`, but `/system-update` couldn't
     /// be removed. [`Runner::restart`] wasn't called: the helper exits cleanly, and what
@@ -159,12 +161,13 @@ impl End {
 
 /// Runs the apply for this boot, then restarts, unless the link is stuck or isn't Apsis's.
 ///
-/// The link is there at a restart in two cases only. A retry: an attempt is on disk before
-/// each copy and there are [`MAX_ATTEMPTS`] at most, so that's two restarts in all. And a
-/// link that can't be removed: then the apply doesn't restart at all.
+/// Whether to restart is decided here, not by the helper. The rule: restart whenever the
+/// link is gone (it can only reach a normal boot), and over the link only as a retry. An
+/// attempt is on disk before each copy and there are [`MAX_ATTEMPTS`] at most, so that's
+/// two restarts over the link in all. A link that can't be removed gets none.
 pub fn apply(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
     let end = run(paths, runner);
-    if matches!(end, End::Retry { .. } | End::Finished(_)) {
+    if matches!(end, End::Retry { .. } | End::Finished(_) | End::GaveUp) {
         runner.restart();
     }
     end
@@ -357,7 +360,8 @@ fn run(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
 
 /// The cap: [`MAX_BOOTS`] boots began and none ended, so something stops the helper in each
 /// of them. The link goes first, before anything that could stop it again; then the result.
-/// Never a restart. The ESP backup stays, for a recovery by hand.
+/// [`apply`] restarts after it only if the link is gone. The ESP backup stays, for a
+/// recovery by hand.
 fn give_up(paths: &Paths<'_>, runner: &mut impl Runner, state: State) -> End {
     let Paths {
         state_dir,
@@ -827,6 +831,8 @@ mod tests {
         cut_inside: Option<&'static str>,
         /// The helper dies whenever it gets to this, in every boot.
         die_at: Option<&'static str>,
+        /// Restarts made while `/system-update` was still there: each comes back here.
+        restarts_over_the_link: usize,
         now: i64,
         /// `state.json` as each copy, ESP backup, boot refresh and disarm found it.
         states: Vec<(&'static str, State)>,
@@ -852,6 +858,7 @@ mod tests {
                 stuck_link: false,
                 cut_inside: None,
                 die_at: None,
+                restarts_over_the_link: 0,
                 now: NOW,
                 states: Vec::new(),
                 result_at_disarm: Vec::new(),
@@ -1037,7 +1044,11 @@ mod tests {
         }
 
         fn restart(&mut self) {
-            self.call("restart", |_| ());
+            self.call("restart", |fake| {
+                if is_linked(fake.lab) {
+                    fake.restarts_over_the_link += 1;
+                }
+            });
         }
     }
 
@@ -1631,9 +1642,10 @@ mod tests {
     }
 
     /// The cap: a restore that began [`MAX_BOOTS`] boots and ended none is given up. The
-    /// link goes first, then the result, and there's no restart.
+    /// link goes first, then the result. With the link gone the restart can only reach a
+    /// normal boot, so the machine is restarted, once.
     #[test]
-    fn past_the_cap_the_link_is_removed_and_the_restore_given_up_without_a_restart() {
+    fn past_the_cap_the_link_is_removed_and_the_machine_restarts_into_a_normal_boot() {
         let lab = armed("apply-cap");
         let before = lab.esp_tree();
         State {
@@ -1646,9 +1658,17 @@ mod tests {
         assert_eq!(boot(&mut fake), End::GaveUp);
         assert_eq!(
             fake.calls,
-            ["is_armed", "remove_link", "now", "say", "remove_arm_files"]
+            [
+                "is_armed",
+                "remove_link",
+                "now",
+                "say",
+                "remove_arm_files",
+                "restart"
+            ]
         );
-        assert_eq!(fake.count_of("restart"), 0);
+        assert_eq!(fake.count_of("restart"), 1);
+        assert_eq!(fake.restarts_over_the_link, 0);
         assert!(!is_linked(&lab));
         let report = report(&lab);
         assert_eq!(report.outcome, Outcome::Failed);
@@ -1714,22 +1734,25 @@ mod tests {
                 last = boot_or_die(&mut fake);
             }
             assert!(fake.count_of("copy") <= 3, "{die_at}");
-            // A boot past the cap never restarts.
+            // The only restarts over the link are the retries: two at most. A boot past the
+            // cap restarts once at most, and only with the link gone.
+            assert!(fake.restarts_over_the_link <= 2, "{die_at}");
             if boots > MAX_BOOTS {
                 assert!(
                     matches!(last, None | Some(End::GaveUp)),
                     "{die_at}: {last:?}"
                 );
-                assert_eq!(
-                    fake.calls
-                        .iter()
-                        .rev()
-                        .take_while(|call| **call != "is_armed")
-                        .filter(|call| **call == "restart")
-                        .count(),
-                    0,
-                    "{die_at}"
-                );
+                let last_boot: Vec<_> = fake
+                    .calls
+                    .iter()
+                    .rev()
+                    .take_while(|call| **call != "is_armed")
+                    .collect();
+                let restarts = last_boot.iter().filter(|call| ***call == "restart").count();
+                assert!(restarts <= 1, "{die_at}");
+                // Dying at the restart itself, or before it, leaves none.
+                let died_first = last.is_none();
+                assert_eq!(restarts, usize::from(!died_first), "{die_at}");
             }
         }
     }
@@ -2142,6 +2165,7 @@ mod tests {
             assert_eq!(boot(&mut fake), stuck);
         }
         assert_eq!(fake.count_of("restart"), 2);
+        assert_eq!(fake.restarts_over_the_link, 2);
         assert_eq!(fake.count_of("copy"), 3);
     }
 

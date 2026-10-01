@@ -2586,3 +2586,27 @@ and 13.
   `check_arming`). Deliberate breakages then failed on assertions and were undone: a cap
   that's never reached (3 tests), a restart at the cap (2), the count not saved (2), the
   temporary files not cleared at all (2), not cleared at the end (1).
+
+## 2026-10-01 - 6b: a give-up restarts once the link is gone (owner)
+
+Replaces "`Runner::restart` isn't called" at the cap, and the "for the owner" point, in the
+entry above.
+
+- **`End::GaveUp` restarts.** The link is removed before `GaveUp` is returned, so the restart
+  can only reach a normal boot: no loop. Without it the machine would stay in
+  `system-update.target` with nothing left to run.
+- **`End::LinkStuck` still doesn't restart**, at the cap as anywhere else.
+- **The rule is core's**, in `apply`, and the helper never decides it: restart whenever the
+  link is gone (`Finished`, `GaveUp`), and over the link only as a retry (`Retry`, two at
+  most, each with an attempt on disk first). Never for `LinkStuck` or `NotArmed`.
+- **Tests count restarts by that rule.** The fake runner counts restarts made while the link
+  is still there. The cap test: one restart, none over the link. The test that kills the
+  helper at each of ten points: at most two restarts over the link, and a boot past the cap
+  restarts exactly once if it got to the end and not at all if it died first. The stuck-link
+  tests are unchanged: no restart past the two retries.
+- PLAN: 6b.10's boot cap and a line on who decides the restart, 6b.12, and the 6b.13 helper
+  list (the helper only exits 0 after `LinkStuck` and `NotArmed`).
+- **Verified** with apsis-core's tests (323 unit) and clippy `-D warnings` through the
+  scratch workspace; the workspace run is the owner's. The two cap tests were changed first
+  and failed on their assertions (no restart where one is now expected), then passed with
+  the one-line change.

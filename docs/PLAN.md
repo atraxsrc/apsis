@@ -1161,13 +1161,15 @@ three copies, and two to spare for power cuts). Each boot is counted in `state.j
 it does anything else, so a helper that's killed or panics in every boot, at any point after
 the count, is stopped. The boot that finds the count at 5 gives up: it removes the link
 **first**, writes `result.json` (`failed`, "started in 5 boots and ended in none"), saves
-step `end`, removes the unit files, and **doesn't restart** (`End::GaveUp`). The ESP backup
+step `end`, removes the unit files, and **restarts** (`End::GaveUp`; changed by the owner,
+2026-10-01): with the link gone a restart can only reach a normal boot, so it can't loop. If
+the link can't be removed it's `End::LinkStuck`, and that still doesn't restart. The ESP backup
 is left in place for a recovery by hand, and the result says so if the boot files are
 neither the restored kernel's nor the ones from before. What the count can't cover: a helper
 that dies in the link check, in reading `state.json`, or in removing the link itself.
-For the helper slice: after `GaveUp` the link is gone and nothing restarts, so the machine
-would sit in `system-update.target`; the helper decides what it does then (a restart is safe
-once the link is gone).
+**When the apply restarts is decided in core** (`apply`), not in the helper: after every end
+where the link is gone (`Finished`, `GaveUp`), and over the link only as a retry (two at
+most). Never for `LinkStuck` or `NotArmed`.
 
 **A plan or state that can't be read** (6b.6 step 1): the link is Apsis's, but
 `request.json` or `state.json` is missing or refused. Nothing is applied. The arm is removed
@@ -1299,7 +1301,7 @@ No root (run by Claude):
   is left alone; a link that can't be removed gets no restart; a refused `result.json` is
   replaced by the minimal report (the same outcome, no time); every boot is counted first,
   a helper that dies at any point after the count ends within the cap, and the cap ends
-  without a restart; no end leaves a `.apsis-tmp` file on the ESP (checked after every
+  with one restart once the link is gone and none over a link that's stuck; no end leaves a `.apsis-tmp` file on the ESP (checked after every
   apply in every test).
 - **Real rsync** on temp trees (as the tester, no root): a fake snapshot over a fake live root
   with the real filter: changed files replaced, new system files removed, home kept (including
@@ -1413,8 +1415,9 @@ Checks:
      (`systemd.offline-updates(7)`, recommendation 3; owner, 2026-10-01);
    - arming runs `refusal::check_arming` on an `lstat` of `/system-update` and
      `/etc/system-update` right before it makes the link;
-   - `End::GaveUp` (the boot cap) isn't followed by a restart from core: the helper decides
-     how the machine leaves `system-update.target` then;
+   - **the helper never decides whether to restart**: core calls `Runner::restart` itself,
+     after `Finished`, `GaveUp` and `Retry`. After `LinkStuck` and `NotArmed` it doesn't, and
+     the helper only exits 0;
    - removing a stale plan (6b.5) stays the helper's: core has none.
 4. **UI**, rebuilt from the preview (6b.8) in the real code: the toolbar's Restore (no key, no
    tooltip), the dialog, refusals, preparing status, ready prompt, results in the status line. The preview branch stays unmerged.
