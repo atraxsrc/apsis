@@ -21,10 +21,35 @@ use apsis_core::job::{self, Job, JobKind, JobState, WireJob};
 use apsis_core::native::Cancel;
 use apsis_core::progress::Throttle;
 use apsis_core::{Error, Progress, Result};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 /// `JobChanged` for progress at most this often (the end always goes out).
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
+
+/// How long [`Announced::wait`] gives the announcing task to put the end on the bus before
+/// `Finished` goes out anyway (a stuck bus mustn't hold the caller's result).
+const ANNOUNCE_WAIT: Duration = Duration::from_secs(2);
+
+/// One `JobChanged` for the announcing task: the job, and for an end, where to say once it's
+/// on the bus (so `Finished` can follow it, not race it).
+pub struct Announcement {
+    pub job: WireJob,
+    pub sent: Option<oneshot::Sender<()>>,
+}
+
+/// A job's end, on its way to the bus (see [`Running::end`]).
+pub struct Announced(Option<oneshot::Receiver<()>>);
+
+impl Announced {
+    /// Returns once the end is on the bus, or after [`ANNOUNCE_WAIT`], or at once if the
+    /// announcing task is gone. `Finished` is sent after this, so every listener hears the
+    /// end before the caller hears the result.
+    pub async fn wait(self) {
+        if let Some(sent) = self.0 {
+            let _ = tokio::time::timeout(ANNOUNCE_WAIT, sent).await;
+        }
+    }
+}
 
 /// How long a write waits for the readers to finish before it's refused `Busy`. A read is a
 /// second or two (mount, a few `info.json` files, `statvfs`, unmount).
@@ -50,7 +75,7 @@ pub struct State {
     activity: Notify,
     job: Mutex<Option<Active>>,
     /// Each change of the job, for the task that sends `JobChanged`.
-    changes: mpsc::UnboundedSender<WireJob>,
+    changes: mpsc::UnboundedSender<Announcement>,
     /// Readers in: [`Reading`] guards alive.
     readers: Mutex<usize>,
     /// Wakes the waiting write when the last reader leaves.
@@ -64,7 +89,7 @@ fn refuse(why: &str) -> Error {
 
 impl State {
     /// The state, and the job changes for the task that sends `JobChanged`.
-    pub fn new() -> (Arc<Self>, mpsc::UnboundedReceiver<WireJob>) {
+    pub fn new() -> (Arc<Self>, mpsc::UnboundedReceiver<Announcement>) {
         let (changes, receiver) = mpsc::unbounded_channel();
         let state = Arc::new(Self {
             running: AtomicBool::new(false),
@@ -92,7 +117,20 @@ impl State {
 
     /// Sends the job as it is now (nobody listening is fine).
     fn announce(&self, active: &Active) {
-        let _ = self.changes.send(job::to_wire(Some(&active.job)));
+        let _ = self.changes.send(Announcement {
+            job: job::to_wire(Some(&active.job)),
+            sent: None,
+        });
+    }
+
+    /// Sends the job's end, with a way to hear when it's on the bus.
+    fn announce_end(&self, active: &Active) -> Announced {
+        let (sent, on_bus) = oneshot::channel();
+        let announced = self.changes.send(Announcement {
+            job: job::to_wire(Some(&active.job)),
+            sent: Some(sent),
+        });
+        Announced(announced.is_ok().then_some(on_bus))
     }
 
     /// Counts a call as in progress until the guard drops. The helper doesn't exit meanwhile.
@@ -328,16 +366,19 @@ pub struct Running {
 impl Running {
     /// The job ended: the lock is released **first**, then the end is announced once with
     /// `state` (done, failed or stopped). So the refresh the announcement sets off is never
-    /// refused by this job.
-    pub fn end(mut self, state: JobState) {
+    /// refused by this job. The caller sends `Finished` after [`Announced::wait`], so the
+    /// end is on the bus before the result is: a listener that is also the caller sees its
+    /// own job end before it hears how it went, never the other way round.
+    pub fn end(mut self, state: JobState) -> Announced {
         let ended = self.state.lock_job().take().map(|mut active| {
             active.job.state = state;
             active
         });
         self.ended = true;
         self.state.release();
-        if let Some(active) = ended {
-            self.state.announce(&active);
+        match ended {
+            Some(active) => self.state.announce_end(&active),
+            None => Announced(None),
         }
     }
 }
@@ -354,16 +395,53 @@ impl Drop for Running {
 mod tests {
     use super::*;
 
-    fn state() -> (Arc<State>, mpsc::UnboundedReceiver<WireJob>) {
+    fn state() -> (Arc<State>, mpsc::UnboundedReceiver<Announcement>) {
         State::new()
     }
 
-    fn drain(changes: &mut mpsc::UnboundedReceiver<WireJob>) -> Vec<(String, String, String)> {
+    fn drain(changes: &mut mpsc::UnboundedReceiver<Announcement>) -> Vec<(String, String, String)> {
         let mut seen = Vec::new();
-        while let Ok((kind, state, snapshot, ..)) = changes.try_recv() {
+        while let Ok(Announcement {
+            job: (kind, state, snapshot, ..),
+            ..
+        }) = changes.try_recv()
+        {
             seen.push((kind, state, snapshot));
         }
         seen
+    }
+
+    /// The end's announcement waits for the bus before `Finished` may follow: the caller
+    /// hears its own job end first. A stuck or gone announcer doesn't hold `Finished`.
+    #[tokio::test(start_paused = true)]
+    async fn finished_follows_the_end_on_the_bus() {
+        let (state, mut changes) = state();
+        let running = state.begin(JobKind::Delete).await.unwrap();
+        drain(&mut changes);
+        let announced = running.end(JobState::Done);
+        let Announcement { job, sent } = changes.try_recv().unwrap();
+        assert_eq!(job.1, "done");
+        let sent = sent.expect("an end says when it's on the bus");
+        let waiter = tokio::spawn(announced.wait());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!waiter.is_finished(), "Finished would race the end");
+        sent.send(()).unwrap();
+        waiter.await.unwrap();
+        // A start or progress announcement has no such hook.
+        let running = state.begin(JobKind::Create).await.unwrap();
+        assert!(changes.try_recv().unwrap().sent.is_none());
+        // The announcer dropped the sender (gone): no wait. Never sent: the timeout.
+        let announced = running.end(JobState::Failed);
+        drop(changes.try_recv().unwrap().sent);
+        announced.wait().await;
+        let running = state.begin(JobKind::Create).await.unwrap();
+        drain(&mut changes);
+        let announced = running.end(JobState::Done);
+        let kept = changes.try_recv().unwrap().sent;
+        let waiter = tokio::spawn(announced.wait());
+        tokio::time::sleep(ANNOUNCE_WAIT + Duration::from_millis(1)).await;
+        assert!(waiter.is_finished(), "gave up waiting");
+        drop(kept);
     }
 
     #[tokio::test]

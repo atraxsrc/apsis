@@ -431,6 +431,235 @@ fn a_delete_of_several_stops_at_the_first_failure_and_says_what_went() {
     assert_eq!(app.disk_seen, Some(false));
 }
 
+/// The helper frees the lock, announces the end (through its own task) and sends `Finished`
+/// to the caller: on the bus the two can come in either order. This window's own job must be
+/// known as its own whichever comes first; the real bug (apsis-test, check 13): `Finished`
+/// first, then the end, shown as "A delete started elsewhere failed".
+fn own_job_in_both_orders(
+    operation: Operation,
+    result: Result<(), CliError>,
+    end: JobState,
+    expected: &dyn Fn(&Status) -> bool,
+) {
+    let kind = operation.kind();
+    let name = match &operation {
+        Operation::Create(_) => NEWEST,
+        Operation::Delete(name) => name.as_str(),
+        Operation::DeleteMany(names) => names.last().unwrap().as_str(),
+    };
+    let mut started = job(kind, JobState::Running, name);
+    started.started = 1_790_000_000;
+    let mut ended = job(kind, end, name);
+    ended.started = 1_790_000_000;
+    for (order, finished_first, seen_running) in [
+        (
+            "Finished first (the real order), the job seen running",
+            true,
+            true,
+        ),
+        ("Finished first, the job never seen running", true, false),
+        ("the end first (the reverse)", false, true),
+    ] {
+        let mut app = window();
+        app.running = Some(operation.clone());
+        if seen_running {
+            send(&mut app, Message::Job(JobEvent::Changed(started.clone())));
+            assert_eq!(app.running, Some(operation.clone()), "{order}");
+        }
+        if finished_first {
+            send(
+                &mut app,
+                Message::Finished(operation.clone(), result.clone()),
+            );
+            let after_finished = app.status.clone();
+            send(&mut app, Message::Job(JobEvent::Changed(ended.clone())));
+            assert_eq!(
+                app.status, after_finished,
+                "{order}: the late end changed the line"
+            );
+        } else {
+            send(&mut app, Message::Job(JobEvent::Changed(ended.clone())));
+            assert_eq!(app.running, Some(operation.clone()), "{order}: still ours");
+            send(
+                &mut app,
+                Message::Finished(operation.clone(), result.clone()),
+            );
+        }
+        let status = app.status.clone().expect(order);
+        assert!(expected(&status), "{order}: {status:?}");
+        assert!(app.running.is_none() && app.job.is_none(), "{order}");
+        assert!(app.own_end.is_none(), "{order}: nothing left to wait for");
+        assert!(app.loading, "{order}: listed once");
+        // The next end of the same kind is another window's again.
+        app.loading = false;
+        let mut other = job(kind, JobState::Done, SECOND);
+        other.started = 1_790_000_900;
+        send(&mut app, Message::Job(JobEvent::Changed(other)));
+        let elsewhere = match kind {
+            JobKind::Create => fl!("created"),
+            _ => fl!("deleted-elsewhere"),
+        };
+        assert_eq!(app.status, Some(Status::Info(elsewhere)), "{order}");
+        assert!(app.loading, "{order}: another window's end lists");
+    }
+}
+
+#[test]
+fn a_failed_delete_of_several_is_this_windows_whichever_comes_first() {
+    let names = vec![NEWEST.to_owned(), SECOND.to_owned()];
+    let stopped = CliError::DeleteManyStopped {
+        deleted: vec![NEWEST.to_owned()],
+        failed: SECOND.to_owned(),
+        left: Vec::new(),
+        reason: Box::new(CliError::Other(
+            "no snapshot called \"x\" on the backup device".to_owned(),
+        )),
+    };
+    own_job_in_both_orders(
+        Operation::DeleteMany(names),
+        Err(stopped),
+        JobState::Failed,
+        &|status| {
+            matches!(status, Status::Error(line, Some(details))
+                if line.starts_with("Delete stopped at ") && details.contains("(1)"))
+        },
+    );
+    // Not "A delete started elsewhere failed", and the selection keeps what wasn't deleted.
+    let mut app = window();
+    click(&mut app, 0, Modifiers::empty());
+    click(&mut app, 1, Modifiers::CTRL);
+    send(&mut app, Message::DeleteClicked);
+    send(&mut app, Message::DialogConfirm);
+    let names = vec![NEWEST.to_owned(), SECOND.to_owned()];
+    let mut ended = job(JobKind::DeleteMany, JobState::Failed, SECOND);
+    ended.started = 7;
+    send(
+        &mut app,
+        Message::Finished(
+            Operation::DeleteMany(names),
+            Err(CliError::DeleteManyStopped {
+                deleted: vec![NEWEST.to_owned()],
+                failed: SECOND.to_owned(),
+                left: Vec::new(),
+                reason: Box::new(CliError::Other("gone".to_owned())),
+            }),
+        ),
+    );
+    send(&mut app, Message::Job(JobEvent::Changed(ended)));
+    let Some(Status::Error(line, _)) = &app.status else {
+        panic!("{:?}", app.status)
+    };
+    assert_ne!(line, &fl!("delete-failed-elsewhere"));
+    assert!(line.starts_with("Delete stopped at "), "{line}");
+    assert_eq!(selected(&app), [SECOND]);
+}
+
+#[test]
+fn a_successful_delete_of_several_is_this_windows_whichever_comes_first() {
+    let names = vec![NEWEST.to_owned(), SECOND.to_owned(), THIRD.to_owned()];
+    own_job_in_both_orders(
+        Operation::DeleteMany(names),
+        Ok(()),
+        JobState::Done,
+        &|status| *status == Status::Info(fl!("deleted-many", count = "3")),
+    );
+}
+
+#[test]
+fn a_failed_single_delete_is_this_windows_whichever_comes_first() {
+    own_job_in_both_orders(
+        Operation::Delete(SECOND.to_owned()),
+        Err(CliError::Other("no space".to_owned())),
+        JobState::Failed,
+        &|status| {
+            matches!(status, Status::Error(line, None)
+                if line.starts_with("Delete failed") && line.contains("no space"))
+        },
+    );
+}
+
+#[test]
+fn a_failed_create_is_this_windows_whichever_comes_first() {
+    own_job_in_both_orders(
+        Operation::Create("before update".to_owned()),
+        Err(CliError::Other("rsync exited with code 11".to_owned())),
+        JobState::Failed,
+        &|status| {
+            matches!(status, Status::Error(line, None)
+                if line.starts_with("Create failed") && line.contains("code 11"))
+        },
+    );
+    own_job_in_both_orders(
+        Operation::Create(String::new()),
+        Err(CliError::Stopped),
+        JobState::Stopped,
+        &|status| *status == Status::Info(fl!("create-stopped")),
+    );
+}
+
+/// Refused before the lock (polkit, busy, no helper): no job began, so no end is waited
+/// for, and the next end of that kind is another window's at once.
+#[test]
+fn a_refusal_before_the_job_began_waits_for_no_end() {
+    for refused in [CliError::NotAuthorized, CliError::Busy, CliError::NoHelper] {
+        let mut app = window();
+        app.running = Some(Operation::Delete(SECOND.to_owned()));
+        send(
+            &mut app,
+            Message::Finished(Operation::Delete(SECOND.to_owned()), Err(refused.clone())),
+        );
+        assert!(app.own_end.is_none(), "{refused:?}");
+        app.loading = false;
+        send(
+            &mut app,
+            Message::Job(JobEvent::Changed(job(
+                JobKind::Delete,
+                JobState::Done,
+                THIRD,
+            ))),
+        );
+        assert_eq!(
+            app.status,
+            Some(Status::Info(fl!("deleted-elsewhere"))),
+            "{refused:?}"
+        );
+        assert!(app.loading, "{refused:?}");
+    }
+}
+
+/// The helper leaving the bus clears what was waited for; an end of another kind too.
+#[test]
+fn a_waited_for_end_is_dropped_when_something_else_comes() {
+    let mut app = window();
+    app.running = Some(Operation::Delete(SECOND.to_owned()));
+    send(
+        &mut app,
+        Message::Finished(Operation::Delete(SECOND.to_owned()), Ok(())),
+    );
+    assert!(app.own_end.is_some());
+    send(&mut app, Message::Job(JobEvent::HelperGone));
+    assert!(app.own_end.is_none());
+
+    let mut app = window();
+    app.running = Some(Operation::Delete(SECOND.to_owned()));
+    send(
+        &mut app,
+        Message::Finished(Operation::Delete(SECOND.to_owned()), Ok(())),
+    );
+    app.loading = false;
+    // A create elsewhere ending: not ours, shown and listed; nothing waited for any more.
+    send(
+        &mut app,
+        Message::Job(JobEvent::Changed(job(
+            JobKind::Create,
+            JobState::Done,
+            THIRD,
+        ))),
+    );
+    assert_eq!(app.status, Some(Status::Info(fl!("created"))));
+    assert!(app.loading && app.own_end.is_none());
+}
+
 #[test]
 fn create_asks_for_an_optional_comment_and_checks_it_first() {
     let mut app = window();

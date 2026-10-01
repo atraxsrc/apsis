@@ -436,12 +436,9 @@ impl AppModel {
         if !own && job.is_none() {
             return None;
         }
-        let kind = job.map(|j| j.kind).or(match &self.running {
-            Some(super::Operation::Create(_)) => Some(JobKind::Create),
-            Some(super::Operation::Delete(_)) => Some(JobKind::Delete),
-            Some(super::Operation::DeleteMany(_)) => Some(JobKind::DeleteMany),
-            None => None,
-        })?;
+        let kind = job
+            .map(|j| j.kind)
+            .or(self.running.as_ref().map(super::Operation::kind))?;
         let stopping = job.is_some_and(|j| j.state == JobState::Stopping);
         let (text, fraction) = if stopping {
             (fl!("stopping"), None)

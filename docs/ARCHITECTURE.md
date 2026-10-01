@@ -192,7 +192,9 @@ Each call, in order:
    state) is kept beside the lock for `Job` and announced with `JobChanged`. When it ends, the
    lock is released **first**, then the end is announced, then `Finished` is sent to the
    caller: the refresh either one sets off is never refused by the job it refreshes for (the
-   rule the restore builds on).
+   rule the restore builds on). `Finished` waits until the end is on the bus (the announcing
+   task says so; 2 s at most), so the caller, a listener too, sees its job end before it
+   hears the result. The applet copes with either order anyway (`OwnEnd` in `app.rs`).
 8. Every call and its result is logged to the journal (`journalctl -u apsis-helper`); comments
    are cut to 40 characters. A delete logs `delete "<name>" for :1.42: started`, the path it
    deleted, and `done` or the reason.

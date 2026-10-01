@@ -1787,3 +1787,43 @@ design), on `release-0.4.2` from `v0.4.1`. Unattended session; nothing run on ap
 - **Not done here**: check 13 on apsis-test (both monitors on: one `delete-many` job, then
   one `list` per process, none refused), the .deb and lintian (`just deb` needs the network
   and wasn't run), the tag.
+
+## 2026-10-01 - 0.4.2 fix: a window's own job end arriving after its `Finished`
+
+**Bug** (owner, apsis-test, check 13's stop-at-failure, Apsis 0.4.2 before tagging): a
+`DeleteMany` of two, the older gone behind Apsis's back. The helper's journal was right
+(`started`, `deleted <newer>`, `failed: delete stopped at <older>: ...`, three lists, none
+refused), but the window showed "A delete started elsewhere failed" instead of "Delete
+stopped at <name>: ..." with the Deleted/Not deleted tooltip. A successful `DeleteMany` of
+three from the same window showed correctly.
+
+**Cause** (from the code; the window logs nothing): the helper's job task runs the work in
+`spawn_blocking`, `Running::end` frees the lock and puts the end `JobChanged` on an unbounded
+channel for the `announce_jobs` task, and the job task then sends `Finished` to the caller
+itself. Two tasks, one socket: on a multi-thread runtime `Finished` can be written before
+the announcer writes the end. The window's `operate` returns on `Finished`, `on_finished`
+clears `running` and sets the right status, and then the end `JobChanged` arrives in `on_job`
+with `running == None`: it's taken for another window's job, the status is overwritten with
+the "elsewhere" line, and `start_list` is a no-op (already loading). Which order wins is
+timing, hence the three-snapshot success. The same race existed in 0.4.1 (three `Delete`
+calls); it was masked by the cascade of lists.
+
+**Fix, both sides** (release-0.4.2):
+- Helper: the end's announcement carries a `oneshot` (`state::Announcement`, `Announced`);
+  `announce_jobs` fires it once the `JobChanged` has been written, and `start` (and
+  `write_config`) awaits it, 2 s at most, before `Finished` or the reply. So on the bus the
+  end precedes `Finished`, as ARCHITECTURE describes. A gone or stuck announcer doesn't hold
+  the result. `Running::end` now returns the `Announced`.
+- Applet: `on_finished` records what's still to come from the helper (`OwnEnd`: the job's
+  kind and, when the window saw it running, its `started`; or, when `Finished` beat even the
+  first announcement, the kind alone for 5 s), unless the end already came (`own_job_ended`,
+  set when `on_job` consumed the end while `running`) or no job began (refused before the
+  lock: no helper, polkit, busy). `on_job` then takes a matching end for the window's own
+  (no status change, no second list) and drops stale running announcements of it; anything
+  else clears the expectation. `HelperGone` clears it. `Operation::kind()` names the job.
+- Tests: `own_job_in_both_orders` runs a failed `DeleteMany`, a successful one, a failed
+  `Delete`, a failed and a stopped `Create` through the three orders (`Finished` first with
+  the job seen running, `Finished` first with nothing seen, the end first), checks the
+  status line, the selection for the stopped delete, one list, and that the next end of the
+  same kind is another window's again; refusals before the lock wait for nothing; the helper
+  leaving or another kind's end clears the wait. Helper: `finished_follows_the_end_on_the_bus`.

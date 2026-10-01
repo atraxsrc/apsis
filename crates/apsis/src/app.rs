@@ -237,6 +237,44 @@ pub struct AppModel {
     helper: Option<HelperClient>,
     /// Counts the connections made, so the job subscription follows the current one.
     bus_generation: u32,
+    /// This window's operation has ended (`Finished` came) but the helper's end announcement
+    /// for its job hasn't arrived yet: the next end of that kind is this job's, not another
+    /// window's (see [`AppModel::on_job`]).
+    own_end: Option<OwnEnd>,
+    /// The helper announced the end of this window's running operation before its `Finished`
+    /// came (the other order): nothing is left to wait for then.
+    own_job_ended: bool,
+}
+
+/// The end announcement this window still expects for its own job, after its `Finished`.
+///
+/// The helper frees the lock, announces the end (`JobChanged`, through a task of its own)
+/// and sends `Finished` to the caller; on the bus the two can arrive in either order. An
+/// end that comes after `Finished` must not be taken for another window's job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnEnd {
+    kind: JobKind,
+    /// The job's start time as the helper announced it, when this window saw the job
+    /// running; `None` when `Finished` came before any announcement (then the kind alone
+    /// says, and only within [`OWN_END_GRACE`]).
+    started: Option<i64>,
+    finished_at: Instant,
+}
+
+/// How long after its `Finished` a window still takes an end of its job's kind, with no
+/// announced start time to match, for its own. The announcement follows `Finished` by
+/// milliseconds; a job elsewhere can't even begin before the own end is announced.
+const OWN_END_GRACE: Duration = Duration::from_secs(5);
+
+impl OwnEnd {
+    /// Whether `job` is the job this is waiting for the end of.
+    fn is(&self, job: &Job) -> bool {
+        job.kind == self.kind
+            && match self.started {
+                Some(started) => job.started == started,
+                None => self.finished_at.elapsed() < OWN_END_GRACE,
+            }
+    }
 }
 
 /// What a task reaches the helper through: the process's connection, or `None` before it's
@@ -345,6 +383,17 @@ pub enum Operation {
     /// Several, as one job in the helper (`DeleteMany`), in list order; it stops at the first
     /// failure and says what was deleted.
     DeleteMany(Vec<String>),
+}
+
+impl Operation {
+    /// The job the helper runs for it, as `Job` and `JobChanged` name it.
+    fn kind(&self) -> JobKind {
+        match self {
+            Self::Create(_) => JobKind::Create,
+            Self::Delete(_) => JobKind::Delete,
+            Self::DeleteMany(_) => JobKind::DeleteMany,
+        }
+    }
 }
 
 /// The status area's result line.
@@ -719,6 +768,8 @@ impl AppModel {
             token_requests: None,
             helper: None,
             bus_generation: 0,
+            own_end: None,
+            own_job_ended: false,
         }
     }
 
@@ -1410,6 +1461,8 @@ impl AppModel {
         self.status = None;
         self.progress = None;
         self.run_started = Some(Instant::now());
+        self.own_job_ended = false;
+        self.own_end = None;
         let link = self.helper.clone();
         with_progress(move |mut progress| async move {
             let result = operate(link, operation.clone(), &mut progress).await;
@@ -1427,6 +1480,7 @@ impl AppModel {
         self.running = None;
         self.progress = None;
         self.run_started = None;
+        self.own_end = self.expect_own_end(operation, &result);
         if matches!(result, Err(CliError::Busy)) {
             self.helper_busy = true;
             self.status = Some(Status::Info(fl!("busy-background")));
@@ -1520,11 +1574,49 @@ impl AppModel {
         Task::none()
     }
 
+    /// What this window's finished `operation` still has coming from the helper: the end
+    /// announcement of its job, unless that already arrived (then `job` is `None`) or no job
+    /// began (refused before the lock: no helper, polkit, busy).
+    fn expect_own_end(
+        &mut self,
+        operation: &Operation,
+        result: &Result<(), CliError>,
+    ) -> Option<OwnEnd> {
+        let kind = operation.kind();
+        let finished_at = Instant::now();
+        if std::mem::take(&mut self.own_job_ended) {
+            return None;
+        }
+        match self.job.take() {
+            // Seen running and not yet ended: its end is still to come.
+            Some(job) if job.kind == kind && !job.state.is_end() => Some(OwnEnd {
+                kind,
+                started: Some(job.started),
+                finished_at,
+            }),
+            // Another job's (stale): keep it where it was.
+            Some(job) => {
+                self.job = Some(job);
+                None
+            }
+            None => match result {
+                Err(CliError::NoHelper | CliError::NotAuthorized | CliError::Busy) => None,
+                // `Finished` beat even the job's first announcement: by kind, briefly.
+                _ => Some(OwnEnd {
+                    kind,
+                    started: None,
+                    finished_at,
+                }),
+            },
+        }
+    }
+
     /// A job changed in the helper (any window's), or the helper left the bus.
     fn on_job(&mut self, event: JobEvent) -> Task<cosmic::Action<Message>> {
         let job = match event {
             JobEvent::Changed(job) => job,
             JobEvent::HelperGone => {
+                self.own_end = None;
                 let had = self.job.take();
                 // This window's own job ends with its `Finished` (or the helper-gone error).
                 if self.running.is_none() && had.is_some_and(|j| j.kind.changes_the_list()) {
@@ -1533,6 +1625,19 @@ impl AppModel {
                 return Task::none();
             }
         };
+        // This window's own job, announced after its `Finished` already came: its start and
+        // progress are stale, and its end was shown by `on_finished`, which also listed.
+        if let Some(own) = &self.own_end {
+            if own.is(&job) {
+                if job.state.is_end() {
+                    self.own_end = None;
+                    self.job = None;
+                }
+                return Task::none();
+            }
+            // Something else's: the own end was lost, or this isn't it.
+            self.own_end = None;
+        }
         if !job.state.is_end() {
             // Progress of another window's create; this window's comes with its own call too.
             if self.running.is_none() && job.kind == JobKind::Create && job.percent.is_some() {
@@ -1553,6 +1658,7 @@ impl AppModel {
         self.job = None;
         if self.running.is_some() {
             // This window's own: its `Finished` says how it went and lists.
+            self.own_job_ended = true;
             return Task::none();
         }
         self.progress = None;

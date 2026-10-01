@@ -34,7 +34,7 @@ use crate::native::{self, SharedMount};
 use crate::polkit;
 use crate::runner::DirectRunner;
 use crate::settings::{self, Files};
-use crate::state::{Running, State};
+use crate::state::{Announcement, Running, State};
 use crate::usage;
 
 /// Longest part of a comment that goes into the journal.
@@ -377,16 +377,19 @@ impl Helper {
             self.refuse_if_running()?;
             authorize(connection, &caller, ACTION_CONFIGURE, true).await?;
             let running = self.state.begin(JobKind::Configure).await?;
-            blocking(move || {
+            let (result, announced) = blocking(move || {
                 let result = Files::system().write(&DirectRunner, &expected, &config);
-                running.end(if result.is_ok() {
+                let announced = running.end(if result.is_ok() {
                     JobState::Done
                 } else {
                     JobState::Failed
                 });
-                result
+                Ok((result, announced))
             })
-            .await
+            .await?;
+            // The end is on the bus before the reply.
+            announced.wait().await;
+            result
         }
         .await;
         match result {
@@ -458,16 +461,25 @@ impl Helper {
             let _call = call;
             // The lock is free before the end is announced and before `Finished` arrives, so
             // no refresh they set off is refused as busy (the rule the restore builds on).
-            let result = blocking(move || {
+            // And the end is on the bus before `Finished` is sent, so the caller (a listener
+            // too) sees its job end before it hears the result, never the other way round.
+            let result = match blocking(move || {
                 let result = work(&state);
-                running.end(match &result {
+                let announced = running.end(match &result {
                     Ok(_) => JobState::Done,
                     Err(Error::Stopped) => JobState::Stopped,
                     Err(_) => JobState::Failed,
                 });
-                result
+                Ok((result, announced))
             })
-            .await;
+            .await
+            {
+                Ok((result, announced)) => {
+                    announced.wait().await;
+                    result
+                }
+                Err(error) => Err(error),
+            };
             let (ok, message) = match result {
                 Ok(text) => {
                     log(&format!("{label}: done"));
@@ -497,15 +509,19 @@ impl Helper {
 /// the helper does.
 pub async fn announce_jobs(
     connection: Connection,
-    mut changes: tokio::sync::mpsc::UnboundedReceiver<WireJob>,
+    mut changes: tokio::sync::mpsc::UnboundedReceiver<Announcement>,
 ) {
     let Ok(emitter) = SignalEmitter::new(&connection, OBJECT_PATH) else {
         log("couldn't set up JobChanged");
         return;
     };
-    while let Some(job) = changes.recv().await {
+    while let Some(Announcement { job, sent }) = changes.recv().await {
         // A lost one is fine: the next change, `Job` or `Finished` follows.
         let _ = Helper::job_changed(&emitter, job).await;
+        // An end: `Finished` may go out now, behind it on the same connection.
+        if let Some(sent) = sent {
+            let _ = sent.send(());
+        }
     }
 }
 
