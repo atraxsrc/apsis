@@ -1195,6 +1195,7 @@ fn phrase_line<'a>(
             .into(),
     ])
     .spacing(4)
+    .align_y(Alignment::Center)
     .into()
 }
 

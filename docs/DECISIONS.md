@@ -3948,3 +3948,29 @@ refusal pairs the table had no words for yet (boot space, size unknown, boot fil
 with `APSIS_SCREENSHOTS`), `docs/UI.md`, the man page and README lines of step 5.
 
 Gate: workspace tests (applet 90), clippy `-D warnings` on all targets, fmt check: all clean.
+
+## 2026-10-02 - 6b UI slice, steps B and C: the layout test and UI.md
+
+- **`app::tests::restore::every_restore_state_fits_both_window_sizes`** (from the preview's
+  `preview_states_fit_both_window_sizes`): sixteen states (the dialog's seven variants, the
+  refusal and the dropped one, preparing, the stop dialog, ready, the four results) at
+  720 x 520 and 640 x 440. Each page fits the window under a 48 px header, each dialog with
+  its button row is at most the window's height minus 16 px and its width minus 16 px. Runs
+  with `APSIS_LAYOUT_TEST=1` (real text, the installed fonts), and with `APSIS_SCREENSHOTS`
+  writes `restore-<state>-<w>x<h>.rgba` of the page with the dialog centred over it.
+  **`.rgba`, not `.png`**: the main branch's `screenshots` test writes raw RGBA with the size
+  in front, and the `image` crate is only a transitive dependency here; the preview's PNG
+  writing would have added it as a dev-dependency. Same convention, no Cargo change.
+- **Looked at** (dark theme, converted to PNG outside the tree): the dialog at 720 x 520 is
+  the 6b.8 mockup; at 640 x 440 the busiest variant (no home, old format, Apsis 0.3) scrolls
+  with its scrollbar and keeps Cancel and Restore visible; the ready prompt sits over
+  `Preparing restore · ready`; the failed result has `incomplete` in the error colour and
+  Restore again at the right. One fix from the look: `phrase_line`'s row is centred
+  vertically (the coloured phrase sat above the baseline).
+- **UI.md**: the toolbar, the status area (Stop for a restore; the result after login), the
+  old-format row tooltip, the four dialogs in the table, a "Restore (0.5.0)" section under
+  Jobs, the keyboard rule (no key for Restore; Esc on the prompt is Cancel restore), the
+  tests. The README, man page and CHANGELOG lines are step 5's (with the release).
+
+**The UI slice is complete** but for step 5's docs. Gate: workspace tests (applet 91, with
+the layout test on), clippy `-D warnings` on all targets, fmt check: all clean.

@@ -1987,4 +1987,263 @@ mod restore {
             fl!("result-not-started", what = fl!("result-what-disk"))
         );
     }
+
+    /// Every restore state the window can show, by name (PLAN 6b.8's preview states).
+    fn states() -> Vec<(&'static str, AppModel)> {
+        let checked = |check: Check| {
+            let mut app = window();
+            click(&mut app, 0, Modifiers::empty());
+            send(&mut app, Message::RestoreClicked);
+            send(&mut app, Message::Checked(NEWEST.to_owned(), Ok(check)));
+            app
+        };
+        let result = |state: Outcome, message: &str| {
+            let mut app = window();
+            send(
+                &mut app,
+                Message::RestoreResultRead(Ok(RestoreResult {
+                    state: apsis_core::restore::state::ResultState::Ended(state),
+                    snapshot: Some(NEWEST.to_owned()),
+                    message: message.to_owned(),
+                    when: Some(1_790_000_000),
+                })),
+            );
+            app
+        };
+        let mut home_no_safety = with_dialog();
+        send(&mut home_no_safety, Message::RestoreHome(1));
+        send(&mut home_no_safety, Message::RestoreSafety(false));
+        let mut dropped = ready();
+        send(&mut dropped, Message::RestartNow);
+        send(
+            &mut dropped,
+            Message::RestartAnswered(Err(CliError::RestoreRefused(Refusal::BootFiles(
+                CheckFailure::NoEntry,
+            )))),
+        );
+        let mut preparing = with_dialog();
+        send(&mut preparing, Message::DialogConfirm);
+        send(
+            &mut preparing,
+            Message::Job(JobEvent::Changed(job(
+                JobKind::Restore,
+                JobState::Running,
+                NEWEST,
+            ))),
+        );
+        send(
+            &mut preparing,
+            Message::Progress(Progress {
+                percent: Some(42.0),
+                eta_seconds: Some(180),
+                text: String::new(),
+            }),
+        );
+        let mut stop = with_dialog();
+        send(&mut stop, Message::DialogConfirm);
+        send(
+            &mut stop,
+            Message::Job(JobEvent::Changed(job(
+                JobKind::Restore,
+                JobState::Running,
+                NEWEST,
+            ))),
+        );
+        send(&mut stop, Message::StopClicked);
+        vec![
+            ("restore", with_dialog()),
+            ("restore-home-no-safety", home_no_safety),
+            (
+                "restore-old-format",
+                checked(Check {
+                    old_format: true,
+                    ..check()
+                }),
+            ),
+            (
+                "restore-no-home",
+                checked(Check {
+                    has_home: false,
+                    ..check()
+                }),
+            ),
+            (
+                "restore-no-apsis",
+                checked(Check {
+                    apsis: InSnapshot::NotInstalled,
+                    ..check()
+                }),
+            ),
+            (
+                "restore-apsis-0.4",
+                checked(Check {
+                    apsis: InSnapshot::NoRestore {
+                        version: "0.4.2".to_owned(),
+                    },
+                    ..check()
+                }),
+            ),
+            (
+                "restore-apsis-0.3",
+                checked(Check {
+                    apsis: InSnapshot::OldSettings {
+                        version: "0.3.1".to_owned(),
+                    },
+                    old_format: true,
+                    has_home: false,
+                    ..check()
+                }),
+            ),
+            (
+                "restore-refused",
+                checked(Check {
+                    refusal: Some(Refusal::OtherInstallation),
+                    ..check()
+                }),
+            ),
+            ("restore-refused-dropped", dropped),
+            ("preparing", preparing),
+            ("stop-restore", stop),
+            ("ready", ready()),
+            ("result-done", result(Outcome::Done, "")),
+            ("result-boot-kept", result(Outcome::BootKept, "")),
+            (
+                "result-failed",
+                result(Outcome::Failed, "the backup disk was disconnected"),
+            ),
+            (
+                "result-not-started",
+                result(Outcome::NotStarted, "the backup disk wasn't found"),
+            ),
+        ]
+    }
+
+    /// Every restore state at 0.4.0's default and smallest window (PLAN 6b.12): each dialog,
+    /// buttons included, is at most the window's height minus 16 px (it's centred over the
+    /// whole window, header included), and the page under it fits. With `APSIS_SCREENSHOTS`
+    /// set, each is also written as `restore-<state>-<w>x<h>.rgba` (as `screenshots` writes
+    /// them): the page under a 48 px header, the dialog centred over it.
+    #[test]
+    fn every_restore_state_fits_both_window_sizes() {
+        const HEADER: f32 = 48.0;
+        let shots = std::env::var_os("APSIS_SCREENSHOTS").map(std::path::PathBuf::from);
+        for (name, mut app) in states() {
+            for size in [WINDOW_SIZE, WINDOW_MIN_SIZE] {
+                app.window_height = size.height;
+                let content = Size::new(size.width, size.height - HEADER);
+                let Some(page) = layout(app.window_view(), content) else {
+                    return;
+                };
+                assert!(
+                    page.bounds().height <= content.height + 0.5,
+                    "{name} at {size:?}: page {:?}",
+                    page.bounds()
+                );
+                assert!(
+                    page.bounds().width <= content.width + 0.5,
+                    "{name} at {size:?}: page {:?}",
+                    page.bounds()
+                );
+                if let Some(dialog) = app.dialog_view() {
+                    let node = layout(dialog, size).unwrap();
+                    assert!(
+                        node.bounds().height <= size.height - 16.0,
+                        "{name} at {size:?}: dialog {:?}",
+                        node.bounds()
+                    );
+                    assert!(
+                        node.bounds().width <= size.width - 16.0,
+                        "{name} at {size:?}: dialog {:?}",
+                        node.bounds()
+                    );
+                }
+                if let Some(dir) = &shots {
+                    let mut layers: Vec<Element<'_, Message>> = vec![
+                        widget::column::with_children(vec![
+                            widget::space::vertical()
+                                .height(cosmic::iced::Length::Fixed(HEADER))
+                                .into(),
+                            app.window_view(),
+                        ])
+                        .into(),
+                    ];
+                    if let Some(dialog) = app.dialog_view() {
+                        layers.push(
+                            widget::container(dialog)
+                                .center(cosmic::iced::Length::Fill)
+                                .into(),
+                        );
+                    }
+                    let stack: Element<'_, Message> =
+                        cosmic::iced::widget::Stack::with_children(layers).into();
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "a window"
+                    )]
+                    let (w, h) = (size.width as u32, size.height as u32);
+                    shoot_rgba(dir, &format!("restore-{name}-{w}x{h}"), stack, size);
+                }
+            }
+        }
+    }
+
+    /// Draws `element` at `size` with the dark theme and writes it as `<name>.rgba` in `dir`
+    /// (the `screenshots` test's format).
+    fn shoot_rgba(
+        dir: &std::path::Path,
+        name: &str,
+        mut element: Element<'_, Message>,
+        size: Size,
+    ) {
+        use cosmic::iced::core::layout::{Layout, Limits as LayoutLimits};
+        use cosmic::iced::core::renderer::{Headless, Style};
+        use cosmic::iced::core::widget::Tree;
+        use cosmic::iced::core::{Rectangle, mouse};
+        let Some(mut renderer) =
+            cosmic::iced::futures::executor::block_on(<cosmic::Renderer as Headless>::new(
+                cosmic::font::default(),
+                14.0.into(),
+                Some("tiny-skia"),
+            ))
+        else {
+            return;
+        };
+        std::fs::create_dir_all(dir).unwrap();
+        let theme = cosmic::Theme::dark();
+        let container = theme.cosmic().background(false);
+        let background: cosmic::iced::Color = container.base.into();
+        let text_color: cosmic::iced::Color = container.on.into();
+        let mut tree = Tree::new(&element);
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &LayoutLimits::new(Size::ZERO, size),
+        );
+        element.as_widget().draw(
+            &tree,
+            &mut renderer,
+            &theme,
+            &Style {
+                text_color,
+                icon_color: text_color,
+                scale_factor: 1.0,
+            },
+            Layout::new(&node),
+            mouse::Cursor::Unavailable,
+            &Rectangle::with_size(size),
+        );
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a window"
+        )]
+        let (width, height) = (size.width as u32, size.height as u32);
+        let pixels = renderer.screenshot(Size::new(width, height), 1.0, background);
+        let mut out = Vec::with_capacity(8 + pixels.len());
+        out.extend(width.to_le_bytes());
+        out.extend(height.to_le_bytes());
+        out.extend(pixels);
+        std::fs::write(dir.join(format!("{name}.rgba")), out).unwrap();
+    }
 }

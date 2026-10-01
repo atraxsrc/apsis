@@ -53,7 +53,7 @@ terminal; that design is in git history and DECISIONS.md.
 
 ```
 ┌ Apsis ─────────────────────────────────────────── ↻  ⓘ  ✕ ┐
-│ [+ Create]  [🗑 Delete]  [⚙ Settings]                      │
+│ [+ Create]  [↺ Restore]  [🗑 Delete]  [⚙ Settings]         │
 │  Snapshot             Comment                              │
 │▌ 2026-09-25 11:28     before driver update                 │  selected
 │  2026-09-23 08:33                                          │
@@ -71,14 +71,18 @@ terminal; that design is in git history and DECISIONS.md.
   starts floating even with tiling on, then becomes resizable once it's on screen.
 - Header bar: the title, Refresh and About Apsis (icons with tooltips) on the list page.
 - Toolbar: **Create** (enabled with a backup device listed and connected and no job running),
-  **Delete** (also needs a selection), **Settings**. No Restore until 0.5.0.
+  **Restore** (0.5.0: also needs exactly one snapshot selected, not a leftover; no tooltip, no
+  key), **Delete** (also needs a selection), **Settings**.
 - List: libcosmic list rows, date and comment, newest first, then leftovers of interrupted
   creates (dimmed, "Interrupted snapshot, removed by the next one"). Click selects one;
   Ctrl-click adds or removes; Shift-click selects a range.
 - Status area: last snapshot (with the reminder's note in the warning colour), backup disk with
   its bar (accent, warning under 10% free, destructive under 5%), the running job's line and bar
-  with **Stop** for a create, the last result (an error in the destructive colour, the helper's
-  own words in its tooltip), and the list's warnings.
+  with **Stop** for a create or a restore's preparation, the last result (an error in the
+  destructive colour, the helper's own words in its tooltip; after login, the last restore's
+  outcome, see Restore), and the list's warnings.
+- An old-format snapshot (made before 0.4.1, without ACLs and extended attributes) says so in
+  its row's tooltip. No glyph or column.
 - Without rows: `Reading snapshots…`, `No snapshots yet. Click Create to make one.`, `No backup
   disk chosen.` with a button to the settings, or the error with **Try again**.
 
@@ -91,8 +95,14 @@ terminal; that design is in git history and DECISIONS.md.
 | Stop the snapshot? | "What was copied so far is deleted." | Stop (destructive), Keep Going |
 | Add Pattern | Pattern, and how signs work | Add, Cancel |
 | Save the settings? | leaving Settings with changes | Save, Discard, Cancel |
+| Restore the system? | the date and comment (muted); "Puts system files back to this snapshot and restarts twice."; Home folders radios (keep, default; restore them too, with "Files changed after {date} are lost for good." when the safety snapshot is off); the safety snapshot checkbox (on); lines for no home in the snapshot, the old format, which Apsis the snapshot holds; "Experimental · …" (muted). The body scrolls within the window so the buttons always show | Restore (destructive), Cancel |
+| Can't restore this snapshot | the date and comment; the reason in the destructive colour; what to do; after a refused Restart now, "The preparation was dropped. Restore again to measure afresh." | Close |
+| Stop the restore? | "The safety snapshot being made is deleted. Nothing on the system has changed." | Stop (destructive), Keep Going |
+| Ready to restore | "Save your work and close your apps first." and what happens next | Restart now (suggested), Cancel restore |
 
 A comment the helper would refuse, or a bad pattern, keeps its dialog open with the reason.
+Every dialog opens with libcosmic's default focus (none), so Enter does nothing until Tab
+moves focus to a button.
 
 ### Jobs
 
@@ -109,6 +119,32 @@ A comment the helper would refuse, or a bad pattern, keeps its dialog open with 
   doesn't refresh (unless this window was told busy), so windows never list each other forever.
 - A backup disk pulled out mid-job: `Create failed: backup disk removed` (the helper checks
   `/dev/disk/by-uuid`), with rsync's error in the tooltip.
+
+### Restore (0.5.0)
+
+The whole flow is PLAN.md's Phase 6b; the window's part:
+
+- **Restore** asks the helper's `CheckRestore` first (the toolbar waits), then opens "Restore
+  the system?" or "Can't restore this snapshot". Confirming starts the preparation (one
+  password, asked every time): `Preparing restore · checking the snapshot…`, then
+  `Preparing restore · safety snapshot · 42% · 3m 00s left` with a bar and **Stop**, then
+  `Preparing restore · ready` (full bar, no Stop) under the "Ready to restore" prompt.
+- At the prompt, **Esc**, **Cancel restore** and closing the window all cancel: the helper
+  removes the plan (a finished safety snapshot stays), and the line says `Restore cancelled`.
+  **Restart now** re-checks, arms the next boot and restarts: `Restarting…`. A refusal there
+  opens "Can't restore" with the dropped-plan line; a plan older than 30 minutes, or one the
+  helper no longer has, says `The preparation is too old…` / `…is gone. Start the restore
+  again.`
+- While a plan is ready, here or in another window, Create, Restore and Delete are off; the
+  other window's line says `Restore ready in another window`. Its end refreshes the list.
+- **After login** the window asks `RestoreResult` and shows the last restore on the status
+  line, with the full text in a tooltip: `System restored to {date}`; `System restored ·`
+  **`still boots the previous kernel`** `· see README` (warning); `Restore` **`incomplete`**
+  `· system partly restored · {what to do}` (destructive) with **Restore again**, which opens
+  the normal dialog for the same snapshot; `The restore didn't start · nothing was changed ·
+  {what to do}`. No notification, and the panel icon and tooltip don't change.
+- The boot screen (plymouth) is the helper's: "Restoring the system. Don't turn off the
+  computer." and a progress bar.
 
 ### Settings
 
@@ -136,8 +172,10 @@ A page in the same window: back button, **Cancel** (drop changes) and **Save** (
 
 Shortcuts work in the window; the UI doesn't list them (man page and README do): Ctrl+N
 create, Delete, Ctrl+R and F5 refresh, Ctrl+, settings, Ctrl+A select all, Up and Down move
-the selection, Esc closes a dialog, then leaves Settings or About, then clears the selection.
-A key a text field took is left to it (except Esc).
+the selection, Esc closes a dialog (on the ready prompt that's Cancel restore), then leaves
+Settings or About, then clears the selection. A key a text field took is left to it (except
+Esc). **Restore has no key** (owner, 2026-09-30): a click, or Tab to the button and Enter.
+Enter and double-click on the list open nothing.
 
 ## Backup disk presence
 
@@ -155,7 +193,10 @@ A page in the window (libcosmic's about widget): name, icon, version and license
 - `crates/apsis/src/app/tests.rs`: messages into the model (toolbar enabling, selection,
   dialogs, stop, jobs from elsewhere, settings, shortcuts, disk presence, reminder).
 - `APSIS_LAYOUT_TEST=1 cargo test -p apsis fit`: the window and every settings tab fit 640 x
-  440, the popup its width (measures real text, so it depends on installed fonts).
+  440, the popup its width, and every restore state (the dialogs with their button rows, at
+  most the window's height minus 16 px; the page under them) fits both 720 x 520 and 640 x
+  440 (measures real text, so it depends on installed fonts). With `APSIS_SCREENSHOTS=<dir>`
+  the restore states are also written as `restore-<state>-<w>x<h>.rgba`.
 - `APSIS_SCREENSHOTS=<dir> cargo test -p apsis screenshots`: renders the window, a running
   create, each settings tab, a dialog and the popup (dark and light) to `.rgba` files. The
   libcosmic bars animate from empty, so a single frame shows them empty.
