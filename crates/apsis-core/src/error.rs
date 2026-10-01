@@ -37,6 +37,15 @@ pub enum Error {
     /// A create was stopped (`Stop`); what it had copied is gone.
     #[error("stopped")]
     Stopped,
+    /// A delete of several (`DeleteMany`) stopped at `failed`: the `deleted` ones are gone,
+    /// in order; `left` weren't touched; `reason` is what went wrong with `failed`.
+    #[error("delete stopped at {failed}: {reason}")]
+    DeleteManyStopped {
+        deleted: Vec<String>,
+        failed: String,
+        left: Vec<String>,
+        reason: Box<Error>,
+    },
     /// A config file that can't be read safely (`/etc/apsis/config.toml`, or the
     /// `timeshift.json` a first run imports).
     #[error("{0}")]

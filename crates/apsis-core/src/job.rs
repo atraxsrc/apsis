@@ -10,12 +10,14 @@
 /// eta_seconds)`. Idle is `("", "", "", 0, -1, -1)`.
 pub type WireJob = (String, String, String, i64, f64, i64);
 
-/// What the helper's one lock is held for.
+/// What the helper's one lock is held for. Writes only: a list isn't a job (it shares a
+/// read-only mount with other lists and is never announced).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobKind {
     Create,
     Delete,
-    List,
+    /// Several snapshots deleted in order as one job (`DeleteMany`).
+    DeleteMany,
     Configure,
 }
 
@@ -25,7 +27,7 @@ impl JobKind {
         match self {
             Self::Create => "create",
             Self::Delete => "delete",
-            Self::List => "list",
+            Self::DeleteMany => "delete-many",
             Self::Configure => "configure",
         }
     }
@@ -35,10 +37,16 @@ impl JobKind {
         match word {
             "create" => Some(Self::Create),
             "delete" => Some(Self::Delete),
-            "list" => Some(Self::List),
+            "delete-many" => Some(Self::DeleteMany),
             "configure" => Some(Self::Configure),
             _ => None,
         }
+    }
+
+    /// A create or a delete: the list changes when it ends.
+    #[must_use]
+    pub fn changes_the_list(self) -> bool {
+        matches!(self, Self::Create | Self::Delete | Self::DeleteMany)
     }
 }
 
@@ -89,11 +97,12 @@ impl JobState {
 pub struct Job {
     pub kind: JobKind,
     pub state: JobState,
-    /// The snapshot being made or deleted; empty until a create has planned its name.
+    /// The snapshot being made or deleted (a delete-many: the one being deleted now); empty
+    /// until a create has planned its name.
     pub snapshot: String,
     /// When it started, in Unix seconds.
     pub started: i64,
-    /// `0.0..=100.0`, once rsync has said.
+    /// `0.0..=100.0`, once rsync has said; a delete-many's done-of-total.
     pub percent: Option<f64>,
     pub eta_seconds: Option<u64>,
 }
@@ -159,6 +168,12 @@ mod tests {
         job.percent = Some(42.5);
         job.eta_seconds = Some(90);
         assert_eq!(from_wire(to_wire(Some(&job))), Some(job));
+        let mut many = Job::new(JobKind::DeleteMany, 1_790_000_000);
+        many.snapshot = "2026-09-30_14-02-11".to_owned();
+        many.percent = Some(50.0);
+        assert_eq!(from_wire(to_wire(Some(&many))), Some(many));
+        // A list is never a job on the bus.
+        assert_eq!(JobKind::from_word("list"), None);
         let unknown = (
             "restore".to_owned(),
             "running".to_owned(),
@@ -168,6 +183,14 @@ mod tests {
             -1,
         );
         assert_eq!(from_wire(unknown), None);
+    }
+
+    #[test]
+    fn creates_and_deletes_change_the_list() {
+        assert!(JobKind::Create.changes_the_list());
+        assert!(JobKind::Delete.changes_the_list());
+        assert!(JobKind::DeleteMany.changes_the_list());
+        assert!(!JobKind::Configure.changes_the_list());
     }
 
     #[test]

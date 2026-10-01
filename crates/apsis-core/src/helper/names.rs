@@ -23,6 +23,12 @@ pub const METHOD_CREATE: &str = "Create";
 /// `Delete(s name)`: deletes one snapshot folder (and its tag links), or one leftover of an
 /// interrupted create. Returns once started; [`SIGNAL_FINISHED`] with [`OP_DELETE`] follows.
 pub const METHOD_DELETE: &str = "Delete";
+/// `DeleteMany(as names)` (0.4.2): deletes several snapshots or leftovers as one job, each in
+/// order, stopping at the first failure. At least two names, each a snapshot name, none
+/// repeated. Returns once started; [`SIGNAL_FINISHED`] with [`OP_DELETE_MANY`] follows, its
+/// message on failure from [`super::encode_error`] (what was deleted, what failed, what's
+/// left).
+pub const METHOD_DELETE_MANY: &str = "DeleteMany";
 /// `Stop(s snapshot)`: stops the running create if it is making `snapshot`. Returns once
 /// stopping has begun; the create's [`SIGNAL_FINISHED`] follows.
 pub const METHOD_STOP: &str = "Stop";
@@ -35,7 +41,8 @@ pub const METHOD_READ_CONFIG: &str = "ReadConfig";
 pub const METHOD_WRITE_CONFIG: &str = "WriteConfig";
 /// `JobChanged((sssxdx) job)`, to everyone on the bus: a job started, got further (at most
 /// about twice a second), is stopping, or ended (sent once with `done`, `failed` or
-/// `stopped`; then the helper is idle).
+/// `stopped`; then the helper is idle). Only writes are jobs (create, delete, delete-many,
+/// configure); a `List` is never announced (0.4.2).
 pub const SIGNAL_JOB_CHANGED: &str = "JobChanged";
 /// `Finished(s op, b ok, s message)`, sent only to the caller that started the operation.
 pub const SIGNAL_FINISHED: &str = "Finished";
@@ -43,6 +50,8 @@ pub const SIGNAL_FINISHED: &str = "Finished";
 pub const OP_CREATE: &str = "create";
 /// `op` in [`SIGNAL_FINISHED`] after [`METHOD_DELETE`].
 pub const OP_DELETE: &str = "delete";
+/// `op` in [`SIGNAL_FINISHED`] after [`METHOD_DELETE_MANY`].
+pub const OP_DELETE_MANY: &str = "delete-many";
 
 /// Prefix of the helper's D-Bus error names.
 pub const ERROR_PREFIX: &str = "io.github.atraxsrc.Apsis.Helper2.Error";
@@ -64,7 +73,8 @@ pub const ERROR_CHANGED: &str = "io.github.atraxsrc.Apsis.Helper2.Error.Changed"
 pub const ACTION_LIST: &str = "io.github.atraxsrc.Apsis.list";
 /// polkit action for [`METHOD_CREATE`]: `auth_admin_keep`.
 pub const ACTION_CREATE: &str = "io.github.atraxsrc.Apsis.create";
-/// polkit action for [`METHOD_DELETE`]: `auth_admin_keep`.
+/// polkit action for [`METHOD_DELETE`] and [`METHOD_DELETE_MANY`] (asked once for the whole
+/// job): `auth_admin_keep`.
 pub const ACTION_DELETE: &str = "io.github.atraxsrc.Apsis.delete";
 /// polkit action for [`METHOD_STOP`] from a uid other than the one that started the create
 /// (that one isn't asked): `auth_admin_keep`.

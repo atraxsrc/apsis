@@ -168,7 +168,7 @@ fn the_window_lists_at_once_and_becomes_resizable_once_shown() {
     core.set_main_window_id(Some(Id::unique()));
     let mut app = AppModel::new(core, Mode::Window, Config::default());
     let _ = app.open_window();
-    assert!(app.loading);
+    assert!(app.loading, "connecting, then listing");
     assert_eq!(app.popup, app.core.main_window_id());
     assert!(!app.window_resizable);
     send(&mut app, Message::WindowShown);
@@ -278,8 +278,8 @@ fn toolbar_buttons_follow_the_list_selection_and_jobs() {
     // Another window's create.
     app.job = Some(job(JobKind::Create, JobState::Running, NEWEST));
     assert!(!app.can_create());
-    // A list elsewhere doesn't hold the toolbar up.
-    app.job = Some(job(JobKind::List, JobState::Running, ""));
+    // A config write elsewhere doesn't hold the toolbar up (a list is never a job).
+    app.job = Some(job(JobKind::Configure, JobState::Running, ""));
     assert!(app.can_create());
 }
 
@@ -320,7 +320,7 @@ fn a_new_list_keeps_the_selection_of_what_is_still_there() {
 }
 
 #[test]
-fn delete_asks_about_the_selection_in_list_order_then_goes_one_by_one() {
+fn delete_asks_about_the_selection_in_list_order_then_deletes_several_as_one_job() {
     let mut app = window();
     click(&mut app, 5, Modifiers::empty());
     click(&mut app, 0, Modifiers::CTRL);
@@ -333,15 +333,17 @@ fn delete_asks_about_the_selection_in_list_order_then_goes_one_by_one() {
     assert!(app.dialog.is_none() && app.running.is_none());
     send(&mut app, Message::Shortcut(Shortcut::Delete));
     send(&mut app, Message::DialogConfirm);
-    let first = Operation::Delete {
-        names: names.clone(),
-        done: 0,
-    };
-    assert_eq!(app.running, Some(first.clone()));
-    send(&mut app, Message::Finished(first, Ok(())));
-    let second = Operation::Delete { names, done: 1 };
-    assert_eq!(app.running, Some(second.clone()));
-    send(&mut app, Message::Finished(second, Ok(())));
+    // One `DeleteMany` call for both, not one `Delete` after the other.
+    let many = Operation::DeleteMany(names.clone());
+    assert_eq!(app.running, Some(many.clone()));
+    // The progress line follows the helper's `JobChanged`: which snapshot it's on.
+    let mut step = job(JobKind::DeleteMany, JobState::Running, LEFTOVER);
+    step.percent = Some(50.0);
+    send(&mut app, Message::Job(JobEvent::Changed(step)));
+    assert_eq!(app.running, Some(many.clone()), "still this window's job");
+    let line = app.delete_progress();
+    assert!(line.starts_with("Deleting 2 of 2: "), "{line}");
+    send(&mut app, Message::Finished(many, Ok(())));
     assert!(app.running.is_none());
     assert_eq!(
         app.status,
@@ -352,6 +354,23 @@ fn delete_asks_about_the_selection_in_list_order_then_goes_one_by_one() {
 }
 
 #[test]
+fn one_selected_snapshot_is_a_plain_delete() {
+    let mut app = window();
+    click(&mut app, 1, Modifiers::empty());
+    send(&mut app, Message::Shortcut(Shortcut::Delete));
+    send(&mut app, Message::DialogConfirm);
+    let one = Operation::Delete(SECOND.to_owned());
+    assert_eq!(app.running, Some(one.clone()));
+    let line = app.delete_progress();
+    assert!(
+        line.starts_with("Deleting ") && !line.contains(" of "),
+        "{line}"
+    );
+    send(&mut app, Message::Finished(one, Ok(())));
+    assert!(selected(&app).is_empty() && app.loading);
+}
+
+#[test]
 fn a_delete_of_several_stops_at_the_first_failure_and_says_what_went() {
     let mut app = window();
     click(&mut app, 0, Modifiers::empty());
@@ -359,27 +378,28 @@ fn a_delete_of_several_stops_at_the_first_failure_and_says_what_went() {
     send(&mut app, Message::DeleteClicked);
     send(&mut app, Message::DialogConfirm);
     let names = vec![NEWEST.to_owned(), SECOND.to_owned(), THIRD.to_owned()];
+    assert_eq!(app.running, Some(Operation::DeleteMany(names.clone())));
+    // The helper's account: the first went, the second failed, the third wasn't touched.
     send(
         &mut app,
         Message::Finished(
-            Operation::Delete {
-                names: names.clone(),
-                done: 0,
-            },
-            Ok(()),
-        ),
-    );
-    send(
-        &mut app,
-        Message::Finished(
-            Operation::Delete { names, done: 1 },
-            Err(CliError::Other("no space".to_owned())),
+            Operation::DeleteMany(names),
+            Err(CliError::DeleteManyStopped {
+                deleted: vec![NEWEST.to_owned()],
+                failed: SECOND.to_owned(),
+                left: vec![THIRD.to_owned()],
+                reason: Box::new(CliError::Other("no space".to_owned())),
+            }),
         ),
     );
     let Some(Status::Error(line, Some(details))) = &app.status else {
         panic!("{:?}", app.status)
     };
-    assert!(line.contains("no space"), "{line}");
+    assert!(line.starts_with("Delete stopped at "), "{line}");
+    assert!(
+        line.contains(&app.snapshot_label(SECOND)) && line.contains("no space"),
+        "{line}"
+    );
     assert!(
         details.contains("(1)") && details.contains("(2)"),
         "{details}"
@@ -387,6 +407,28 @@ fn a_delete_of_several_stops_at_the_first_failure_and_says_what_went() {
     // The ones not deleted stay selected; one was deleted, so it lists again.
     assert_eq!(selected(&app), [SECOND, THIRD]);
     assert!(app.loading);
+
+    // Stopped on the first because the disk went: nothing deleted, no list (it would only
+    // fail), and the disk is known to be gone.
+    let mut app = window();
+    let names = vec![NEWEST.to_owned(), SECOND.to_owned()];
+    send(
+        &mut app,
+        Message::Finished(
+            Operation::DeleteMany(names),
+            Err(CliError::DeleteManyStopped {
+                deleted: Vec::new(),
+                failed: NEWEST.to_owned(),
+                left: vec![SECOND.to_owned()],
+                reason: Box::new(CliError::DiskRemoved {
+                    reason: "I/O error".to_owned(),
+                }),
+            }),
+        ),
+    );
+    assert!(matches!(app.status, Some(Status::Error(_, Some(_)))));
+    assert!(!app.loading);
+    assert_eq!(app.disk_seen, Some(false));
 }
 
 #[test]
@@ -523,14 +565,19 @@ fn another_windows_job_shows_here_and_its_end_lists() {
 }
 
 #[test]
-fn a_list_or_config_write_ending_elsewhere_doesnt_list_here() {
+fn a_config_write_ending_elsewhere_doesnt_list_here_even_when_told_busy() {
     let mut app = window();
     send(
         &mut app,
-        Message::Job(JobEvent::Changed(job(JobKind::List, JobState::Done, ""))),
+        Message::Job(JobEvent::Changed(job(
+            JobKind::Configure,
+            JobState::Done,
+            "",
+        ))),
     );
-    assert!(!app.loading, "or two windows would list each other forever");
-    // Unless this window was told busy.
+    assert!(!app.loading, "the list hasn't changed");
+    // Told busy (a write was running or waiting): still one list per job end, for a
+    // create or delete only; the retry timer covers the rest.
     app.on_listed(Err(CliError::Busy));
     assert!(app.helper_busy);
     send(
@@ -541,7 +588,46 @@ fn a_list_or_config_write_ending_elsewhere_doesnt_list_here() {
             "",
         ))),
     );
-    assert!(app.loading);
+    assert!(!app.loading);
+    send(
+        &mut app,
+        Message::Job(JobEvent::Changed(job(
+            JobKind::DeleteMany,
+            JobState::Done,
+            "",
+        ))),
+    );
+    assert!(app.loading, "a delete of several changes the list");
+    assert_eq!(app.status, Some(Status::Info(fl!("deleted-elsewhere"))));
+}
+
+#[test]
+fn one_connection_per_process_made_first_then_the_list() {
+    // The window: connects first, with `loading` holding other lists off meanwhile.
+    let mut core = cosmic::Core::default();
+    core.set_main_window_id(Some(Id::unique()));
+    let mut app = AppModel::new(core, Mode::Window, Config::default());
+    app.disk_links = plugged_in();
+    let _ = app.open_window();
+    assert!(app.loading && app.helper.is_none());
+    assert_eq!(app.bus_generation, 0);
+    send(&mut app, Message::Refresh);
+    // No helper: nothing to list with, said once, and no reconnect loop.
+    send(&mut app, Message::Connected(None));
+    assert!(!app.loading && app.helper.is_none());
+    assert!(matches!(app.listing, Listing::Failed(CliError::NoHelper)));
+    assert_eq!(app.bus_generation, 1);
+    // The bus dropping asks for a new connection (a new generation for the subscription).
+    send(&mut app, Message::BusLost);
+    assert_eq!(app.bus_generation, 2);
+    assert!(app.helper.is_none());
+
+    // The applet: the same, ending in the reminder's background list.
+    let mut app = model();
+    assert!(!app.helper_found);
+    app.loading = true;
+    send(&mut app, Message::Connected(None));
+    assert!(!app.loading && !app.helper_found);
 }
 
 #[test]

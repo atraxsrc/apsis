@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! The native rsync backend as the helper runs it: the backup device named in Apsis's config,
-//! mounted at [`MOUNT_POINT`] for the length of one call, and the rest of what a snapshot is
-//! taken with (this system's `/` UUID, distribution, `/etc/fstab`, the filters).
+//! mounted at [`MOUNT_POINT`], and the rest of what a snapshot is taken with (this system's
+//! `/` UUID, distribution, `/etc/fstab`, the filters).
 //!
-//! List mounts the device read-only; create and delete read-write.
+//! Lists share one read-only mount ([`SharedMount`]: the first reader mounts, the last one
+//! unmounts); a create, delete or delete-many mounts read-write for itself, once the readers
+//! are gone (`state.rs` sees to the order).
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use apsis_core::config::Config;
 use apsis_core::native::exclude::{self, HomeUser};
@@ -140,19 +143,92 @@ impl<R: Runner> Drop for Mounted<R> {
     }
 }
 
-/// The native backend on the backup device from Apsis's config (or, before it's saved, the
-/// import), mounted for `access`. The device stays mounted while the returned guard lives;
-/// drop the backend first.
-///
-/// # Errors
-///
-/// See [`config`]; also a failed `lsblk`, `findmnt` or `mount`, or a `config.toml` that
-/// can't be read.
-pub fn open<R: Runner + Clone>(
-    runner: &R,
-    access: Access,
-    log: impl Fn(&str) + Send + Sync + 'static,
-) -> Result<(NativeRsync<QuietRunner>, Mounted<R>)> {
+/// The read-only mount the readers share. The first reader mounts the device, the others
+/// find it mounted, the last one out unmounts; a reader is refused if the device named in
+/// the config isn't the one mounted (the config changed under them, which only a hand edit
+/// does: `WriteConfig` is a write and waits for the readers).
+pub struct SharedMount<R: Runner> {
+    held: Mutex<Option<Held<R>>>,
+}
+
+struct Held<R: Runner> {
+    uuid: String,
+    readers: usize,
+    /// Held for its drop: the unmount, when the last reader leaves.
+    _mounted: Mounted<R>,
+}
+
+impl<R: Runner + Clone> Default for SharedMount<R> {
+    fn default() -> Self {
+        Self {
+            held: Mutex::new(None),
+        }
+    }
+}
+
+impl<R: Runner + Clone> SharedMount<R> {
+    fn lock(&self) -> MutexGuard<'_, Option<Held<R>>> {
+        self.held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Readers holding the mount.
+    pub fn readers(&self) -> usize {
+        self.lock().as_ref().map_or(0, |h| h.readers)
+    }
+
+    /// Mounts `device` read-only, or joins the readers that have it mounted, until the guard
+    /// drops.
+    ///
+    /// # Errors
+    ///
+    /// `mount` failed, or another device is mounted for the readers in.
+    pub fn acquire(self: &Arc<Self>, runner: &R, device: &Device) -> Result<Shared<R>> {
+        let mut held = self.lock();
+        match held.as_mut() {
+            Some(held) if held.uuid == device.uuid => held.readers += 1,
+            Some(_) => {
+                return Err(Error::Native(
+                    "the backup device changed while it was being read; try again".to_owned(),
+                ));
+            }
+            None => {
+                let mounted = mount(runner, device, Access::ReadOnly)?;
+                *held = Some(Held {
+                    uuid: device.uuid.clone(),
+                    readers: 1,
+                    _mounted: mounted,
+                });
+            }
+        }
+        Ok(Shared(Arc::clone(self)))
+    }
+}
+
+/// A reader's share of the mount (see [`SharedMount::acquire`]).
+pub struct Shared<R: Runner + Clone>(Arc<SharedMount<R>>);
+
+impl<R: Runner + Clone> Drop for Shared<R> {
+    fn drop(&mut self) {
+        let mut held = self.0.lock();
+        let last = match held.as_mut() {
+            Some(h) => {
+                h.readers = h.readers.saturating_sub(1);
+                h.readers == 0
+            }
+            None => false,
+        };
+        if last {
+            // Drops the `Mounted`: the unmount.
+            *held = None;
+        }
+    }
+}
+
+/// What the native backend needs from this system and Apsis's config (or, before it's saved,
+/// the import).
+fn prepare<R: Runner>(runner: &R) -> Result<(NativeConfig, Device)> {
     let devices = lsblk(runner)?;
     let (apsis, _) = Files::system().effective(&settings::parse_lsblk(&devices)?, &system()?)?;
     let root_uuid = run(runner, &[&FINDMNT_ROOT_UUID[..], &["/"]].concat())?;
@@ -161,11 +237,46 @@ pub fn open<R: Runner + Clone>(
     let fstab = fs::read_to_string("/etc/fstab").unwrap_or_default();
     let passwd = fs::read_to_string("/etc/passwd").unwrap_or_default();
     let users = exclude::home_users(&passwd, Path::new("/"));
-    let (config, device) = config(&apsis, &devices, &root_uuid, distro, &fstab, &users)?;
-    let mounted = mount(runner, &device, access)?;
-    let backend =
-        NativeRsync::new(config, QuietRunner::new(SAFE_PATH).low_priority()).with_log(log);
-    Ok((backend, mounted))
+    config(&apsis, &devices, &root_uuid, distro, &fstab, &users)
+}
+
+fn backend(
+    config: NativeConfig,
+    log: impl Fn(&str) + Send + Sync + 'static,
+) -> NativeRsync<QuietRunner> {
+    NativeRsync::new(config, QuietRunner::new(SAFE_PATH).low_priority()).with_log(log)
+}
+
+/// The native backend on the backup device, mounted read-write for this one write. The device
+/// stays mounted while the returned guard lives; drop the backend first.
+///
+/// # Errors
+///
+/// See [`config`]; also a failed `lsblk`, `findmnt` or `mount`, or a `config.toml` that
+/// can't be read.
+pub fn open<R: Runner + Clone>(
+    runner: &R,
+    log: impl Fn(&str) + Send + Sync + 'static,
+) -> Result<(NativeRsync<QuietRunner>, Mounted<R>)> {
+    let (config, device) = prepare(runner)?;
+    let mounted = mount(runner, &device, Access::ReadWrite)?;
+    Ok((backend(config, log), mounted))
+}
+
+/// The native backend on the backup device, on the read-only mount the readers share (see
+/// [`SharedMount`]). The share lasts while the returned guard lives.
+///
+/// # Errors
+///
+/// As [`open`].
+pub fn open_shared<R: Runner + Clone>(
+    runner: &R,
+    shared: &Arc<SharedMount<R>>,
+    log: impl Fn(&str) + Send + Sync + 'static,
+) -> Result<(NativeRsync<QuietRunner>, Shared<R>)> {
+    let (config, device) = prepare(runner)?;
+    let share = shared.acquire(runner, &device)?;
+    Ok((backend(config, log), share))
 }
 
 /// Mounts `device` at [`MOUNT_POINT`] until the guard drops.
@@ -250,6 +361,91 @@ mod tests {
         assert!(
             matches!(result, Err(Error::Native(ref m)) if m.contains("aren't supported yet")),
             "{result:?}"
+        );
+    }
+
+    /// Records every argv; `mount` and `umount` succeed, nothing else is asked of it.
+    #[derive(Clone, Default)]
+    struct FakeRunner(Arc<Mutex<Vec<String>>>);
+
+    impl FakeRunner {
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl Runner for FakeRunner {
+        fn run(&self, argv: &[std::ffi::OsString]) -> std::io::Result<apsis_core::RunOutput> {
+            let line = argv
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.0.lock().unwrap().push(line);
+            Ok(apsis_core::RunOutput {
+                success: true,
+                code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    fn device(uuid: &str) -> Device {
+        settings::parse_lsblk(LSBLK)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.uuid == uuid)
+            .unwrap()
+    }
+
+    #[test]
+    fn five_overlapping_readers_mount_once_and_the_writer_mounts_after_the_unmount() {
+        let runner = FakeRunner::default();
+        let shared = Arc::new(SharedMount::<FakeRunner>::default());
+        let device = device(BACKUP_UUID);
+        let mut readers: Vec<_> = (0..5)
+            .map(|_| shared.acquire(&runner, &device).unwrap())
+            .collect();
+        assert_eq!(shared.readers(), 5);
+        let ro = format!(
+            "mount -o ro,nosuid,nodev,noexec /dev/disk/by-uuid/{BACKUP_UUID} {MOUNT_POINT}"
+        );
+        let umount = format!("umount {MOUNT_POINT}");
+        // The first reader's: a precautionary umount, then the one read-only mount.
+        assert_eq!(runner.lines(), [umount.clone(), ro.clone()]);
+        // Four leave: still mounted.
+        readers.truncate(1);
+        assert_eq!(shared.readers(), 1);
+        assert_eq!(runner.lines().len(), 2, "no umount while a reader is in");
+        // The last one out unmounts.
+        readers.clear();
+        assert_eq!(shared.readers(), 0);
+        assert_eq!(runner.lines(), [umount.clone(), ro.clone(), umount.clone()]);
+        // The writer's read-write mount comes only after that umount.
+        let _writer = mount(&runner, &device, Access::ReadWrite).unwrap();
+        let rw = format!("mount -o rw,nosuid,nodev /dev/disk/by-uuid/{BACKUP_UUID} {MOUNT_POINT}");
+        assert_eq!(runner.lines()[3..], [umount.clone(), rw]);
+        // After the writer, a reader mounts again.
+        drop(_writer);
+        let _again = shared.acquire(&runner, &device).unwrap();
+        assert_eq!(runner.lines().iter().filter(|l| **l == ro).count(), 2);
+    }
+
+    #[test]
+    fn a_reader_for_another_device_is_refused_while_one_is_mounted() {
+        let runner = FakeRunner::default();
+        let shared = Arc::new(SharedMount::<FakeRunner>::default());
+        let first = shared.acquire(&runner, &device(BACKUP_UUID)).unwrap();
+        let other = device("11111111-1111-1111-1111-111111111111");
+        assert!(matches!(
+            shared.acquire(&runner, &other),
+            Err(Error::Native(ref m)) if m.contains("changed")
+        ));
+        drop(first);
+        assert!(
+            shared.acquire(&runner, &other).is_ok(),
+            "free once they left"
         );
     }
 

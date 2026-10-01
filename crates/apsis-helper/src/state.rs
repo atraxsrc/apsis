@@ -1,7 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! What the helper is doing: at most one operation at a time (the one lock), the job that
-//! holds it (for `Job` and `JobChanged`), and when the helper may exit.
+//! What the helper is doing: the one write lock (a job: create, delete, delete-many,
+//! configure), the readers that share the backup device's read-only mount meanwhile, and when
+//! the helper may exit.
+//!
+//! The rules (0.4.2):
+//! - **Reads share, writes are exclusive.** Any number of readers (`List`) run at once; a
+//!   write waits for them (up to [`WRITE_WAIT`]) instead of being refused.
+//! - **Writer priority.** A reader that arrives while a write runs or waits is refused `Busy`:
+//!   a refresh storm can't starve a write, and the end announcement brings the refresh.
+//! - **Reads aren't jobs.** A [`Reading`] announces nothing and never shows in `Job()`.
+//! - **The lock is released before the end is announced** ([`Running::end`]), so the refresh
+//!   the announcement sets off is never refused by the job it refreshes for.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -16,6 +26,10 @@ use tokio::sync::{Notify, mpsc};
 /// `JobChanged` for progress at most this often (the end always goes out).
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
 
+/// How long a write waits for the readers to finish before it's refused `Busy`. A read is a
+/// second or two (mount, a few `info.json` files, `statvfs`, unmount).
+pub const WRITE_WAIT: Duration = Duration::from_secs(15);
+
 /// The job holding the lock, and what `Stop` needs about it.
 struct Active {
     job: Job,
@@ -27,7 +41,7 @@ struct Active {
 }
 
 pub struct State {
-    /// A [`Running`] exists: an operation holds the single-operation lock.
+    /// A write holds the lock, or waits for the readers to leave so it can.
     running: AtomicBool,
     /// Method calls in progress, including ones waiting for the polkit dialog, and finished
     /// operations still sending their `Finished` signal.
@@ -37,6 +51,10 @@ pub struct State {
     job: Mutex<Option<Active>>,
     /// Each change of the job, for the task that sends `JobChanged`.
     changes: mpsc::UnboundedSender<WireJob>,
+    /// Readers in: [`Reading`] guards alive.
+    readers: Mutex<usize>,
+    /// Wakes the waiting write when the last reader leaves.
+    readers_gone: Notify,
 }
 
 /// Why `Stop` can't go ahead.
@@ -54,12 +72,20 @@ impl State {
             activity: Notify::new(),
             job: Mutex::new(None),
             changes,
+            readers: Mutex::new(0),
+            readers_gone: Notify::new(),
         });
         (state, receiver)
     }
 
     fn lock_job(&self) -> MutexGuard<'_, Option<Active>> {
         self.job
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_readers(&self) -> MutexGuard<'_, usize> {
+        self.readers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -76,20 +102,55 @@ impl State {
         Call(Arc::clone(self))
     }
 
+    /// A write holds the lock or waits for it.
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
     }
 
-    /// Takes the single-operation lock for a `kind` job until the [`Running`] drops, and
-    /// announces it. Every use of the backup device's mount point goes through it.
+    /// Readers in right now.
+    pub fn readers(&self) -> usize {
+        *self.lock_readers()
+    }
+
+    /// Admits a reader until the [`Reading`] drops. Readers share the read-only mount and
+    /// aren't jobs: nothing is announced.
     ///
     /// # Errors
     ///
-    /// [`Error::Busy`] if an operation holds it: a second call is refused, not queued.
-    pub fn begin(self: &Arc<Self>, kind: JobKind) -> Result<Running> {
+    /// [`Error::Busy`] while a write runs or waits (writer priority).
+    pub fn read(self: &Arc<Self>) -> Result<Reading> {
+        let mut readers = self.lock_readers();
+        // Under the readers lock, so a write that takes `running` sees this reader or refuses
+        // it, never neither.
+        if self.is_running() {
+            return Err(Error::Busy);
+        }
+        *readers += 1;
+        self.activity.notify_waiters();
+        Ok(Reading(Arc::clone(self)))
+    }
+
+    /// Takes the write lock for a `kind` job until the [`Running`] drops or ends, and
+    /// announces it. Every write to the backup device's mount point goes through it. Readers
+    /// already in are waited for (new ones are refused meanwhile), up to [`WRITE_WAIT`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Busy`] if a write holds the lock (a second write is refused, not queued), or
+    /// the readers didn't leave in time.
+    pub async fn begin(self: &Arc<Self>, kind: JobKind) -> Result<Running> {
         self.running
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .map_err(|_| Error::Busy)?;
+        self.activity.notify_waiters();
+        if tokio::time::timeout(WRITE_WAIT, self.no_readers())
+            .await
+            .is_err()
+        {
+            self.running.store(false, Ordering::SeqCst);
+            self.activity.notify_waiters();
+            return Err(Error::Busy);
+        }
         let started = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
@@ -102,7 +163,24 @@ impl State {
         self.announce(&active);
         *self.lock_job() = Some(active);
         self.activity.notify_waiters();
-        Ok(Running(Arc::clone(self)))
+        Ok(Running {
+            state: Arc::clone(self),
+            ended: false,
+        })
+    }
+
+    /// Returns once no reader is in.
+    async fn no_readers(&self) {
+        loop {
+            let gone = self.readers_gone.notified();
+            let mut gone = std::pin::pin!(gone);
+            // Registered before the check, so a reader leaving right after it still wakes us.
+            gone.as_mut().enable();
+            if *self.lock_readers() == 0 {
+                return;
+            }
+            gone.await;
+        }
     }
 
     /// The job holding the lock; `None` when idle.
@@ -138,6 +216,16 @@ impl State {
         }
     }
 
+    /// A delete-many's next step: `snapshot` is being deleted and `done` of `total` are gone.
+    /// Always announced (each step is a snapshot, seconds apart).
+    pub fn step(&self, snapshot: &str, done: usize, total: usize) {
+        if let Some(active) = self.lock_job().as_mut() {
+            active.job.snapshot = snapshot.to_owned();
+            active.job.percent = Some(percent(done, total));
+            self.announce(active);
+        }
+    }
+
     /// What `Stop(snapshot)` would stop: the running create's cancel and who started it.
     ///
     /// # Errors
@@ -170,17 +258,15 @@ impl State {
         }
     }
 
-    /// The job ended: announced once with `state` (done, failed or stopped). The lock is
-    /// released when its [`Running`] drops.
-    pub fn end(&self, state: JobState) {
-        if let Some(active) = self.lock_job().as_mut() {
-            active.job.state = state;
-            self.announce(active);
-        }
+    /// Frees the write lock: the job is taken out and the next write may begin.
+    fn release(&self) {
+        *self.lock_job() = None;
+        self.running.store(false, Ordering::SeqCst);
+        self.activity.notify_waiters();
     }
 
     fn is_idle(&self) -> bool {
-        !self.is_running() && self.calls.load(Ordering::SeqCst) == 0
+        !self.is_running() && self.readers() == 0 && self.calls.load(Ordering::SeqCst) == 0
     }
 
     /// Returns once nothing has happened for `idle` and nothing is in progress. Never while an
@@ -198,6 +284,16 @@ impl State {
     }
 }
 
+/// `done` of `total` as a percentage; `total` of 0 is 100.
+fn percent(done: usize, total: usize) -> f64 {
+    if total == 0 {
+        return 100.0;
+    }
+    #[allow(clippy::cast_precision_loss, reason = "a handful of snapshots")]
+    let fraction = done.min(total) as f64 / total as f64;
+    fraction * 100.0
+}
+
 /// A call in progress (see [`State::call`]).
 pub struct Call(Arc<State>);
 
@@ -208,14 +304,49 @@ impl Drop for Call {
     }
 }
 
-/// The single-operation lock (see [`State::begin`]).
-pub struct Running(Arc<State>);
+/// A reader in (see [`State::read`]): the read-only mount is shared until this drops.
+pub struct Reading(Arc<State>);
+
+impl Drop for Reading {
+    fn drop(&mut self) {
+        let mut readers = self.0.lock_readers();
+        *readers = readers.saturating_sub(1);
+        if *readers == 0 {
+            self.0.readers_gone.notify_waiters();
+        }
+        self.0.activity.notify_waiters();
+    }
+}
+
+/// The write lock (see [`State::begin`]). Ends with [`Running::end`]; dropping it unended
+/// (a panic) frees the lock without an announcement.
+pub struct Running {
+    state: Arc<State>,
+    ended: bool,
+}
+
+impl Running {
+    /// The job ended: the lock is released **first**, then the end is announced once with
+    /// `state` (done, failed or stopped). So the refresh the announcement sets off is never
+    /// refused by this job.
+    pub fn end(mut self, state: JobState) {
+        let ended = self.state.lock_job().take().map(|mut active| {
+            active.job.state = state;
+            active
+        });
+        self.ended = true;
+        self.state.release();
+        if let Some(active) = ended {
+            self.state.announce(&active);
+        }
+    }
+}
 
 impl Drop for Running {
     fn drop(&mut self) {
-        *self.0.lock_job() = None;
-        self.0.running.store(false, Ordering::SeqCst);
-        self.0.activity.notify_waiters();
+        if !self.ended {
+            self.state.release();
+        }
     }
 }
 
@@ -235,20 +366,128 @@ mod tests {
         seen
     }
 
-    #[test]
-    fn a_second_operation_is_refused_not_queued() {
+    #[tokio::test]
+    async fn a_second_write_is_refused_not_queued() {
         let (state, _changes) = state();
-        let running = state.begin(JobKind::List).unwrap();
-        assert!(matches!(state.begin(JobKind::Create), Err(Error::Busy)));
-        drop(running);
-        assert!(state.begin(JobKind::Delete).is_ok());
+        let running = state.begin(JobKind::Delete).await.unwrap();
+        assert!(matches!(
+            state.begin(JobKind::Create).await,
+            Err(Error::Busy)
+        ));
+        running.end(JobState::Done);
+        assert!(state.begin(JobKind::Delete).await.is_ok());
     }
 
-    #[test]
-    fn a_create_is_announced_from_start_to_end() {
+    #[tokio::test]
+    async fn readers_share_and_are_not_jobs() {
+        let (state, mut changes) = state();
+        // As many as displays plus a window, say five: all admitted, none refused.
+        let readers: Vec<Reading> = (0..5).map(|_| state.read().unwrap()).collect();
+        assert_eq!(state.readers(), 5);
+        assert_eq!(state.job(), None, "a read never shows in Job()");
+        assert!(drain(&mut changes).is_empty(), "no JobChanged for a read");
+        drop(readers);
+        assert_eq!(state.readers(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_write_waits_for_the_readers_in_and_refuses_new_ones() {
+        let (state, mut changes) = state();
+        // A job just ended and every process lists at once.
+        let readers: Vec<Reading> = (0..5).map(|_| state.read().unwrap()).collect();
+        // The next delete of a bulk delete arrives while they hold the mount.
+        let write = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move { state.begin(JobKind::Delete).await }
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(!write.is_finished(), "waits for the readers");
+        assert!(state.is_running(), "and holds the lock meanwhile");
+        // A sixth reader arriving while it waits is refused: writer priority.
+        assert!(matches!(state.read(), Err(Error::Busy)));
+        assert!(drain(&mut changes).is_empty(), "nothing announced yet");
+        // The readers finish.
+        drop(readers);
+        let running = write.await.unwrap().unwrap();
+        assert_eq!(state.job().unwrap().kind, JobKind::Delete);
+        // A reader during a write is refused.
+        assert!(matches!(state.read(), Err(Error::Busy)));
+        running.end(JobState::Done);
+        assert!(state.read().is_ok(), "free again once it ended");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_write_gives_up_on_readers_that_never_leave() {
+        let (state, _changes) = state();
+        let _stuck = state.read().unwrap();
+        let write = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move { state.begin(JobKind::Create).await }
+        });
+        tokio::time::sleep(WRITE_WAIT / 2).await;
+        assert!(!write.is_finished());
+        tokio::time::sleep(WRITE_WAIT).await;
+        assert!(matches!(write.await.unwrap(), Err(Error::Busy)));
+        assert!(!state.is_running(), "the lock is free again");
+        assert_eq!(state.readers(), 1, "the reader is untouched");
+    }
+
+    #[tokio::test]
+    async fn the_lock_is_free_before_the_end_is_announced() {
+        let (state, mut changes) = state();
+        let running = state.begin(JobKind::Delete).await.unwrap();
+        state.named("2026-09-30_14-02-11");
+        drain(&mut changes);
+        running.end(JobState::Done);
+        // The announcement is the last thing: by the time anyone hears it, a read goes
+        // through and a write takes the lock.
+        let seen = drain(&mut changes);
+        assert_eq!(
+            seen,
+            [(
+                "delete".to_owned(),
+                "done".to_owned(),
+                "2026-09-30_14-02-11".to_owned()
+            )]
+        );
+        assert_eq!(state.job(), None);
+        assert!(!state.is_running());
+        let _reader = state.read().unwrap();
+    }
+
+    /// The bulk delete's shape: a job end, then every process lists at once and the window
+    /// sends the next delete. Every read is answered and the write goes through.
+    #[tokio::test(start_paused = true)]
+    async fn a_job_end_then_reads_and_a_write_all_go_through() {
+        let (state, _changes) = state();
+        let first = state.begin(JobKind::Delete).await.unwrap();
+        first.end(JobState::Done);
+        let reads: Vec<_> = (0..3)
+            .map(|_| {
+                let reading = state.read().expect("a read right after the end");
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    drop(reading);
+                })
+            })
+            .collect();
+        let write = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move { state.begin(JobKind::Delete).await }
+        });
+        for read in reads {
+            read.await.unwrap();
+        }
+        let running = write.await.unwrap().expect("the write after the reads");
+        running.end(JobState::Done);
+        assert!(!state.is_running() && state.readers() == 0);
+    }
+
+    #[tokio::test]
+    async fn a_create_is_announced_from_start_to_end() {
         let (state, mut changes) = state();
         assert_eq!(state.job(), None);
-        let running = state.begin(JobKind::Create).unwrap();
+        let running = state.begin(JobKind::Create).await.unwrap();
         state.named("2026-09-30_14-02-11");
         state.progress(&Progress {
             percent: Some(10.0),
@@ -262,8 +501,7 @@ mod tests {
             text: String::new(),
         });
         assert_eq!(state.job().unwrap().percent, Some(11.0));
-        state.end(JobState::Done);
-        drop(running);
+        running.end(JobState::Done);
         assert_eq!(state.job(), None);
         let running = |s: &str| ("create".to_owned(), s.to_owned());
         let seen: Vec<(String, String)> = drain(&mut changes)
@@ -281,14 +519,39 @@ mod tests {
         );
     }
 
-    #[test]
-    fn only_the_named_running_create_can_be_stopped() {
+    #[tokio::test]
+    async fn a_delete_of_several_announces_each_step() {
+        let (state, mut changes) = state();
+        let running = state.begin(JobKind::DeleteMany).await.unwrap();
+        drain(&mut changes);
+        state.step("2026-09-30_14-02-11", 0, 4);
+        state.step("2026-09-30_14-02-12", 1, 4);
+        let job = state.job().unwrap();
+        assert_eq!(job.snapshot, "2026-09-30_14-02-12");
+        assert_eq!(job.percent, Some(25.0));
+        // Each step goes out, throttle or not.
+        assert_eq!(drain(&mut changes).len(), 2);
+        running.end(JobState::Failed);
+        assert_eq!(
+            drain(&mut changes),
+            [(
+                "delete-many".to_owned(),
+                "failed".to_owned(),
+                "2026-09-30_14-02-12".to_owned()
+            )]
+        );
+        assert_eq!(percent(4, 4), 100.0);
+        assert_eq!(percent(0, 0), 100.0);
+    }
+
+    #[tokio::test]
+    async fn only_the_named_running_create_can_be_stopped() {
         let (state, mut changes) = state();
         assert!(state.stop_target("x").is_err(), "nothing runs");
-        let list = state.begin(JobKind::List).unwrap();
+        let delete = state.begin(JobKind::Delete).await.unwrap();
         assert!(state.stop_target("x").is_err(), "not a create");
-        drop(list);
-        let _create = state.begin(JobKind::Create).unwrap();
+        delete.end(JobState::Done);
+        let _create = state.begin(JobKind::Create).await.unwrap();
         state.stoppable(Cancel::new(), 1000);
         let name = "2026-09-30_14-02-11";
         assert!(state.stop_target(name).is_err(), "name not known yet");
@@ -309,10 +572,10 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn idle_exit_waits_for_a_running_operation() {
+    async fn idle_exit_waits_for_a_running_operation_and_for_readers() {
         let idle = Duration::from_secs(60);
         let (state, _changes) = state();
-        let running = state.begin(JobKind::Create).unwrap();
+        let running = state.begin(JobKind::Create).await.unwrap();
         let waiter = tokio::spawn({
             let state = Arc::clone(&state);
             async move { state.idle_for(idle).await }
@@ -320,7 +583,11 @@ mod tests {
         tokio::time::sleep(idle * 10).await;
         assert!(!waiter.is_finished(), "exited while a create was running");
 
-        drop(running);
+        running.end(JobState::Done);
+        let reader = state.read().unwrap();
+        tokio::time::sleep(idle * 3).await;
+        assert!(!waiter.is_finished(), "exited while a reader was in");
+        drop(reader);
         tokio::time::sleep(idle / 2).await;
         assert!(!waiter.is_finished(), "exited before a full idle period");
         tokio::time::sleep(idle).await;

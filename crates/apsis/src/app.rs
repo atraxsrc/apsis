@@ -232,6 +232,28 @@ pub struct AppModel {
     /// the window (or the one already open) may take focus. `None` until it's ready, or if the
     /// compositor has none to give; the window then starts without one.
     token_requests: Option<TokenSender>,
+    /// The helper, on this process's one system-bus connection (made at start, re-made when
+    /// the bus drops). `None` until it's made, or when there's no helper.
+    helper: Option<HelperClient>,
+    /// Counts the connections made, so the job subscription follows the current one.
+    bus_generation: u32,
+}
+
+/// What a task reaches the helper through: the process's connection, or `None` before it's
+/// made (the task then connects for itself, once).
+type Link = Option<HelperClient>;
+
+/// What the job subscription runs on: the connection, told apart by its generation (the
+/// client itself isn't hashable, and a new connection is a new generation anyway).
+struct JobSource {
+    generation: u32,
+    client: HelperClient,
+}
+
+impl std::hash::Hash for JobSource {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.generation.hash(state);
+    }
 }
 
 /// Where the applet sends its activation token requests.
@@ -278,6 +300,14 @@ pub enum CliError {
     },
     /// A create was stopped; what it had copied is gone.
     Stopped,
+    /// A delete of several stopped at `failed` (`reason` says why): `deleted` are gone,
+    /// `left` weren't touched. From the helper's own account, not from counting.
+    DeleteManyStopped {
+        deleted: Vec<String>,
+        failed: String,
+        left: Vec<String>,
+        reason: Box<CliError>,
+    },
     Other(String),
 }
 
@@ -289,6 +319,17 @@ impl From<apsis_core::Error> for CliError {
             apsis_core::Error::Busy => Self::Busy,
             apsis_core::Error::DeviceRemoved { reason, .. } => Self::DiskRemoved { reason },
             apsis_core::Error::Stopped => Self::Stopped,
+            apsis_core::Error::DeleteManyStopped {
+                deleted,
+                failed,
+                left,
+                reason,
+            } => Self::DeleteManyStopped {
+                deleted,
+                failed,
+                left,
+                reason: Box::new(Self::from(*reason)),
+            },
             other => Self::Other(other.to_string()),
         }
     }
@@ -299,9 +340,11 @@ impl From<apsis_core::Error> for CliError {
 pub enum Operation {
     /// With the comment as typed; the helper trims it.
     Create(String),
-    /// Snapshots (or leftovers) deleted one at a time; the first `done` are gone. Stops at the
-    /// first failure.
-    Delete { names: Vec<String>, done: usize },
+    /// One snapshot (or leftover).
+    Delete(String),
+    /// Several, as one job in the helper (`DeleteMany`), in list order; it stops at the first
+    /// failure and says what was deleted.
+    DeleteMany(Vec<String>),
 }
 
 /// The status area's result line.
@@ -440,6 +483,10 @@ pub enum Message {
     DiskCheck,
     /// Every [`BUSY_RETRY_EVERY`] while the helper is busy with a job this window can't see.
     BusyRetry,
+    /// The process's connection to the helper is made (`None`: no helper, or no system bus).
+    Connected(Link),
+    /// The connection to the system bus ended: the job subscription's stream closed.
+    BusLost,
 }
 
 impl cosmic::Application for AppModel {
@@ -466,11 +513,12 @@ impl cosmic::Application for AppModel {
             .unwrap_or_default();
         let mut app = AppModel::new(core, flags.mode, config);
         let task = match flags.mode {
-            // Lists at once for the reminder, but only through the helper (no password).
-            // `loading` keeps the popup from starting a second list meanwhile.
+            // The connection first; [`Message::Connected`] then lists for the reminder, but
+            // only through the helper (no password). `loading` keeps the popup from starting
+            // a second list meanwhile.
             Mode::Applet => {
                 app.loading = true;
-                background_list()
+                connect()
             }
             Mode::Window => {
                 let open = app.open_window();
@@ -548,9 +596,17 @@ impl cosmic::Application for AppModel {
             self.core()
                 .watch_config::<Config>(Self::APP_ID)
                 .map(|update| Message::UpdateConfig(update.config)),
-            // Jobs from any window, and the helper leaving the bus.
-            Subscription::run(job_events).map(Message::Job),
         ];
+        // Jobs from any window, and the helper leaving the bus, on the process's connection.
+        if let Some(client) = &self.helper {
+            subscriptions.push(Subscription::run_with(
+                JobSource {
+                    generation: self.bus_generation,
+                    client: client.clone(),
+                },
+                job_events,
+            ));
+        }
         if self.mode == Mode::Window {
             subscriptions.push(event::listen_with(shortcut));
         } else if self.popup.is_some() || self.menu.is_some() {
@@ -661,6 +717,8 @@ impl AppModel {
             helper_found: false,
             helper_busy: false,
             token_requests: None,
+            helper: None,
+            bus_generation: 0,
         }
     }
 
@@ -702,10 +760,16 @@ impl AppModel {
                     self.menu = None;
                 }
             }
+            Message::Connected(client) => return self.on_connected(client),
+            Message::BusLost => {
+                self.helper = None;
+                self.bus_generation += 1;
+                return connect();
+            }
             Message::BackgroundRefresh => {
                 if self.popup.is_none() && !self.loading && self.running.is_none() {
                     self.loading = true;
-                    return background_list();
+                    return background_list(self.helper.clone());
                 }
             }
             Message::BackgroundListed(result) => {
@@ -847,7 +911,42 @@ impl AppModel {
         self.core.window.show_minimize = false;
         self.core.set_header_title(fl!("app-title"));
         self.popup = self.core.main_window_id();
-        Task::batch([self.start_list(), self.check_disk(), poll_job()])
+        // The connection first; the list and the job poll follow once it's made
+        // ([`AppModel::on_connected`]). `loading` holds other lists off meanwhile.
+        self.loading = true;
+        Task::batch([connect(), self.check_disk()])
+    }
+
+    /// The process's connection is made (or there's no helper): what was waiting for it
+    /// runs. The window lists and asks what the helper is doing; the applet lists for the
+    /// reminder.
+    fn on_connected(&mut self, client: Link) -> Task<cosmic::Action<Message>> {
+        self.bus_generation += 1;
+        self.loading = false;
+        let Some(client) = client else {
+            self.helper = None;
+            return match self.mode {
+                Mode::Window => {
+                    self.on_listed(Err(CliError::NoHelper));
+                    Task::none()
+                }
+                Mode::Applet => self.handle(Message::BackgroundListed(None)),
+            };
+        };
+        self.helper = Some(client.clone());
+        match self.mode {
+            Mode::Window => Task::batch([self.start_list(), poll_job(Some(client))]),
+            Mode::Applet if self.popup.is_some() => {
+                Task::batch([self.start_list(), poll_job(Some(client))])
+            }
+            Mode::Applet => {
+                if self.loading || self.running.is_some() {
+                    return Task::none();
+                }
+                self.loading = true;
+                background_list(Some(client))
+            }
+        }
     }
 
     /// Window mode, once the window is on screen: drops the maximum size and lowers the minimum,
@@ -994,7 +1093,7 @@ impl AppModel {
             .min_height(1.0)
             .max_height(1080.0);
         let open = close.chain(get_popup(settings));
-        let open = Task::batch([open, self.check_disk(), poll_job()]);
+        let open = Task::batch([open, self.check_disk(), poll_job(self.helper.clone())]);
         if matches!(self.listing, Listing::NotLoaded) {
             Task::batch([open, self.start_list()])
         } else {
@@ -1009,7 +1108,8 @@ impl AppModel {
             return Task::none();
         }
         self.loading = true;
-        cosmic::task::future(async move { Message::Listed(list_snapshots().await) })
+        let link = self.helper.clone();
+        cosmic::task::future(async move { Message::Listed(list_snapshots(link).await) })
     }
 
     fn on_listed(&mut self, result: Result<SnapshotList, CliError>) {
@@ -1097,7 +1197,7 @@ impl AppModel {
             // The panel's own list, through the helper only (no password), as the reminder's.
             Mode::Applet if !self.loading && self.running.is_none() => {
                 self.loading = true;
-                background_list()
+                background_list(self.helper.clone())
             }
             Mode::Applet => Task::none(),
         }
@@ -1248,7 +1348,7 @@ impl AppModel {
     fn active_job(&self) -> Option<&Job> {
         self.job
             .as_ref()
-            .filter(|j| matches!(j.kind, JobKind::Create | JobKind::Delete) && !j.state.is_end())
+            .filter(|j| j.kind.changes_the_list() && !j.state.is_end())
     }
 
     /// OK in the dialog.
@@ -1265,11 +1365,16 @@ impl AppModel {
                 }
                 self.run(Operation::Create(comment))
             }
-            Some(Dialog::Delete { names }) => self.run(Operation::Delete { names, done: 0 }),
+            Some(Dialog::Delete { mut names }) => match names.len() {
+                0 => Task::none(),
+                1 => self.run(Operation::Delete(names.remove(0))),
+                _ => self.run(Operation::DeleteMany(names)),
+            },
             Some(Dialog::Stop { snapshot }) => {
                 self.status = Some(Status::Info(fl!("stopping")));
+                let link = self.helper.clone();
                 cosmic::task::future(async move {
-                    Message::StopAnswered(stop(&snapshot).await.err().map(|e| e.to_string()))
+                    Message::StopAnswered(stop(link, &snapshot).await.err().map(|e| e.to_string()))
                 })
             }
             Some(Dialog::AddPattern { text, .. }) => {
@@ -1305,8 +1410,9 @@ impl AppModel {
         self.status = None;
         self.progress = None;
         self.run_started = Some(Instant::now());
+        let link = self.helper.clone();
         with_progress(move |mut progress| async move {
-            let result = operate(operation.clone(), &mut progress).await;
+            let result = operate(link, operation.clone(), &mut progress).await;
             Message::Finished(operation, result)
         })
     }
@@ -1321,16 +1427,6 @@ impl AppModel {
         self.running = None;
         self.progress = None;
         self.run_started = None;
-        if let Operation::Delete { names, done } = operation
-            && result.is_ok()
-            && done + 1 < names.len()
-        {
-            // The next one; the password is cached (`auth_admin_keep`) through the helper.
-            return self.run(Operation::Delete {
-                names: names.clone(),
-                done: done + 1,
-            });
-        }
         if matches!(result, Err(CliError::Busy)) {
             self.helper_busy = true;
             self.status = Some(Status::Info(fl!("busy-background")));
@@ -1340,6 +1436,10 @@ impl AppModel {
             // A failed create or delete may have left something (a staging folder, a partly
             // deleted snapshot); a stopped one leaves nothing, but the disk has changed.
             Ok(()) | Err(CliError::Other(_) | CliError::Stopped) => true,
+            // Whatever was deleted before it stopped changed the list.
+            Err(CliError::DeleteManyStopped {
+                deleted, reason, ..
+            }) => !deleted.is_empty() || matches!(**reason, CliError::Other(_)),
             // Nothing ran, or (disk missing) a list would only fail again.
             Err(
                 CliError::NoHelper
@@ -1349,18 +1449,17 @@ impl AppModel {
                 | CliError::Busy,
             ) => false,
         };
-        // A bulk delete that got past its first snapshot changed the list either way.
-        let ran = ran || matches!(operation, Operation::Delete { done, .. } if *done > 0);
         self.status = Some(match (operation, result) {
             (Operation::Create(_), Ok(())) => Status::Info(fl!("created")),
-            (Operation::Delete { names, .. }, Ok(())) => {
+            (Operation::Delete(name), Ok(())) => {
+                self.selection.remove(name);
+                Status::Info(fl!("deleted", name = self.snapshot_label(name)))
+            }
+            (Operation::DeleteMany(names), Ok(())) => {
                 for name in names {
                     self.selection.remove(name);
                 }
-                Status::Info(match names.as_slice() {
-                    [name] => fl!("deleted", name = self.snapshot_label(name)),
-                    _ => fl!("deleted-many", count = names.len().to_string()),
-                })
+                Status::Info(fl!("deleted-many", count = names.len().to_string()))
             }
             (Operation::Create(_), Err(CliError::Stopped)) => Status::Info(fl!("create-stopped")),
             (op, Err(CliError::DiskRemoved { reason })) => {
@@ -1368,34 +1467,51 @@ impl AppModel {
                 self.disk_seen = Some(false);
                 let line = match op {
                     Operation::Create(_) => fl!("create-failed-disk-removed"),
-                    Operation::Delete { .. } => fl!("delete-failed-disk-removed"),
+                    Operation::Delete(_) | Operation::DeleteMany(_) => {
+                        fl!("delete-failed-disk-removed")
+                    }
                 };
                 Status::Error(line, Some(reason))
             }
             (Operation::Create(_), Err(error)) => {
                 Status::Error(fl!("create-failed", reason = self.error_text(&error)), None)
             }
-            (Operation::Delete { names, done }, Err(error)) => {
-                let (deleted, left) = names.split_at((*done).min(names.len()));
-                for name in deleted {
+            (
+                Operation::DeleteMany(_),
+                Err(CliError::DeleteManyStopped {
+                    deleted,
+                    failed,
+                    left,
+                    reason,
+                }),
+            ) => {
+                // The helper's account of what went: those leave the selection, the rest stay.
+                for name in &deleted {
                     self.selection.remove(name);
                 }
-                let reason = self.error_text(&error);
-                if names.len() == 1 {
-                    Status::Error(fl!("delete-failed", reason = reason), None)
-                } else {
-                    let labels = |names: &[String]| -> Vec<String> {
-                        names.iter().map(|n| self.snapshot_label(n)).collect()
-                    };
-                    Status::Error(
-                        fl!(
-                            "delete-many-stopped",
-                            name = labels(left).first().cloned().unwrap_or_default(),
-                            reason = reason
-                        ),
-                        Some(bulk_delete_details(&labels(deleted), &labels(left))),
-                    )
+                if matches!(*reason, CliError::DiskRemoved { .. }) {
+                    self.disk_seen = Some(false);
                 }
+                let labels = |names: &[String]| -> Vec<String> {
+                    names.iter().map(|n| self.snapshot_label(n)).collect()
+                };
+                let mut not_deleted = vec![failed.clone()];
+                not_deleted.extend(left);
+                Status::Error(
+                    fl!(
+                        "delete-many-stopped",
+                        name = self.snapshot_label(&failed),
+                        reason = self.error_text(&reason)
+                    ),
+                    Some(bulk_delete_details(
+                        &labels(&deleted),
+                        &labels(&not_deleted),
+                    )),
+                )
+            }
+            // A delete refused before anything ran, or one that failed.
+            (Operation::Delete(_) | Operation::DeleteMany(_), Err(error)) => {
+                Status::Error(fl!("delete-failed", reason = self.error_text(&error)), None)
             }
         });
         if ran {
@@ -1411,9 +1527,7 @@ impl AppModel {
             JobEvent::HelperGone => {
                 let had = self.job.take();
                 // This window's own job ends with its `Finished` (or the helper-gone error).
-                if self.running.is_none()
-                    && had.is_some_and(|j| matches!(j.kind, JobKind::Create | JobKind::Delete))
-                {
+                if self.running.is_none() && had.is_some_and(|j| j.kind.changes_the_list()) {
                     return self.start_list();
                 }
                 return Task::none();
@@ -1435,7 +1549,7 @@ impl AppModel {
             return Task::none();
         }
         // It ended.
-        let changed = matches!(job.kind, JobKind::Create | JobKind::Delete);
+        let changed = job.kind.changes_the_list();
         self.job = None;
         if self.running.is_some() {
             // This window's own: its `Finished` says how it went and lists.
@@ -1451,9 +1565,10 @@ impl AppModel {
                 _ => Status::Error(fl!("delete-failed-elsewhere"), None),
             });
         }
-        // Only a create or delete changes the list; a list or config write ending matters only
-        // to a window that was told busy (otherwise two windows would list each other forever).
-        if changed || self.helper_busy {
+        // One list per process per job end, and only for a create or delete: a config write
+        // doesn't change the list, and a list is never a job. A Busy from a write that was
+        // running or waiting is retried by the [`BUSY_RETRY_EVERY`] timer.
+        if changed {
             return self.start_list();
         }
         Task::none()
@@ -1487,7 +1602,8 @@ impl AppModel {
             return Task::none();
         }
         self.settings = SettingsLoad::Loading;
-        cosmic::task::future(async { Message::SettingsRead(read_config().await) })
+        let link = self.helper.clone();
+        cosmic::task::future(async move { Message::SettingsRead(read_config(link).await) })
     }
 
     fn on_settings_read(&mut self, result: Result<ConfigInfo, CliError>) {
@@ -1538,8 +1654,9 @@ impl AppModel {
         let (expected, config) = (view.info.text.clone(), view.edited.clone());
         self.saving_settings = true;
         self.status = Some(Status::Info(fl!("settings-saving")));
+        let link = self.helper.clone();
         cosmic::task::future(async move {
-            Message::SettingsWritten(write_config(expected, config).await)
+            Message::SettingsWritten(write_config(link, expected, config).await)
         })
     }
 
@@ -1653,20 +1770,30 @@ impl RowItem<'_> {
     }
 }
 
-/// `apsis-helper`, which does everything that needs root. Apsis can't work without it.
-async fn helper() -> Result<HelperClient, CliError> {
-    HelperClient::connect().await.ok_or(CliError::NoHelper)
+/// Makes the process's connection to `apsis-helper`, which does everything that needs root.
+/// Apsis can't work without it.
+fn connect() -> Task<cosmic::Action<Message>> {
+    cosmic::task::future(async { Message::Connected(HelperClient::connect().await) })
+}
+
+/// The helper for a task: the process's connection, or (none yet, between a bus drop and the
+/// reconnect) one of its own for this call.
+async fn helper(link: Link) -> Result<HelperClient, CliError> {
+    match link {
+        Some(client) => Ok(client),
+        None => HelperClient::connect().await.ok_or(CliError::NoHelper),
+    }
 }
 
 /// Lists through `apsis-helper` (no password for the active session).
-async fn list_snapshots() -> Result<SnapshotList, CliError> {
-    helper().await?.list().await.map_err(CliError::from)
+async fn list_snapshots(link: Link) -> Result<SnapshotList, CliError> {
+    helper(link).await?.list().await.map_err(CliError::from)
 }
 
 /// Lists through `apsis-helper` for the reminder; `None` without a helper.
-fn background_list() -> Task<cosmic::Action<Message>> {
+fn background_list(link: Link) -> Task<cosmic::Action<Message>> {
     cosmic::task::future(async move {
-        let Some(helper) = HelperClient::connect().await else {
+        let Ok(helper) = helper(link).await else {
             return Message::BackgroundListed(None);
         };
         Message::BackgroundListed(Some(helper.list().await.map_err(CliError::from)))
@@ -1674,53 +1801,50 @@ fn background_list() -> Task<cosmic::Action<Message>> {
 }
 
 /// What the helper is doing, without starting it just to ask.
-fn poll_job() -> Task<cosmic::Action<Message>> {
+fn poll_job(link: Link) -> Task<cosmic::Action<Message>> {
     cosmic::task::future(async move {
-        let job = match HelperClient::connect().await {
-            Some(helper) => helper.job().await.ok().flatten(),
-            None => None,
+        let job = match helper(link).await {
+            Ok(helper) => helper.job().await.ok().flatten(),
+            Err(_) => None,
         };
         Message::JobPolled(job)
     })
 }
 
-/// Every `JobChanged`, and the helper leaving the bus, for as long as the connection lasts.
-/// Nothing without the helper installed.
-fn job_events() -> impl Stream<Item = JobEvent> {
-    stream::once(async {
-        match HelperClient::connect().await {
-            Some(helper) => helper.job_changes().await.ok(),
-            None => None,
-        }
-    })
-    .filter_map(|changes| async move { changes })
-    .flatten()
+/// Every `JobChanged`, and the helper leaving the bus, on the process's connection, for as
+/// long as it lasts; then [`Message::BusLost`], so a new one is made.
+fn job_events(source: &JobSource) -> impl Stream<Item = Message> + Send + use<> {
+    let client = source.client.clone();
+    stream::once(async move { client.job_changes().await.ok() })
+        .filter_map(|changes| async move { changes })
+        .flat_map(|changes| {
+            changes
+                .map(Message::Job)
+                .chain(stream::once(async { Message::BusLost }))
+        })
 }
 
 /// Asks the helper to stop the create making `snapshot`.
-async fn stop(snapshot: &str) -> apsis_core::Result<()> {
-    match HelperClient::connect().await {
-        Some(helper) => helper.stop(snapshot).await,
-        None => Err(apsis_core::Error::Helper(fl!("need-helper"))),
+async fn stop(link: Link, snapshot: &str) -> apsis_core::Result<()> {
+    match helper(link).await {
+        Ok(helper) => helper.stop(snapshot).await,
+        Err(_) => Err(apsis_core::Error::Helper(fl!("need-helper"))),
     }
 }
 
 /// Creates or deletes through `apsis-helper`; returns when its `Finished` signal arrives,
-/// however long rsync takes.
-///
-/// A delete of several runs one step per call: the name at `done`. The password is asked once
-/// (`auth_admin_keep`).
+/// however long rsync takes. A delete of several is one call and one job; the password is
+/// asked once.
 async fn operate(
+    link: Link,
     operation: Operation,
     progress: &mut (dyn FnMut(Progress) + Send),
 ) -> Result<(), CliError> {
-    let helper = helper().await?;
+    let helper = helper(link).await?;
     let done = match &operation {
         Operation::Create(comment) => helper.create_with_progress(comment, progress).await,
-        Operation::Delete { names, done } => match names.get(*done) {
-            Some(name) => helper.delete(name).await,
-            None => Ok(()),
-        },
+        Operation::Delete(name) => helper.delete(name).await,
+        Operation::DeleteMany(names) => helper.delete_many(names, progress).await,
     };
     done.map_err(CliError::from)
 }
@@ -1743,13 +1867,21 @@ where
 
 /// Apsis's config (converted or imported until it's saved) and the devices, through
 /// `apsis-helper`.
-async fn read_config() -> Result<ConfigInfo, CliError> {
-    helper().await?.read_config().await.map_err(CliError::from)
+async fn read_config(link: Link) -> Result<ConfigInfo, CliError> {
+    helper(link)
+        .await?
+        .read_config()
+        .await
+        .map_err(CliError::from)
 }
 
 /// Writes `config` through `apsis-helper` if `config.toml` still reads `expected`.
-async fn write_config(expected: String, config: ApsisConfig) -> Result<String, CliError> {
-    helper()
+async fn write_config(
+    link: Link,
+    expected: String,
+    config: ApsisConfig,
+) -> Result<String, CliError> {
+    helper(link)
         .await?
         .write_config(&expected, &config)
         .await
@@ -1787,6 +1919,11 @@ fn error_summary(error: &CliError, known_uuid: Option<&str>) -> String {
         CliError::Busy => fl!("busy-background"),
         CliError::DiskRemoved { reason } => format!("{}: {reason}", fl!("disk-removed")),
         CliError::Stopped => fl!("create-stopped"),
+        CliError::DeleteManyStopped { failed, reason, .. } => fl!(
+            "delete-many-stopped",
+            name = failed.clone(),
+            reason = error_summary(reason, known_uuid)
+        ),
         CliError::Other(message) => message.clone(),
     }
 }
