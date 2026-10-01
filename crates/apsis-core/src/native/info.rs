@@ -14,6 +14,9 @@
 //!
 //! Read by `Snapshot.read_control_file` (`Snapshot.vala:190-289`): each member is read with
 //! `get_string_member`, a missing one gets a default.
+//!
+//! Since 0.4.1 Apsis writes a tenth member after those, `apsis-rsync-flags`. Timeshift reads
+//! members by name and never asks for this one.
 
 use serde_json::{Map, Value};
 
@@ -22,6 +25,13 @@ use crate::settings::write_object;
 
 /// The control file in each snapshot folder.
 pub const INFO_FILE: &str = "info.json";
+
+/// Apsis's own member, written last: the rsync flags that decide what a snapshot holds.
+pub const RSYNC_FLAGS_KEY: &str = "apsis-rsync-flags";
+
+/// What [`RSYNC_FLAGS_KEY`] says for a snapshot made by this version: archive mode plus POSIX
+/// ACLs and extended attributes, owners by number.
+pub const RSYNC_FLAGS: &str = "-aAX --numeric-ids";
 
 /// What `info.json` holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +55,9 @@ pub struct Info {
     pub live: bool,
     /// `rsync` or `btrfs`.
     pub kind: String,
+    /// [`RSYNC_FLAGS_KEY`]. `None` for Timeshift's snapshots and Apsis 0.4.0's and older: the
+    /// old format, made with `-a` only.
+    pub rsync_flags: Option<String>,
 }
 
 impl Info {
@@ -54,7 +67,21 @@ impl Info {
         self.tags.iter().filter_map(|w| Tag::from_word(w)).collect()
     }
 
-    /// The file, byte for byte as Timeshift writes it.
+    /// Made without ACLs and extended attributes: there's no [`RSYNC_FLAGS_KEY`], or it names
+    /// neither.
+    #[must_use]
+    pub fn is_old_format(&self) -> bool {
+        let short_flags = |flag: char| {
+            self.rsync_flags.iter().any(|flags| {
+                flags.split(' ').any(|word| {
+                    !word.starts_with("--") && word.starts_with('-') && word.contains(flag)
+                })
+            })
+        };
+        !(short_flags('A') && short_flags('X'))
+    }
+
+    /// The file, byte for byte as Timeshift writes it, then Apsis's member if there is one.
     #[must_use]
     pub fn to_text(&self) -> String {
         let mut fields = Map::new();
@@ -72,6 +99,9 @@ impl Info {
         // Vala's `bool.to_string()`.
         put("live", if self.live { "true" } else { "false" }.to_owned());
         put("type", self.kind.clone());
+        if let Some(flags) = &self.rsync_flags {
+            put(RSYNC_FLAGS_KEY, flags.clone());
+        }
         let mut out = String::new();
         write_object(&mut out, &fields, 0);
         out
@@ -105,6 +135,12 @@ impl Info {
             comments: string("comments")?.unwrap_or_default().to_owned(),
             live: string("live")? == Some("true"),
             kind: string("type")?.unwrap_or("rsync").to_owned(),
+            // Timeshift never reads it, so a value that isn't a string doesn't make the
+            // snapshot invalid: it's the old format.
+            rsync_flags: string(RSYNC_FLAGS_KEY)
+                .flatten()
+                .filter(|flags| !flags.is_empty())
+                .map(str::to_owned),
         })
     }
 }
@@ -164,6 +200,52 @@ mod tests {
             comments: "before \"update\" / ümlaut".to_owned(),
             live: false,
             kind: "rsync".to_owned(),
+            rsync_flags: None,
+        }
+    }
+
+    fn new_format() -> Info {
+        Info {
+            rsync_flags: Some(RSYNC_FLAGS.to_owned()),
+            ..info()
+        }
+    }
+
+    #[test]
+    fn rsync_flags_are_written_last() {
+        let old = info().to_text();
+        let expected = format!(
+            "{},\n  \"apsis-rsync-flags\" : \"-aAX --numeric-ids\"\n}}",
+            old.strip_suffix("\n}").unwrap()
+        );
+        assert_eq!(new_format().to_text(), expected);
+        assert_eq!(Info::parse(&expected), Some(new_format()));
+    }
+
+    #[test]
+    fn format_is_read_from_the_flags() {
+        assert!(info().is_old_format());
+        assert!(!new_format().is_old_format());
+        let with = |flags: &str| Info {
+            rsync_flags: Some(flags.to_owned()),
+            ..info()
+        };
+        assert!(!with("-a -A -X --numeric-ids").is_old_format());
+        assert!(with("-a --numeric-ids").is_old_format());
+        assert!(with("-aA").is_old_format());
+        assert!(with("--AX").is_old_format());
+    }
+
+    #[test]
+    fn odd_rsync_flags_mean_the_old_format() {
+        for text in [
+            r#"{"apsis-rsync-flags" : ""}"#,
+            r#"{"apsis-rsync-flags" : 5}"#,
+            r#"{"apsis-rsync-flags" : ["-aAX"]}"#,
+        ] {
+            let parsed = Info::parse(text).unwrap();
+            assert_eq!(parsed.rsync_flags, None, "{text}");
+            assert!(parsed.is_old_format(), "{text}");
         }
     }
 

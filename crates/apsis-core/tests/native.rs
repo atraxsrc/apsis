@@ -257,6 +257,134 @@ fn create_reports_rsync_progress_up_to_the_end() {
     }
 }
 
+/// An extended attribute of `path`, or `None` if it has none by that name.
+fn xattr(path: &Path, name: &str) -> Option<Vec<u8>> {
+    let mut buffer = [0_u8; 256];
+    match rustix::fs::getxattr(path, name, &mut buffer[..]) {
+        Ok(len) => Some(buffer[..len].to_vec()),
+        Err(rustix::io::Errno::NODATA) => None,
+        Err(e) => panic!("{}: {name}: {e}", path.display()),
+    }
+}
+
+/// The file's POSIX ACL as the kernel stores it.
+const ACL_XATTR: &str = "system.posix_acl_access";
+
+/// Since 0.4.1: `-A -X`. Both can be set without root on the tester's own files. Where the
+/// filesystem under the lab doesn't store them, that part is skipped with a message.
+#[test]
+fn acls_and_extended_attributes_are_kept() {
+    for lab in labs("acls-xattrs") {
+        let kind = lab.kind;
+        populate(&lab.source);
+        let tool = lab.source.join("usr/bin/tool");
+        let same = lab.source.join("etc/same");
+
+        let has_xattr = match rustix::fs::setxattr(
+            &tool,
+            "user.apsis-test",
+            b"kept",
+            rustix::fs::XattrFlags::empty(),
+        ) {
+            Ok(()) => true,
+            Err(rustix::io::Errno::NOTSUP) => {
+                eprintln!("{kind}: no user xattrs on this filesystem, skipping that part");
+                false
+            }
+            Err(e) => panic!("{kind}: setxattr: {e}"),
+        };
+        // A named entry for the tester's own uid, by number: it needs no root, and the uid
+        // exists in any user namespace the tests run in.
+        let entry = format!("u:{}:r--", rustix::process::getuid().as_raw());
+        let has_acl = match Command::new("setfacl")
+            .args(["-m", &entry])
+            .arg(&same)
+            .output()
+        {
+            Ok(output) if output.status.success() => true,
+            Ok(output) => {
+                eprintln!(
+                    "{kind}: no ACLs on this filesystem, skipping that part: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+                false
+            }
+            Err(e) => {
+                eprintln!("{kind}: setfacl didn't run, skipping the ACL part: {e}");
+                false
+            }
+        };
+        let live_acl = has_acl.then(|| xattr(&same, ACL_XATTR).expect("the ACL just set"));
+
+        let (backend, _) = backend(&lab, false);
+        backend.create("first").unwrap();
+        let first = localhost(&lab, FIRST);
+        if has_xattr {
+            assert_eq!(
+                xattr(&first.join("usr/bin/tool"), "user.apsis-test").as_deref(),
+                Some(&b"kept"[..]),
+                "{kind}"
+            );
+        }
+        if has_acl {
+            assert_eq!(
+                xattr(&first.join("etc/same"), ACL_XATTR),
+                live_acl,
+                "{kind}"
+            );
+        }
+        // A file with neither gets neither.
+        assert_eq!(xattr(&first.join("etc/changes"), "user.apsis-test"), None);
+        assert_eq!(xattr(&first.join("etc/changes"), ACL_XATTR), None, "{kind}");
+
+        let text = fs::read_to_string(snapshot_dir(&lab, FIRST).join("info.json")).unwrap();
+        assert!(
+            !native::Info::parse(&text).unwrap().is_old_format(),
+            "{kind}"
+        );
+
+        // `--link-dest` still links them: rsync finds the same ACL and xattrs in the first.
+        backend.create("second").unwrap();
+        let second = localhost(&lab, SECOND);
+        for file in ["usr/bin/tool", "etc/same"] {
+            assert_eq!(
+                inode(&first.join(file)),
+                inode(&second.join(file)),
+                "{kind}: {file}"
+            );
+        }
+
+        // An xattr that changed is a change: the file is copied again, and each snapshot keeps
+        // its own.
+        if has_xattr {
+            rustix::fs::setxattr(
+                &tool,
+                "user.apsis-test",
+                b"changed",
+                rustix::fs::XattrFlags::empty(),
+            )
+            .unwrap();
+            backend.create("third").unwrap();
+            let third = localhost(&lab, THIRD);
+            assert_ne!(
+                inode(&second.join("usr/bin/tool")),
+                inode(&third.join("usr/bin/tool")),
+                "{kind}"
+            );
+            assert_eq!(
+                xattr(&third.join("usr/bin/tool"), "user.apsis-test").as_deref(),
+                Some(&b"changed"[..]),
+                "{kind}"
+            );
+            assert_eq!(
+                xattr(&second.join("usr/bin/tool"), "user.apsis-test").as_deref(),
+                Some(&b"kept"[..]),
+                "{kind}"
+            );
+        }
+    }
+}
+
 #[test]
 fn unchanged_files_share_inodes_changed_ones_do_not() {
     for lab in labs("hardlinks") {
@@ -445,7 +573,7 @@ fn timeshift_can_read_a_native_snapshot() {
              \"sys-distro\" : \"Pop 24.04 (noble)\",\n  \"app-version\" : \"{}\",\n  \
              \"file_count\" : \"{}\",\n  \"tags\" : \"ondemand\",\n  \"comments\" : \
              \"apsis: native, \\\"quoted\\\"\",\n  \"live\" : \"false\",\n  \"type\" : \
-             \"rsync\"\n}}",
+             \"rsync\",\n  \"apsis-rsync-flags\" : \"-aAX --numeric-ids\"\n}}",
             native::APP_VERSION,
             s.file_count
         );
@@ -479,6 +607,7 @@ fn info_json_is_written_as_timeshift_writes_it() {
     let info = native::Info::parse(&text).unwrap();
     assert_eq!(info.created, 1_790_116_435);
     assert_eq!(info.file_count, 1_218_050);
+    assert!(info.is_old_format(), "Timeshift's own snapshot");
     assert_eq!(info.to_text(), text);
 }
 
@@ -609,7 +738,7 @@ fn dry_run_logs_the_plan_and_writes_nothing() {
         );
         assert!(
             log.contains(&format!(
-                "run (argv, no shell): rsync -aii --recursive --verbose --delete --force \
+                "run (argv, no shell): rsync -aii -A -X --numeric-ids --recursive --verbose --delete --force \
                  --stats --sparse --delete-excluded --info=progress2 --link-dest={}/ --log-file={}/rsync-log \
                  --exclude-from={}/exclude.list {}/ {}/localhost/",
                 localhost(&lab, FIRST).display(),

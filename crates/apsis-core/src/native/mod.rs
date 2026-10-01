@@ -43,7 +43,7 @@ use std::sync::Arc;
 use jiff::Zoned;
 
 pub use self::cancel::{Cancel, GRACE, TooLate};
-pub use self::info::{INFO_FILE, Info};
+pub use self::info::{INFO_FILE, Info, RSYNC_FLAGS, RSYNC_FLAGS_KEY};
 pub use self::runner::QuietRunner;
 use crate::backend::Backend;
 use crate::error::{Error, Result};
@@ -296,6 +296,7 @@ impl<R: Runner> NativeRsync<R> {
             comments: comment.to_owned(),
             live: false,
             kind: "rsync".to_owned(),
+            rsync_flags: Some(RSYNC_FLAGS.to_owned()),
         };
         let argv = rsync_argv(&self.config.source, &staging, link_from.as_deref());
         Ok(CreatePlan {
@@ -793,11 +794,19 @@ impl fmt::Display for CreatePlan {
 /// `--delete-excluded` twice; once is enough (it's a flag, not an ordered rule). The source
 /// is `source` with a trailing `/` (Timeshift: `/`), the destination `<snapshot>/localhost/`. Apsis adds `--info=progress2` (whole-transfer percent
 /// and time left, on stdout, which Timeshift's log file doesn't get).
+///
+/// Since 0.4.1 Apsis also adds `-A -X --numeric-ids`: POSIX ACLs, extended attributes (file
+/// capabilities among them) and owners by number, so a restore has everything it needs.
+/// `-H` stays off, as in Timeshift: with `--link-dest` it costs a table of every
+/// multiply-linked file on each run.
 #[must_use]
 pub fn rsync_argv(source: &Path, snapshot: &Path, link_from: Option<&Path>) -> Vec<OsString> {
     let mut argv: Vec<OsString> = [
         "rsync",
         "-aii",
+        "-A",
+        "-X",
+        "--numeric-ids",
         "--recursive",
         "--verbose",
         "--delete",
@@ -900,6 +909,9 @@ mod tests {
             [
                 "rsync",
                 "-aii",
+                "-A",
+                "-X",
+                "--numeric-ids",
                 "--recursive",
                 "--verbose",
                 "--delete",
@@ -916,6 +928,29 @@ mod tests {
             ]
             .map(OsString::from)
         );
+    }
+
+    /// `info.json` says what the argv does.
+    #[test]
+    fn argv_has_the_flags_info_json_names() {
+        let argv = rsync_argv(Path::new("/"), Path::new("/s/x"), None);
+        assert_eq!(RSYNC_FLAGS, "-aAX --numeric-ids");
+        for flag in ["-A", "-X", "--numeric-ids"] {
+            assert!(argv.iter().any(|a| a == flag), "{flag}");
+        }
+    }
+
+    #[test]
+    fn argv_never_preserves_hard_links() {
+        let argv = rsync_argv(Path::new("/"), Path::new("/s/x"), Some(Path::new("/s/w")));
+        for arg in &argv {
+            let arg = arg.to_string_lossy();
+            let short_flags = arg.starts_with('-') && !arg.starts_with("--");
+            assert!(
+                arg != "--hard-links" && !(short_flags && arg.contains('H')),
+                "{arg}"
+            );
+        }
     }
 
     #[test]
