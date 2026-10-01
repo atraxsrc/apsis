@@ -241,8 +241,19 @@ impl<R: Runner + Clone> Drop for Shared<R> {
 /// What the native backend needs from this system and Apsis's config (or, before it's saved,
 /// the import).
 fn prepare<R: Runner>(runner: &R) -> Result<(NativeConfig, Device)> {
+    prepare_with(runner, |_| {})
+}
+
+/// [`prepare`], with Apsis's config changed by `adjust` first (the safety snapshot of a
+/// restore that restores home takes `/home` whatever the Include setting says, PLAN 6b.4).
+fn prepare_with<R: Runner>(
+    runner: &R,
+    adjust: impl FnOnce(&mut Config),
+) -> Result<(NativeConfig, Device)> {
     let devices = lsblk(runner)?;
-    let (apsis, _) = Files::system().effective(&settings::parse_lsblk(&devices)?, &system()?)?;
+    let (mut apsis, _) =
+        Files::system().effective(&settings::parse_lsblk(&devices)?, &system()?)?;
+    adjust(&mut apsis);
     let root_uuid = run(runner, &[&FINDMNT_ROOT_UUID[..], &["/"]].concat())?;
     let distro = native::distro::full_name(Path::new("/"));
     // Timeshift reads a missing fstab or passwd as empty.
@@ -271,6 +282,27 @@ pub fn open<R: Runner + Clone>(
     log: impl Fn(&str) + Send + Sync + 'static,
 ) -> Result<(NativeRsync<QuietRunner>, Mounted<R>)> {
     let (config, device) = prepare(runner)?;
+    let mounted = mount(runner, &device, Access::ReadWrite, Path::new(MOUNT_POINT))?;
+    Ok((backend(config, log), mounted))
+}
+
+/// The native backend on the backup device, mounted read-write for a restore's preparation
+/// (PLAN 6b.4): the dry runs read it, the safety snapshot and the recovery note write it.
+/// With `include_home`, the safety snapshot takes `/home` whatever the Include setting says.
+///
+/// # Errors
+///
+/// As [`open`].
+pub fn open_for_restore<R: Runner + Clone>(
+    runner: &R,
+    log: impl Fn(&str) + Send + Sync + 'static,
+    include_home: bool,
+) -> Result<(NativeRsync<QuietRunner>, Mounted<R>)> {
+    let (config, device) = prepare_with(runner, |apsis| {
+        if include_home {
+            apsis.include_home = true;
+        }
+    })?;
     let mounted = mount(runner, &device, Access::ReadWrite, Path::new(MOUNT_POINT))?;
     Ok((backend(config, log), mounted))
 }

@@ -14,6 +14,7 @@ pub mod esp;
 pub mod file;
 pub mod filter;
 pub mod plan;
+pub mod recover;
 pub mod refusal;
 pub mod space;
 pub mod state;

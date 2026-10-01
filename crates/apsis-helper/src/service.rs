@@ -14,8 +14,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use apsis_core::helper::names::{
-    ACTION_CONFIGURE, ACTION_CREATE, ACTION_DELETE, ACTION_LIST, ACTION_STOP, OBJECT_PATH,
-    OP_CREATE, OP_DELETE, OP_DELETE_MANY,
+    ACTION_CONFIGURE, ACTION_CREATE, ACTION_DELETE, ACTION_LIST, ACTION_RESTORE, ACTION_STOP,
+    OBJECT_PATH, OP_CREATE, OP_DELETE, OP_DELETE_MANY, OP_RESTORE,
 };
 use apsis_core::helper::{
     WireCheckRestore, WireConfig, WireConfigInfo, WireListWithUsage3, check_delete_many,
@@ -24,6 +24,7 @@ use apsis_core::helper::{
 use apsis_core::job::{self, JobKind, JobState, WireJob};
 use apsis_core::native::{Cancel, TooLate};
 use apsis_core::restore::dialog;
+use apsis_core::restore::filter::Home;
 use apsis_core::status::BY_UUID;
 use apsis_core::{Backend, Error, SnapshotList, parse_snapshot_name, validate_comment};
 use zbus::fdo::DBusProxy;
@@ -35,6 +36,7 @@ use zbus::{Connection, DBusError, interface};
 use crate::check::{self, Live, SnapshotFiles};
 use crate::native::{self, SharedMount};
 use crate::polkit;
+use crate::prepare;
 use crate::runner::DirectRunner;
 use crate::settings::{self, Files};
 use crate::state::{Announcement, Running, State};
@@ -175,6 +177,80 @@ impl Helper {
         Ok(dialog::to_wire(&result?))
     }
 
+    /// Prepares a full-system restore of `snapshot` (PLAN 6b.4, 6b.9; polkit: `restore`,
+    /// asked every time) and returns; `Finished("restore", ok, ..)` follows, `ok` meaning the
+    /// plan is ready at the prompt. The checks again, both dry runs and the space checks, the
+    /// safety snapshot (with `/home` when `restore_home`), the plan files, the recovery note.
+    /// A `restore` job; stoppable with `Stop(snapshot)` until ready. While the plan is ready,
+    /// every write is `Busy` and reads go through; `RestartToRestore` or `CancelRestore` ends
+    /// it, as does the starter's connection leaving the bus.
+    async fn restore(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+        snapshot: String,
+        restore_home: bool,
+        safety_snapshot: bool,
+    ) -> Result<(), HelperError> {
+        let _call = self.state.call();
+        let caller = caller(&header)?;
+        let label = format!(
+            "restore {snapshot:?} {} {} for {caller}",
+            if restore_home {
+                "restore-home"
+            } else {
+                "keep-home"
+            },
+            if safety_snapshot {
+                "safety"
+            } else {
+                "no-safety"
+            }
+        );
+        let cancel = Cancel::new();
+        let mut request = None;
+        let started = async {
+            if parse_snapshot_name(&snapshot).is_none() {
+                return Err(Error::InvalidSnapshotName(snapshot.clone()));
+            }
+            self.refuse_if_running()?;
+            authorize(connection, &caller, ACTION_RESTORE, true).await?;
+            let uid = unix_user(connection, &caller).await?;
+            let running = self.state.begin(JobKind::Restore).await?;
+            // Named at once: `Stop(snapshot)` finds it, and `Job()` says what's restored.
+            self.state.named(&snapshot);
+            self.state.stoppable(Arc::clone(&cancel), uid);
+            request = Some(prepare::Request {
+                snapshot: snapshot.clone(),
+                home: if restore_home {
+                    Home::Restore
+                } else {
+                    Home::Keep
+                },
+                safety_snapshot,
+                starter_uid: uid,
+            });
+            Ok(running)
+        }
+        .await;
+        let ending = Ending::Ready {
+            starter: request.as_ref().map_or(0, |r| r.starter_uid),
+            starter_name: caller.to_string(),
+        };
+        self.start(
+            connection,
+            caller,
+            OP_RESTORE,
+            label,
+            started,
+            ending,
+            move |state| {
+                let request = request.ok_or_else(|| Error::Helper("not started".to_owned()))?;
+                prepare::prepare(&request, state, cancel).map(|_| String::new())
+            },
+        )
+    }
+
     /// Starts a snapshot (polkit: `create`) and returns; `Finished("create", ..)` follows.
     /// rsync runs at idle I/O priority and nice 19. Interrupted creates' folders are removed
     /// first. The caller's uid may `Stop` it without a password.
@@ -208,6 +284,7 @@ impl Helper {
             OP_CREATE,
             label,
             started,
+            Ending::Done,
             move |state| {
                 let cancel = cancel.ok_or_else(|| Error::Helper("not started".to_owned()))?;
                 let (backend, _mounted) = native::open(&DirectRunner, log_lines)?;
@@ -253,6 +330,7 @@ impl Helper {
             OP_DELETE,
             label,
             started,
+            Ending::Done,
             move |state| {
                 state.named(&name);
                 let (backend, _mounted) = native::open(&DirectRunner, log_lines)?;
@@ -292,6 +370,7 @@ impl Helper {
             OP_DELETE_MANY,
             label,
             started,
+            Ending::Done,
             move |state| {
                 let (backend, _mounted) = native::open(&DirectRunner, log_lines)?;
                 let device = backend.config().device_uuid.clone();
@@ -481,8 +560,10 @@ impl Helper {
     }
 
     /// Logs whether the operation could start. If it did, runs `work` in the background
-    /// holding the lock, then releases the lock, announces how it ended (`JobChanged`), logs
-    /// it and tells `caller` with `Finished`: the text `work` returned, or the error.
+    /// holding the lock, then releases the lock, announces how it ended (`JobChanged`; or, for
+    /// [`Ending::Ready`], that the plan is ready), logs it and tells `caller` with `Finished`:
+    /// the text `work` returned, or the error.
+    #[allow(clippy::too_many_arguments, reason = "one call site per method")]
     fn start(
         &self,
         connection: &Connection,
@@ -490,6 +571,7 @@ impl Helper {
         op: &'static str,
         label: String,
         started: apsis_core::Result<Running>,
+        ending: Ending,
         work: impl FnOnce(&Arc<State>) -> apsis_core::Result<String> + Send + 'static,
     ) -> Result<(), HelperError> {
         let running = match started {
@@ -500,6 +582,7 @@ impl Helper {
             }
         };
         log(&format!("{label}: started"));
+        let ready = matches!(ending, Ending::Ready { .. });
         // Keeps the helper alive until the signal is out.
         let call = self.state.call();
         let connection = connection.clone();
@@ -512,11 +595,18 @@ impl Helper {
             // too) sees its job end before it hears the result, never the other way round.
             let result = match blocking(move || {
                 let result = work(&state);
-                let announced = running.end(match &result {
-                    Ok(_) => JobState::Done,
-                    Err(Error::Stopped) => JobState::Stopped,
-                    Err(_) => JobState::Failed,
-                });
+                let announced = match (&result, ending) {
+                    (
+                        Ok(_),
+                        Ending::Ready {
+                            starter,
+                            starter_name,
+                        },
+                    ) => running.ready(starter, &starter_name),
+                    (Ok(_), Ending::Done) => running.end(JobState::Done),
+                    (Err(Error::Stopped), _) => running.end(JobState::Stopped),
+                    (Err(_), _) => running.end(JobState::Failed),
+                };
                 Ok((result, announced))
             })
             .await
@@ -529,7 +619,10 @@ impl Helper {
             };
             let (ok, message) = match result {
                 Ok(text) => {
-                    log(&format!("{label}: done"));
+                    log(&format!(
+                        "{label}: {}",
+                        if ready { "ready" } else { "done" }
+                    ));
                     (true, text)
                 }
                 Err(error) => {
@@ -550,6 +643,15 @@ impl Helper {
         });
         Ok(())
     }
+}
+
+/// How a job that succeeds ends (see [`Helper::start`]).
+enum Ending {
+    /// `done`, the lock free.
+    Done,
+    /// A restore's preparation: the plan moves next to the lock as the ready plan
+    /// ([`Running::ready`]), announced `running` at 100%.
+    Ready { starter: u32, starter_name: String },
 }
 
 /// Sends each job change as `JobChanged`, to everyone on the bus, in order. Runs as long as
@@ -744,8 +846,8 @@ mod tests {
     use apsis_core::helper::names::{
         ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
         ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CHECK_RESTORE, METHOD_CREATE, METHOD_DELETE,
-        METHOD_DELETE_MANY, METHOD_JOB, METHOD_LIST, METHOD_READ_CONFIG, METHOD_STOP,
-        METHOD_WRITE_CONFIG, SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
+        METHOD_DELETE_MANY, METHOD_JOB, METHOD_LIST, METHOD_READ_CONFIG, METHOD_RESTORE,
+        METHOD_STOP, METHOD_WRITE_CONFIG, SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
     };
     use zbus::object_server::Interface;
 
@@ -766,6 +868,7 @@ mod tests {
             METHOD_READ_CONFIG,
             METHOD_WRITE_CONFIG,
             METHOD_CHECK_RESTORE,
+            METHOD_RESTORE,
         ] {
             assert!(
                 xml.contains(&format!("<method name=\"{method}\">")),
@@ -778,8 +881,17 @@ mod tests {
                 "{signal}\n{xml}"
             );
         }
-        // Nothing else: exactly nine methods and two signals.
-        assert_eq!(xml.matches("<method ").count(), 9, "{xml}");
+        // Nothing else: exactly ten methods and two signals.
+        assert_eq!(xml.matches("<method ").count(), 10, "{xml}");
+        // `Restore(s snapshot, b restore_home, b safety_snapshot)`.
+        assert!(
+            xml.contains("<arg name=\"restore_home\" type=\"b\" direction=\"in\"/>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<arg name=\"safety_snapshot\" type=\"b\" direction=\"in\"/>"),
+            "{xml}"
+        );
         // `CheckRestore(s snapshot) -> (bsbbbs)`.
         assert!(xml.contains("type=\"(bsbbbs)\""), "{xml}");
         // `DeleteMany(as names)`.

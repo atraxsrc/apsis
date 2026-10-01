@@ -64,6 +64,10 @@ pub enum Error {
     /// folder). The text says why.
     #[error("{0}")]
     InvalidInput(String),
+    /// A full-system restore the helper refused (PLAN 6b.7): the refusal's word on the wire
+    /// (`restore::refusal::Refusal::to_wire`), which the applet decodes for its dialog.
+    #[error("can't restore this snapshot: {0}")]
+    RestoreRefused(String),
     #[error(transparent)]
     Io(#[from] io::Error),
 }

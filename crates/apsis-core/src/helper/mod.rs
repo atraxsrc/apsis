@@ -304,6 +304,8 @@ const INVALID_INPUT_HEADER: &str = "refused: ";
 const DEVICE_REMOVED_HEADER: &str = "backup disk removed: ";
 /// An encoded [`Error::Stopped`].
 const STOPPED: &str = "stopped";
+/// An encoded [`Error::RestoreRefused`]; the refusal's word follows.
+const RESTORE_REFUSED_HEADER: &str = "restore refused: ";
 /// An encoded [`Error::DeleteManyStopped`]: `deleted=<a,b> failed=<c> left=<d,e> reason=`
 /// and the encoded reason follow. Snapshot names have no spaces or commas, so the fields are
 /// unambiguous; the reason comes last because it can hold anything.
@@ -311,8 +313,8 @@ const DELETE_MANY_HEADER: &str = "delete stopped: ";
 
 /// An error as one message for the bus (a D-Bus error's text, or `Finished`'s `message`).
 /// [`Error::DeviceNotFound`], [`Error::DeviceRemoved`], [`Error::InvalidInput`],
-/// [`Error::Stopped`] and [`Error::DeleteManyStopped`] keep their kind, so [`decode_error`]
-/// gives them back; anything else is its text.
+/// [`Error::RestoreRefused`], [`Error::Stopped`] and [`Error::DeleteManyStopped`] keep their
+/// kind, so [`decode_error`] gives them back; anything else is its text.
 #[must_use]
 pub fn encode_error(error: &Error) -> String {
     match error {
@@ -321,6 +323,7 @@ pub fn encode_error(error: &Error) -> String {
             format!("{DEVICE_REMOVED_HEADER}{device}: {reason}")
         }
         Error::InvalidInput(reason) => format!("{INVALID_INPUT_HEADER}{reason}"),
+        Error::RestoreRefused(word) => format!("{RESTORE_REFUSED_HEADER}{word}"),
         Error::Stopped => STOPPED.to_owned(),
         Error::DeleteManyStopped {
             deleted,
@@ -360,6 +363,9 @@ pub fn decode_error(message: &str) -> Error {
     }
     if let Some(reason) = message.strip_prefix(INVALID_INPUT_HEADER) {
         return Error::InvalidInput(reason.to_owned());
+    }
+    if let Some(word) = message.strip_prefix(RESTORE_REFUSED_HEADER) {
+        return Error::RestoreRefused(word.to_owned());
     }
     if message == STOPPED {
         return Error::Stopped;
@@ -661,6 +667,20 @@ mod tests {
         let refused = Error::InvalidInput("not deleting x: no info.json".to_owned());
         assert!(
             matches!(decode_error(&encode_error(&refused)), Error::InvalidInput(m) if m == "not deleting x: no info.json")
+        );
+    }
+
+    /// A restore the helper refused (PLAN 6b.7) travels as the refusal's word, so the applet
+    /// shows the right dialog.
+    #[test]
+    fn a_refused_restore_survives_the_bus() {
+        let refused = Error::RestoreRefused("boot-files:no-entry".to_owned());
+        assert_eq!(
+            encode_error(&refused),
+            "restore refused: boot-files:no-entry"
+        );
+        assert!(
+            matches!(decode_error(&encode_error(&refused)), Error::RestoreRefused(w) if w == "boot-files:no-entry")
         );
     }
 

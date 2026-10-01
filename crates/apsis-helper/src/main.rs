@@ -13,6 +13,7 @@
 mod check;
 mod native;
 mod polkit;
+mod prepare;
 mod runner;
 mod service;
 mod settings;
@@ -59,8 +60,8 @@ async fn serve() -> zbus::Result<()> {
 #[cfg(test)]
 mod resource_tests {
     use apsis_core::helper::names::{
-        ACTION_CONFIGURE, ACTION_CREATE, ACTION_DELETE, ACTION_LIST, ACTION_STOP, BUS_NAME,
-        INTERFACE, SYSTEMD_UNIT,
+        ACTION_CONFIGURE, ACTION_CREATE, ACTION_DELETE, ACTION_LIST, ACTION_RESTORE, ACTION_STOP,
+        BUS_NAME, INTERFACE, SYSTEMD_UNIT,
     };
 
     const ACTIVATION: &str =
@@ -124,12 +125,21 @@ mod resource_tests {
                 "{id}"
             );
         }
+        // The restore asks every time, from any session (PLAN 6b.9): no `_keep`.
+        let restore = action(ACTION_RESTORE);
+        for setting in ["allow_any", "allow_inactive", "allow_active"] {
+            assert!(
+                restore.contains(&format!("<{setting}>auth_admin</{setting}>")),
+                "{setting}"
+            );
+        }
         for id in [
             ACTION_LIST,
             ACTION_CREATE,
             ACTION_DELETE,
             ACTION_STOP,
             ACTION_CONFIGURE,
+            ACTION_RESTORE,
         ] {
             let action = action(id);
             assert!(action.contains("<message>Apsis "), "{id}");
@@ -137,6 +147,6 @@ mod resource_tests {
             assert!(!action.contains("<allow_any>yes"), "{id}");
             assert!(!action.contains("<allow_inactive>yes"), "{id}");
         }
-        assert_eq!(POLKIT.matches("<action id=").count(), 5);
+        assert_eq!(POLKIT.matches("<action id=").count(), 6);
     }
 }

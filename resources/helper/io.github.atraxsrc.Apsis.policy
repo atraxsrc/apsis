@@ -30,6 +30,16 @@
     </defaults>
   </action>
 
+  <action id="io.github.atraxsrc.Apsis.restore">
+    <description>Restore the system from a snapshot</description>
+    <message>Apsis needs your password to restore the system from a snapshot</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
   <action id="io.github.atraxsrc.Apsis.delete">
     <description>Delete a system snapshot</description>
     <message>Apsis needs your password to delete a system snapshot</message>

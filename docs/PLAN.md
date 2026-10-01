@@ -1911,6 +1911,10 @@ Checks:
       `/home` when home is restored), `request.json` (with `snapshot_created`, the starter
       uid, the needs), `restore.filter`, RECOVER.txt on the backup disk, then ready.
       Stoppable through `Stop` until ready.
+      **Status (2026-10-02): done** (`prepare.rs` in the helper, `restore::recover` and
+      `filter::home_only` in core, `Error::RestoreRefused` on the wire, `Ending::Ready` in
+      `service::start`, `HelperClient::restore`; the polkit `restore` action is in the policy
+      file already). The real run is apsis-test check 1. DECISIONS 2026-10-02 "Restore".
    6. **`RestartToRestore`**: freshness (30 min), the live re-checks (space on each
       destination, the ESP's needs, `esp::check_before_arming`, `check_arming` on an `lstat`
       of both link names, `check_pending`), then the arm in 6b.5's order (unit, wants link,

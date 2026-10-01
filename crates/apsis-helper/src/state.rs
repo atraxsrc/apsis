@@ -552,13 +552,6 @@ impl Running {
     /// (a running job at 100%), the lock is released, and the plan is announced. The caller
     /// sends `Finished("restore", true, ..)` after [`Announced::wait`]. `starter` (uid) and
     /// `starter_name` (unique bus name) are who prepared it.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
-        )
-    )]
     pub fn ready(mut self, starter: u32, starter_name: &str) -> Announced {
         let plan = self.state.lock_job().take().map(|active| {
             let mut job = active.job;

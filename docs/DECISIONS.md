@@ -3542,3 +3542,78 @@ helper (`check::tests`, four tests on temp trees, no root) and the introspection
   the wire on both sides.
 
 Gate: workspace tests, clippy `-D warnings` on all targets, fmt check: all clean.
+
+## 2026-10-02 - 6b helper slice: `Restore`, the preparation (step 3 item 5)
+
+Built tests first (core: the refused error on the bus, the recovery note, the home-only
+filter and `filter::save`; helper: `prepare::tests` on the pure pieces, the introspection
+with `Restore`, the sixth polkit action). The whole preparation runs rsync against `/` and
+mounts the backup disk, so it isn't run in the tests; its pieces are, and apsis-test check 1
+(6b.12) is its real run.
+
+**Core:**
+- **`Error::RestoreRefused(word)`**: a refusal of 6b.7 travelling in `Finished("restore",
+  false, ..)`, encoded `restore refused: <word>` and decoded back, so the applet gets the
+  `Refusal` for its dialog. The other `Error` variants are unchanged; no match in the tree
+  was exhaustive.
+- **`restore::recover`**: `FILE` (`apsis-restore-RECOVER.txt`, in the backup disk's
+  `timeshift/`) and `text(root_uuid, esp_uuid, backup_uuid, snapshot, old_format)`: 6b.11's
+  steps with the UUIDs filled in, `-A -X` dropped for an old-format snapshot. The test
+  checks every command line and that no `@` is in it.
+- **`filter::home_only(rules)`**: the second dry run's filter (6b.4), `+ /home/` first, the
+  rules, `- /*` last. **`filter::FILE`** (`restore.filter`), **`filter::save(dir, rules)`**
+  (atomic, like the plan). **`argv::LOG_FILE`** (`rsync-log`).
+
+**Helper, `prepare.rs`:**
+- `safety_comment(name)`: "Before restoring 2026-09-25 11:28".
+- `needs(transfer, under_home, root, home)`: 6b.4's checks per destination partition, `/`
+  first; `Needs { root, home }` are the margin-included numbers `request.json` records.
+  `split` caps the home part at the whole.
+- `clear_leftovers(dir)`: makes the state folder root-only if missing, and removes
+  `request.json`, `restore.filter`, `restore-home.filter`, `rsync-log`, `state.json`,
+  `esp-backup/` and a helper copy. **`result.json` stays**: `RestoreResult` (item 9) reads it;
+  when it's replaced is item 9's to decide.
+- `prepare(request, state, cancel) -> Plan`, 6b.4's order: the folder cleared; the backup
+  disk mounted **read-write** for the whole preparation (`native::open_for_restore`, which
+  forces `include_home` on the safety snapshot's config when home is restored); the
+  snapshot in the list; the 6b.7 checks again through `check::dialog` (a refusal is
+  `RestoreRefused`); the running kernel from `/proc/sys/kernel/osrelease`; the filter saved;
+  dry run 1 (`argv::rsync_dry_run`, the real filter) for the transfer; when home is restored
+  and `/home` is its own mount, dry run 2 with the home-only filter written to
+  `restore-home.filter` and removed after, plus `findmnt` for `/home`'s UUID; `statvfs` of
+  `/` and `/home`; `needs`; then the safety snapshot: `backend.plan(comment)` for the
+  create's argv, run with `--dry-run --no-human-readable` for its size, `check_backup`
+  against the mount's `statvfs`, then the create with `cancel`, the job's progress, and the
+  name captured into the plan (**not** `State::named`: the job's snapshot stays the one
+  being restored, which is what `Stop(snapshot)` matches); the recovery note written to the
+  backup disk; `request.json` saved last. `cancel.is_stopping()` is checked between steps
+  and inside every rsync (`run_cancellable`); a stop is `Error::Stopped`, and the backend
+  removes a half-made safety snapshot itself (6b.5).
+- A dry run that exits 23 or 24 still counts (some files unreadable or vanished); any other
+  failure is `Error::Native` with rsync's stderr. No readable size is `SizeUnknown`, refused.
+- The dry runs use `QuietRunner` (fixed `PATH`, `LC_ALL=C.UTF-8`, low priority), not
+  `argv::LOCALE`'s plain `C`: rsync's `--stats` numbers are the same in both.
+- The `kernelstub` check for the dialog looks at `/usr/bin/kernelstub`; the preparation
+  reuses `check::dialog` as is.
+
+**Helper, `service.rs`:**
+- **`Restore(s snapshot, b restore_home, b safety_snapshot)`**: name parsed, not running,
+  polkit `restore` (interactive), the caller's uid, `begin(JobKind::Restore)`, `named` at
+  once and `stoppable(cancel, uid)`; then `start` with **`Ending::Ready { starter,
+  starter_name }`**: on success the job becomes the ready plan (`Running::ready`) instead of
+  ending, the journal says `ready`, and `Finished("restore", true, "")` follows the ready
+  announcement on the bus. On an error it ends `failed` or `stopped` as any job. `start`'s
+  other callers pass `Ending::Done`. Journal label: `restore "<name>" keep-home safety for
+  :1.42`.
+- **`Running::ready` is now used**, so its dead-code expectation is gone (the attribute
+  failed the build on purpose). The rest of the ready API keeps it until items 6 and 7.
+- **The polkit action `io.github.atraxsrc.Apsis.restore`** is in the policy file now
+  (`auth_admin` for any, inactive and active; message "Apsis needs your password to restore
+  the system from a snapshot"), since the method can't run without it; item 10's packaging
+  only has the `postrm` work left for it. The resource test counts six and checks the three
+  settings.
+
+**Client**: `HelperClient::restore(name, restore_home, safety_snapshot, on_progress)`,
+through `operate` like a create.
+
+Gate: workspace tests, clippy `-D warnings` on all targets, fmt check: all clean.

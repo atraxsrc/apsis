@@ -10,9 +10,9 @@ use std::future::Future;
 use super::names::{
     BUS_NAME, ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
     ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CHECK_RESTORE, METHOD_CREATE, METHOD_DELETE,
-    METHOD_DELETE_MANY, METHOD_JOB, METHOD_LIST, METHOD_READ_CONFIG, METHOD_STOP,
-    METHOD_WRITE_CONFIG, OBJECT_PATH, OP_CREATE, OP_DELETE, OP_DELETE_MANY, SIGNAL_FINISHED,
-    SIGNAL_JOB_CHANGED,
+    METHOD_DELETE_MANY, METHOD_JOB, METHOD_LIST, METHOD_READ_CONFIG, METHOD_RESTORE, METHOD_STOP,
+    METHOD_WRITE_CONFIG, OBJECT_PATH, OP_CREATE, OP_DELETE, OP_DELETE_MANY, OP_RESTORE,
+    SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
 };
 use super::{
     WireCheckRestore, WireConfigInfo, WireListWithUsage3, check_delete_many, config_info_from_wire,
@@ -80,6 +80,39 @@ impl HelperClient {
             .await
             .map_err(from_zbus)?;
         dialog::from_wire(wire)
+    }
+
+    /// Prepares a full-system restore of the snapshot `name` and waits until the plan is
+    /// ready at the prompt (the checks, the dry runs, the safety snapshot: minutes). The
+    /// password is asked every time. `on_progress` gets the safety snapshot's progress.
+    /// Afterwards the helper refuses writes until `RestartToRestore` or `CancelRestore`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RestoreRefused`] with the refusal's word, [`Error::Stopped`], or what the
+    /// helper reported (see [`Error`]).
+    pub async fn restore(
+        &self,
+        name: &str,
+        restore_home: bool,
+        safety_snapshot: bool,
+        on_progress: &mut (dyn FnMut(Progress) + Send),
+    ) -> Result<()> {
+        let name = name.to_owned();
+        self.operate(
+            OP_RESTORE,
+            move |proxy| async move {
+                proxy
+                    .call::<_, _, ()>(
+                        METHOD_RESTORE,
+                        &(name.as_str(), restore_home, safety_snapshot),
+                    )
+                    .await
+            },
+            on_progress,
+        )
+        .await
+        .map(drop)
     }
 
     /// Creates a snapshot and waits until it's done (this can take minutes).

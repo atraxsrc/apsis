@@ -9,8 +9,12 @@
 
 use std::path::Path;
 
+use super::file::{self, FileError};
 use crate::error::{Error, Result};
 use crate::usage::mounts_under;
+
+/// The filter's file in the state folder, `--exclude-from=` of the restore and its dry run.
+pub const FILE: &str = "restore.filter";
 
 /// Group 1, always first: what runs the restore, its state, and the live Apsis config. None of
 /// these belongs to the Apsis package (a test checks them against the .deb's file list).
@@ -162,6 +166,30 @@ fn escape(path: &str) -> Result<String> {
         out.push(c);
     }
     Ok(out)
+}
+
+/// The same `rules`, limited to what lands under `/home`, for the second dry run of PLAN 6b.4
+/// (what a separate `/home` partition must have free): `/home` itself is let in first, the
+/// rules apply inside it as they do in the restore, and every other top-level name is left
+/// out last (rsync never enters an excluded folder). Only for a restore with home restored:
+/// a `- /home/***` rule would make it count nothing.
+#[must_use]
+pub fn home_only(rules: &[String]) -> Vec<String> {
+    let mut list = Vec::with_capacity(rules.len() + 2);
+    list.push("+ /home/".to_owned());
+    list.extend(rules.iter().cloned());
+    list.push("- /*".to_owned());
+    list
+}
+
+/// Writes `dir/restore.filter` in one step (temporary file, fsync, rename), as the other
+/// files of the state folder are written.
+///
+/// # Errors
+///
+/// [`FileError::Io`] if the write fails.
+pub fn save(dir: &Path, rules: &[String]) -> Result<(), FileError> {
+    file::save(dir, FILE, &to_text(rules))
 }
 
 /// The filter file's text: each rule, then `\n`.
@@ -443,6 +471,32 @@ mod tests {
             let result = rules(&request(&mountinfo, Home::Keep));
             assert!(matches!(result, Err(Error::InvalidInput(_))), "{escape}");
         }
+    }
+
+    /// The second dry run (PLAN 6b.4): the same rules, limited to what lands under `/home`.
+    #[test]
+    fn the_home_only_filter_keeps_the_rules_and_drops_the_rest_of_the_tree() {
+        let rules = vec![
+            "- /etc/apsis/***".to_owned(),
+            "+ /home/**".to_owned(),
+            "/home/*/**".to_owned(),
+        ];
+        let home = home_only(&rules);
+        assert_eq!(home.first().unwrap(), "+ /home/");
+        assert_eq!(home.last().unwrap(), "- /*");
+        assert_eq!(&home[1..home.len() - 1], &rules[..]);
+    }
+
+    #[test]
+    fn the_filter_file_is_saved_whole() {
+        let dir = super::super::file::tests::temp_dir("filter-save");
+        let rules = vec!["- /dev/***".to_owned(), "+ /home/**".to_owned()];
+        save(&dir, &rules).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join(FILE)).unwrap(),
+            "- /dev/***\n+ /home/**\n"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

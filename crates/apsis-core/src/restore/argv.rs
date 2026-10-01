@@ -9,6 +9,9 @@ use std::path::Path;
 /// every run of it is in the C locale.
 pub const LOCALE: (&str, &str) = ("LC_ALL", "C");
 
+/// rsync's `--log-file` in the state folder, named in the result when the copy had problems.
+pub const LOG_FILE: &str = "rsync-log";
+
 /// Options the restore never runs with, each for its own reason (PLAN 6b.6, 6b.10):
 /// `--delete-excluded` would delete what the filter protects; `--ignore-errors` would delete
 /// even after a read error, when rsync can't know what the snapshot holds; `-L` and
