@@ -110,9 +110,10 @@ pub fn backup_device(apsis: &Config, lsblk_json: &str) -> Result<Device> {
     Ok(device)
 }
 
-/// `mount -o <ro,noexec|rw>,nosuid,nodev /dev/disk/by-uuid/<uuid> <MOUNT_POINT>`. Timeshift mounts
-/// by UUID too (`Device.mount`, `Device.vala:1571-1666`), with no options.
-pub fn mount_argv(uuid: &str, access: Access) -> Vec<String> {
+/// `mount -o <ro,noexec|rw>,nosuid,nodev /dev/disk/by-uuid/<uuid> <mount_point>`, the mount
+/// point [`MOUNT_POINT`] outside the tests. Timeshift mounts by UUID too (`Device.mount`,
+/// `Device.vala:1571-1666`), with no options.
+fn mount_argv(uuid: &str, access: Access, mount_point: &Path) -> Vec<String> {
     let options = match access {
         Access::ReadOnly => "ro,nosuid,nodev,noexec",
         Access::ReadWrite => "rw,nosuid,nodev",
@@ -122,22 +123,24 @@ pub fn mount_argv(uuid: &str, access: Access) -> Vec<String> {
         "-o".to_owned(),
         options.to_owned(),
         format!("/dev/disk/by-uuid/{uuid}"),
-        MOUNT_POINT.to_owned(),
+        mount_point.to_string_lossy().into_owned(),
     ]
 }
 
 /// The backup device mounted at [`MOUNT_POINT`] until this drops.
 pub struct Mounted<R: Runner> {
     runner: R,
+    mount_point: PathBuf,
 }
 
 impl<R: Runner> Drop for Mounted<R> {
     fn drop(&mut self) {
-        if let Err(error) = run(&self.runner, &["umount", MOUNT_POINT]) {
+        let mount_point = self.mount_point.to_string_lossy();
+        if let Err(error) = run(&self.runner, &["umount", &mount_point]) {
             // A disk pulled out mid-job: detach it lazily, so the next plug-in mounts cleanly.
-            eprintln!("apsis-helper: couldn't unmount {MOUNT_POINT}: {error}; unmounting lazily");
-            if let Err(error) = run(&self.runner, &["umount", "--lazy", MOUNT_POINT]) {
-                eprintln!("apsis-helper: couldn't unmount {MOUNT_POINT} lazily: {error}");
+            eprintln!("apsis-helper: couldn't unmount {mount_point}: {error}; unmounting lazily");
+            if let Err(error) = run(&self.runner, &["umount", "--lazy", &mount_point]) {
+                eprintln!("apsis-helper: couldn't unmount {mount_point} lazily: {error}");
             }
         }
     }
@@ -149,6 +152,8 @@ impl<R: Runner> Drop for Mounted<R> {
 /// does: `WriteConfig` is a write and waits for the readers).
 pub struct SharedMount<R: Runner> {
     held: Mutex<Option<Held<R>>>,
+    /// [`MOUNT_POINT`], or a temp folder in the tests.
+    mount_point: PathBuf,
 }
 
 struct Held<R: Runner> {
@@ -160,13 +165,19 @@ struct Held<R: Runner> {
 
 impl<R: Runner + Clone> Default for SharedMount<R> {
     fn default() -> Self {
-        Self {
-            held: Mutex::new(None),
-        }
+        Self::at(PathBuf::from(MOUNT_POINT))
     }
 }
 
 impl<R: Runner + Clone> SharedMount<R> {
+    /// A share mounting at `mount_point` (the tests'; the helper uses [`Default`]).
+    fn at(mount_point: PathBuf) -> Self {
+        Self {
+            held: Mutex::new(None),
+            mount_point,
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, Option<Held<R>>> {
         self.held
             .lock()
@@ -195,7 +206,7 @@ impl<R: Runner + Clone> SharedMount<R> {
                 ));
             }
             None => {
-                let mounted = mount(runner, device, Access::ReadOnly)?;
+                let mounted = mount(runner, device, Access::ReadOnly, &self.mount_point)?;
                 *held = Some(Held {
                     uuid: device.uuid.clone(),
                     readers: 1,
@@ -260,7 +271,7 @@ pub fn open<R: Runner + Clone>(
     log: impl Fn(&str) + Send + Sync + 'static,
 ) -> Result<(NativeRsync<QuietRunner>, Mounted<R>)> {
     let (config, device) = prepare(runner)?;
-    let mounted = mount(runner, &device, Access::ReadWrite)?;
+    let mounted = mount(runner, &device, Access::ReadWrite, Path::new(MOUNT_POINT))?;
     Ok((backend(config, log), mounted))
 }
 
@@ -280,17 +291,23 @@ pub fn open_shared<R: Runner + Clone>(
     Ok((backend(config, log), share))
 }
 
-/// Mounts `device` at [`MOUNT_POINT`] until the guard drops.
-fn mount<R: Runner + Clone>(runner: &R, device: &Device, access: Access) -> Result<Mounted<R>> {
-    fs::create_dir_all(MOUNT_POINT)?;
+/// Mounts `device` at `mount_point` ([`MOUNT_POINT`] outside the tests) until the guard drops.
+fn mount<R: Runner + Clone>(
+    runner: &R,
+    device: &Device,
+    access: Access,
+    mount_point: &Path,
+) -> Result<Mounted<R>> {
+    fs::create_dir_all(mount_point)?;
     // Timeshift unmounts whatever is at its mount point first; one left by a crashed helper
     // would be ours. Not mounted is fine.
-    let _ = run(runner, &["umount", MOUNT_POINT]);
-    let argv = mount_argv(&device.uuid, access);
+    let _ = run(runner, &["umount", &mount_point.to_string_lossy()]);
+    let argv = mount_argv(&device.uuid, access, mount_point);
     let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
     run(runner, &argv)?;
     Ok(Mounted {
         runner: runner.clone(),
+        mount_point: mount_point.to_owned(),
     })
 }
 
@@ -400,19 +417,28 @@ mod tests {
             .unwrap()
     }
 
+    /// A mount point of the test's own under the temp folder: the tests never touch
+    /// [`MOUNT_POINT`] (`/run` isn't writable to an unprivileged user, and the folder only
+    /// exists where Apsis is installed).
+    fn mount_point(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("apsis-mount-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir.join("backup")
+    }
+
     #[test]
     fn five_overlapping_readers_mount_once_and_the_writer_mounts_after_the_unmount() {
         let runner = FakeRunner::default();
-        let shared = Arc::new(SharedMount::<FakeRunner>::default());
+        let mount_point = mount_point("five");
+        let at = mount_point.display();
+        let shared = Arc::new(SharedMount::<FakeRunner>::at(mount_point.clone()));
         let device = device(BACKUP_UUID);
         let mut readers: Vec<_> = (0..5)
             .map(|_| shared.acquire(&runner, &device).unwrap())
             .collect();
         assert_eq!(shared.readers(), 5);
-        let ro = format!(
-            "mount -o ro,nosuid,nodev,noexec /dev/disk/by-uuid/{BACKUP_UUID} {MOUNT_POINT}"
-        );
-        let umount = format!("umount {MOUNT_POINT}");
+        let ro = format!("mount -o ro,nosuid,nodev,noexec /dev/disk/by-uuid/{BACKUP_UUID} {at}");
+        let umount = format!("umount {at}");
         // The first reader's: a precautionary umount, then the one read-only mount.
         assert_eq!(runner.lines(), [umount.clone(), ro.clone()]);
         // Four leave: still mounted.
@@ -424,19 +450,25 @@ mod tests {
         assert_eq!(shared.readers(), 0);
         assert_eq!(runner.lines(), [umount.clone(), ro.clone(), umount.clone()]);
         // The writer's read-write mount comes only after that umount.
-        let _writer = mount(&runner, &device, Access::ReadWrite).unwrap();
-        let rw = format!("mount -o rw,nosuid,nodev /dev/disk/by-uuid/{BACKUP_UUID} {MOUNT_POINT}");
+        let _writer = mount(&runner, &device, Access::ReadWrite, &mount_point).unwrap();
+        let rw = format!("mount -o rw,nosuid,nodev /dev/disk/by-uuid/{BACKUP_UUID} {at}");
         assert_eq!(runner.lines()[3..], [umount.clone(), rw]);
         // After the writer, a reader mounts again.
         drop(_writer);
         let _again = shared.acquire(&runner, &device).unwrap();
         assert_eq!(runner.lines().iter().filter(|l| **l == ro).count(), 2);
+        assert!(
+            mount_point.is_dir(),
+            "the mount point is made, under the temp folder"
+        );
+        let _ = fs::remove_dir_all(mount_point.parent().unwrap());
     }
 
     #[test]
     fn a_reader_for_another_device_is_refused_while_one_is_mounted() {
         let runner = FakeRunner::default();
-        let shared = Arc::new(SharedMount::<FakeRunner>::default());
+        let mount_point = mount_point("other");
+        let shared = Arc::new(SharedMount::<FakeRunner>::at(mount_point.clone()));
         let first = shared.acquire(&runner, &device(BACKUP_UUID)).unwrap();
         let other = device("11111111-1111-1111-1111-111111111111");
         assert!(matches!(
@@ -448,12 +480,13 @@ mod tests {
             shared.acquire(&runner, &other).is_ok(),
             "free once they left"
         );
+        let _ = fs::remove_dir_all(mount_point.parent().unwrap());
     }
 
     #[test]
     fn mount_is_by_uuid_and_read_only_unless_writing() {
         assert_eq!(
-            mount_argv("abcd", Access::ReadOnly),
+            mount_argv("abcd", Access::ReadOnly, Path::new(MOUNT_POINT)),
             [
                 "mount",
                 "-o",
@@ -462,6 +495,9 @@ mod tests {
                 MOUNT_POINT
             ]
         );
-        assert_eq!(mount_argv("abcd", Access::ReadWrite)[2], "rw,nosuid,nodev");
+        assert_eq!(
+            mount_argv("abcd", Access::ReadWrite, Path::new(MOUNT_POINT))[2],
+            "rw,nosuid,nodev"
+        );
     }
 }
