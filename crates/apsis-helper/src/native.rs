@@ -174,6 +174,7 @@ impl<R: Runner + Clone> SharedMount<R> {
     }
 
     /// Readers holding the mount.
+    #[cfg(test)]
     pub fn readers(&self) -> usize {
         self.lock().as_ref().map_or(0, |h| h.readers)
     }
