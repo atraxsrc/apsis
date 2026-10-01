@@ -81,13 +81,6 @@ struct Active {
 }
 
 /// The restore plan waiting at the ready prompt (see [`Running::ready`]).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
-    )
-)]
 struct ReadyPlan {
     job: Job,
     starter: u32,
@@ -98,13 +91,6 @@ struct ReadyPlan {
 /// What's known about the ready plan: who may restart or cancel it without a password, and
 /// how old it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
-    )
-)]
 pub struct ReadyInfo {
     pub snapshot: String,
     /// The uid that prepared it.
@@ -130,13 +116,6 @@ impl ReadyInfo {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
-    )
-)]
 impl ReadyPlan {
     fn info(&self) -> ReadyInfo {
         ReadyInfo {
@@ -335,26 +314,12 @@ impl State {
     }
 
     /// The ready plan, if one waits.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
-        )
-    )]
     pub fn ready(&self) -> Option<ReadyInfo> {
         self.lock_ready().as_ref().map(ReadyPlan::info)
     }
 
     /// Takes the ready plan out (to cancel, disarm or restart with it); the caller removes
     /// its files and then ends it with [`Ready::end`]. Writes are admitted again from here.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
-        )
-    )]
     pub fn take_ready(self: &Arc<Self>) -> Option<Ready> {
         let plan = self.lock_ready().take()?;
         self.activity.notify_waiters();
@@ -577,13 +542,6 @@ impl Running {
 }
 
 /// The ready plan, taken out of the state (see [`State::take_ready`]) to be ended.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
-    )
-)]
 pub struct Ready {
     state: Arc<State>,
     plan: ReadyPlan,

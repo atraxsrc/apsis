@@ -782,6 +782,53 @@ pub fn esp_needs(on_esp: EspSizes, restored: EspSizes) -> u64 {
     growth.saturating_add(largest).saturating_add(ESP_MARGIN)
 }
 
+/// The sizes of the kernel pairs on the ESP, for [`esp_needs`]'s `on_esp`: `None` if the
+/// current pair isn't there (nothing to compare with). A previous pair counts when both its
+/// files are there.
+#[must_use]
+pub fn sizes_on_esp(esp: &Path, root_uuid: &str) -> Option<EspSizes> {
+    let size = |file: BootFile| {
+        fs::metadata(esp.join(file.esp_path(root_uuid)))
+            .ok()
+            .map(|m| m.len())
+    };
+    let current = BootSizes {
+        kernel: size(BootFile::Kernel)?,
+        initrd: size(BootFile::Initrd)?,
+    };
+    let previous = match (
+        size(BootFile::PreviousKernel),
+        size(BootFile::PreviousInitrd),
+    ) {
+        (Some(kernel), Some(initrd)) => Some(BootSizes { kernel, initrd }),
+        _ => None,
+    };
+    Some(EspSizes { current, previous })
+}
+
+/// The sizes of the kernel pairs a boot refresh would write to the ESP, read from a tree's
+/// `boot` folder (the snapshot's `localhost/boot`), for [`esp_needs`]'s `restored`: what
+/// `vmlinuz` and `initrd.img` link to is the current pair, what the `.old` links link to the
+/// previous one. `None` if the current pair's links don't lead to files (then the check can't
+/// be made, and `refusal::check`'s `KernelIncomplete` is what refuses).
+#[must_use]
+pub fn sizes_in_boot(boot: &Path) -> Option<EspSizes> {
+    let linked = |name: &str| {
+        let target = fs::read_link(boot.join(name)).ok()?;
+        let file = target.file_name()?;
+        fs::metadata(boot.join(file)).ok().map(|m| m.len())
+    };
+    let current = BootSizes {
+        kernel: linked("vmlinuz")?,
+        initrd: linked("initrd.img")?,
+    };
+    let previous = match (linked("vmlinuz.old"), linked("initrd.img.old")) {
+        (Some(kernel), Some(initrd)) => Some(BootSizes { kernel, initrd }),
+        _ => None,
+    };
+    Some(EspSizes { current, previous })
+}
+
 /// # Errors
 ///
 /// [`Refusal::BootSpace`] if the ESP has less than `needs` bytes free.
@@ -2055,6 +2102,61 @@ pub(in crate::restore) mod tests {
         }),
     };
     const REAL_FREE: u64 = 361 * MIB;
+
+    /// The two size readers for the live check at "Restart now" (PLAN 6b.4): the ESP's four
+    /// files, and a tree's `/boot` links (the snapshot's). One kernel: no previous pair.
+    #[test]
+    fn the_sizes_are_read_from_the_esp_and_from_a_boot_folder() {
+        const ROOT_UUID: &str = "11111111-1111-1111-1111-111111111111";
+        let dir = temp_dir("esp-sizes");
+        let esp = dir.join("esp");
+        let kernels = esp.join(format!("EFI/Pop_OS-{ROOT_UUID}"));
+        fs::create_dir_all(&kernels).unwrap();
+        fs::write(kernels.join("vmlinuz.efi"), vec![1; 300]).unwrap();
+        fs::write(kernels.join("initrd.img"), vec![1; 5000]).unwrap();
+        assert_eq!(sizes_on_esp(&esp, ROOT_UUID), Some(one(sizes(300, 5000))));
+        fs::write(kernels.join("vmlinuz-previous.efi"), vec![1; 280]).unwrap();
+        fs::write(kernels.join("initrd.img-previous"), vec![1; 4800]).unwrap();
+        assert_eq!(
+            sizes_on_esp(&esp, ROOT_UUID),
+            Some(two(sizes(300, 5000), sizes(280, 4800)))
+        );
+        // No kernel on the ESP at all: nothing to compare with.
+        assert_eq!(sizes_on_esp(&dir.join("empty"), ROOT_UUID), None);
+
+        let boot = dir.join("root/boot");
+        fs::create_dir_all(&boot).unwrap();
+        fs::write(boot.join("vmlinuz-7.1.5-76070105-generic"), vec![2; 310]).unwrap();
+        fs::write(
+            boot.join("initrd.img-7.1.5-76070105-generic"),
+            vec![2; 5100],
+        )
+        .unwrap();
+        let symlink =
+            |target: &str, link: PathBuf| std::os::unix::fs::symlink(target, link).unwrap();
+        symlink("vmlinuz-7.1.5-76070105-generic", boot.join("vmlinuz"));
+        symlink("initrd.img-7.1.5-76070105-generic", boot.join("initrd.img"));
+        assert_eq!(sizes_in_boot(&boot), Some(one(sizes(310, 5100))));
+        fs::write(boot.join("vmlinuz-7.0.11-76070011-generic"), vec![2; 290]).unwrap();
+        fs::write(
+            boot.join("initrd.img-7.0.11-76070011-generic"),
+            vec![2; 4900],
+        )
+        .unwrap();
+        symlink("vmlinuz-7.0.11-76070011-generic", boot.join("vmlinuz.old"));
+        symlink(
+            "initrd.img-7.0.11-76070011-generic",
+            boot.join("initrd.img.old"),
+        );
+        assert_eq!(
+            sizes_in_boot(&boot),
+            Some(two(sizes(310, 5100), sizes(290, 4900)))
+        );
+        // A dangling link: no size, so no check possible.
+        fs::remove_file(boot.join("initrd.img-7.1.5-76070105-generic")).unwrap();
+        assert_eq!(sizes_in_boot(&boot), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn the_real_esp_has_room_for_a_restore_to_the_same_kernels() {

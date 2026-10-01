@@ -3617,3 +3617,78 @@ mounts the backup disk, so it isn't run in the tests; its pieces are, and apsis-
 through `operate` like a create.
 
 Gate: workspace tests, clippy `-D warnings` on all targets, fmt check: all clean.
+
+## 2026-10-02 - 6b helper slice: `RestartToRestore`, the arm and the disarm timer (step 3 item 6)
+
+Built tests first (core: the two ESP size readers on temp trees; helper: `arm::tests`, six
+tests on a temp root; the introspection with `RestartToRestore`). The method itself arms the
+real `/` and talks to logind, so its run is apsis-test's (check 1).
+
+**Core:**
+- **`esp::sizes_on_esp(esp, root_uuid)`** and **`esp::sizes_in_boot(boot)`**: the two
+  `EspSizes` for `esp_needs` at "Restart now" (6b.4), read live from the ESP's four files and
+  from the snapshot's `localhost/boot` links (`vmlinuz`, `initrd.img`, their `.old`). `None`
+  when the current pair isn't there; a previous pair counts only whole.
+- **`plan::TOO_OLD`** ("the preparation is too old") and **`plan::GONE`** ("the preparation is
+  gone"): the texts `RestartToRestore` (and `CancelRestore`, item 7) send as `InvalidInput`;
+  the applet maps them to 6b.8's lines. Not refusals of 6b.7, so not `RestoreRefused`.
+
+**Helper, `arm.rs`** (new):
+- `Paths::under(root)` / `Paths::system()`: the design's absolute paths (`unit::UNIT_PATH`,
+  `UNIT_WANTS_LINK`, `DROP_IN_PATH`, `HELPER_COPY`, `file::DIR`, `/system-update`,
+  `/etc/system-update`) under a root, so the tests arm a temp tree.
+- `arm(paths, helper_exe)`, 6b.5's order: unit, wants link, drop-in, helper copy (0755, from
+  `std::env::current_exe()`: the packaged helper that's running), `State::default()` saved,
+  `sync`, **then the link**, `sync`. A failure before the link leaves leftovers and no arm
+  (tested with a missing helper binary).
+- `disarm(paths)`: Apsis's link first, then the unit, wants link, drop-in, helper copy,
+  `state.json`, `request.json`; returns the names removed for the journal. **Another tool's
+  link is left where it is, and then so is everything else** (6b.6 step 1). Nothing there is
+  no error.
+- `clean_leftovers(paths)`: with Apsis's link, nothing (an arm is whole); without it, the
+  five arm files go. `request.json` is never its to judge (item 7 decides at start).
+- `link_state(path) -> UpdateLink` by `lstat` (Nothing, Link, Dangling, Other) for
+  `refusal::check_arming`; `is_armed(paths)`: the link points at the state folder.
+- **The disarm timer**: `systemd-run --quiet --on-active=10min --unit=apsis-disarm
+  --timer-property=AccuracySec=1s --property=Conflicts=shutdown.target
+  --property=Before=shutdown.target --description=.. <packaged helper> --disarm`. Transient,
+  this boot only; `Conflicts=shutdown.target` on the service, as 6b.5 wants. **The packaged
+  helper, not the copy**: the copy goes with the arm. Before each arm,
+  `systemctl stop apsis-disarm.timer` (ignored if none): a timer from an earlier arm whose
+  restart failed must not fire on this one. **`apsis-helper --disarm`** (`main.rs`, no D-Bus,
+  no tokio work) runs `disarm` on the system paths and journals what it removed, or "nothing
+  armed". How a window learns of a disarm is item 9's (`RestoreResult`): the helper process
+  that held the plan has already ended it `done`.
+
+**Helper, `service.rs`, `RestartToRestore(s snapshot)`:**
+- The name must parse; `State::ready()` must hold a plan for it (else `InvalidInput(GONE)`;
+  another snapshot's plan is its own `InvalidInput`); **no password for the plan's starter
+  uid**, polkit `restore` for anyone else; then `take_ready()`: from there the plan is this
+  call's and ends whatever happens.
+- `check_and_arm` (blocking): `Plan::load` (unreadable or another snapshot's: `GONE`),
+  `Plan::is_too_old(now)` (`TOO_OLD`), `check_system(root_needs, statvfs /)`, a separate
+  home: `/home` mounted and `findmnt`'s UUID the plan's (else `InvalidInput`), then its
+  needs against its `statvfs`; `esp::check_before_arming`; the ESP's needs from
+  `sizes_on_esp` and `sizes_in_boot` (the snapshot read on the shared read-only mount, which
+  a ready plan doesn't block) against `statvfs /boot/efi`; `check_arming` on both link names;
+  `check_pending`. Then `clean_leftovers`, the old timer stopped, `arm`, the new timer. A
+  timer that can't start is an error (6b.5's net is missing), and so undoes the arm.
+- Success: journal `armed; restarting`, the job ends `done` (announced before anything else),
+  then logind `Reboot(false)` over the helper's own system-bus connection (zbus `Proxy`, no
+  new crate). **If the `Reboot` call fails** it's known not to have begun: the timer is
+  stopped and the arm undone at once, and the error goes back.
+- **Any refusal or failure removes the plan** (`disarm` on the system paths removes the
+  files, and the job ends `stopped`). 6b.5 says a too-old plan "cleans up"; the same was
+  taken for a space or ESP refusal at "Restart now": the "Can't restore" dialog has only
+  Close, and a fresh Restore re-measures. **For the owner** if a refused "Restart now" should
+  keep the prompt instead.
+- Errors on the bus: `InvalidInput` (`TOO_OLD`, `GONE`, the home partition), `Failed` with
+  `restore refused: <word>` (`Error::RestoreRefused` through `encode_error`), or the text.
+- **Client**: `HelperClient::restart_to_restore(name)`.
+- Six more of the ready API's dead-code expectations went (`ReadyPlan`, `ReadyInfo`, its
+  builder, `State::ready`, `take_ready`, `Ready`). Left for item 7: `starter_left`; and
+  `READY_MAX_AGE`/`ReadyInfo::is_too_old`, which `RestartToRestore` doesn't use since
+  `Plan::is_too_old` on `prepared_at` is the one check (6b.5, DECISIONS 2026-10-01); to drop
+  or use in item 7.
+
+Gate: workspace tests, clippy `-D warnings` on all targets, fmt check: all clean.

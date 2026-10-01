@@ -10,6 +10,7 @@
 //! `mount` with a fixed argv, no shell. `WriteConfig` writes `/etc/apsis/config.toml`, nothing
 //! else. See `docs/ARCHITECTURE.md`.
 
+mod arm;
 mod check;
 mod native;
 mod polkit;
@@ -34,6 +35,17 @@ const IDLE: Duration = Duration::from_secs(60);
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--disarm") {
+        // The disarm timer's service (PLAN 6b.5): no D-Bus.
+        return match arm::disarm_from_timer() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("apsis-helper: disarm: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     match serve().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

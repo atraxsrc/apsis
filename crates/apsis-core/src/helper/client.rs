@@ -10,9 +10,9 @@ use std::future::Future;
 use super::names::{
     BUS_NAME, ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
     ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CHECK_RESTORE, METHOD_CREATE, METHOD_DELETE,
-    METHOD_DELETE_MANY, METHOD_JOB, METHOD_LIST, METHOD_READ_CONFIG, METHOD_RESTORE, METHOD_STOP,
-    METHOD_WRITE_CONFIG, OBJECT_PATH, OP_CREATE, OP_DELETE, OP_DELETE_MANY, OP_RESTORE,
-    SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
+    METHOD_DELETE_MANY, METHOD_JOB, METHOD_LIST, METHOD_READ_CONFIG, METHOD_RESTART_TO_RESTORE,
+    METHOD_RESTORE, METHOD_STOP, METHOD_WRITE_CONFIG, OBJECT_PATH, OP_CREATE, OP_DELETE,
+    OP_DELETE_MANY, OP_RESTORE, SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
 };
 use super::{
     WireCheckRestore, WireConfigInfo, WireListWithUsage3, check_delete_many, config_info_from_wire,
@@ -113,6 +113,23 @@ impl HelperClient {
         )
         .await
         .map(drop)
+    }
+
+    /// "Restart now" for the ready plan of the snapshot `name`: the helper re-checks, arms
+    /// the next boot and asks logind to restart. Returns once the restart is requested. No
+    /// password for the uid that prepared the plan.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInput`] with `restore::plan::TOO_OLD` or `restore::plan::GONE`,
+    /// [`Error::RestoreRefused`] with the refusal's word, or what the helper reported. After
+    /// any of them the plan is gone.
+    pub async fn restart_to_restore(&self, name: &str) -> Result<()> {
+        self.proxy()
+            .await?
+            .call::<_, _, ()>(METHOD_RESTART_TO_RESTORE, &(name,))
+            .await
+            .map_err(from_zbus)
     }
 
     /// Creates a snapshot and waits until it's done (this can take minutes).

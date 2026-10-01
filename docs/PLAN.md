@@ -1920,6 +1920,12 @@ Checks:
       of both link names, `check_pending`), then the arm in 6b.5's order (unit, wants link,
       drop-in, helper copy, `State::default()`, `sync`, the link), the disarm timer, logind
       `Reboot(false)`. Journal `armed; restarting`.
+      **Status (2026-10-02): done** (`arm.rs` in the helper: `arm`, `disarm`,
+      `clean_leftovers`, `link_state`, the `systemd-run` timer argv, `--disarm`;
+      `check_and_arm` and `reboot` in `service.rs`; `esp::sizes_on_esp`/`sizes_in_boot` and
+      `plan::TOO_OLD`/`GONE` in core; `HelperClient::restart_to_restore`). A refused
+      "Restart now" removes the plan (open for the owner). DECISIONS 2026-10-02
+      "RestartToRestore".
    7. **`CancelRestore`**, the stale plan, the disarm timer's service, the leftover cleanup at
       start.
    8. **`--apply-restore`**: the real `Runner` for `apsis_core::restore::apply::apply`: the

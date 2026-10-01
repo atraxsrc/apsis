@@ -25,14 +25,19 @@ use apsis_core::job::{self, JobKind, JobState, WireJob};
 use apsis_core::native::{Cancel, TooLate};
 use apsis_core::restore::dialog;
 use apsis_core::restore::filter::Home;
+use apsis_core::restore::plan::{self, Plan};
+use apsis_core::restore::refusal::{self, Refusal};
+use apsis_core::restore::{esp, space};
 use apsis_core::status::BY_UUID;
-use apsis_core::{Backend, Error, SnapshotList, parse_snapshot_name, validate_comment};
+use apsis_core::usage::fstype_at;
+use apsis_core::{Backend, Error, Runner, SnapshotList, parse_snapshot_name, validate_comment};
 use zbus::fdo::DBusProxy;
 use zbus::message::Header;
 use zbus::names::{BusName, UniqueName};
 use zbus::object_server::SignalEmitter;
 use zbus::{Connection, DBusError, interface};
 
+use crate::arm;
 use crate::check::{self, Live, SnapshotFiles};
 use crate::native::{self, SharedMount};
 use crate::polkit;
@@ -249,6 +254,92 @@ impl Helper {
                 prepare::prepare(&request, state, cancel).map(|_| String::new())
             },
         )
+    }
+
+    /// "Restart now" (PLAN 6b.5, 6b.9): re-checks the ready plan for `snapshot` (its age,
+    /// the space on each destination, the ESP's space and boot files, both update-link names,
+    /// a Pop!_OS upgrade), arms the next boot (unit, wants link, drop-in, helper copy,
+    /// `state.json`, sync, then `/system-update` last), starts the ten-minute disarm timer
+    /// and asks logind to reboot. No password for the uid that prepared the plan; polkit
+    /// `restore` for anyone else. The plan's job ends `done` right before the reboot. Any
+    /// refusal or failure removes the plan (the job ends `stopped`) and is the method's error:
+    /// `InvalidInput` with [`plan::TOO_OLD`] or [`plan::GONE`], `Failed` with
+    /// `restore refused: <word>`, or the failure's text.
+    async fn restart_to_restore(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+        snapshot: String,
+    ) -> Result<(), HelperError> {
+        let _call = self.state.call();
+        let caller = caller(&header)?;
+        let label = format!("restart-to-restore {snapshot:?} for {caller}");
+        let result = async {
+            if parse_snapshot_name(&snapshot).is_none() {
+                return Err(Error::InvalidSnapshotName(snapshot.clone()));
+            }
+            let info = self
+                .state
+                .ready()
+                .ok_or_else(|| Error::InvalidInput(plan::GONE.to_owned()))?;
+            if info.snapshot != snapshot {
+                return Err(Error::InvalidInput(format!(
+                    "the ready plan is for {}, not {snapshot}",
+                    info.snapshot
+                )));
+            }
+            let uid = unix_user(connection, &caller).await?;
+            if uid != info.starter {
+                authorize(connection, &caller, ACTION_RESTORE, true).await?;
+            }
+            // From here the plan is this call's: whatever happens, it ends.
+            let ready = self
+                .state
+                .take_ready()
+                .ok_or_else(|| Error::InvalidInput(plan::GONE.to_owned()))?;
+            let mount = Arc::clone(&self.mount);
+            let armed = blocking(move || {
+                let outcome = check_and_arm(&snapshot, &mount);
+                if outcome.is_err() {
+                    // Nothing may stay armed after a refusal; leftovers go too.
+                    match arm::disarm(&arm::Paths::system()) {
+                        Ok(removed) if !removed.is_empty() => {
+                            log(&format!("plan removed: {}", removed.join(", ")));
+                        }
+                        Ok(_) => {}
+                        Err(error) => log(&format!("couldn't remove the plan: {error}")),
+                    }
+                }
+                outcome
+            })
+            .await;
+            match armed {
+                Ok(()) => {
+                    log(&format!("{label}: armed; restarting"));
+                    ready.end(JobState::Done).wait().await;
+                    if let Err(error) = reboot(connection).await {
+                        // Known not to have begun: undo now rather than in ten minutes.
+                        let _ = blocking(|| {
+                            let _ =
+                                DirectRunner.run(&arm::stop_disarm_timer_argv().map(Into::into));
+                            arm::disarm(&arm::Paths::system()).map_err(Error::Io)
+                        })
+                        .await;
+                        return Err(error);
+                    }
+                    Ok(())
+                }
+                Err(error) => {
+                    ready.end(JobState::Stopped).wait().await;
+                    Err(error)
+                }
+            }
+        }
+        .await;
+        if let Err(error) = &result {
+            log(&format!("{label}: {}", describe_error(error)));
+        }
+        Ok(result?)
     }
 
     /// Starts a snapshot (polkit: `create`) and returns; `Finished("create", ..)` follows.
@@ -645,6 +736,119 @@ impl Helper {
     }
 }
 
+/// The live re-checks of "Restart now" (PLAN 6b.4, 6b.5, 6b.7) and the arm (PLAN 6b.5's
+/// order, then the disarm timer). The plan on disk must be `snapshot`'s and fresh.
+fn check_and_arm(snapshot: &str, mount: &Arc<SharedMount<DirectRunner>>) -> apsis_core::Result<()> {
+    let paths = arm::Paths::system();
+    let refused = |refusal: Refusal| Error::RestoreRefused(refusal.to_wire());
+    let plan = match Plan::load(&paths.state_dir) {
+        Ok(plan) => plan,
+        Err(error) => {
+            log(&format!("request.json: {error}"));
+            return Err(Error::InvalidInput(plan::GONE.to_owned()));
+        }
+    };
+    if plan.snapshot != snapshot {
+        return Err(Error::InvalidInput(plan::GONE.to_owned()));
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    if plan.is_too_old(now) {
+        return Err(Error::InvalidInput(plan::TOO_OLD.to_owned()));
+    }
+    // Space on each destination, from a fresh statvfs against the plan's needs.
+    let free_at = |point: &str| {
+        usage::of_mount_point(Path::new(point))
+            .ok_or_else(|| Error::Helper(format!("statvfs of {point} failed")))
+    };
+    space::check_system(plan.root_needs, free_at("/")?.free).map_err(refused)?;
+    if let Some(home) = &plan.separate_home {
+        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")?;
+        if fstype_at(&mountinfo, Path::new("/home")).is_none() || mount_uuid("/home")? != home.uuid
+        {
+            return Err(Error::InvalidInput(
+                "/home isn't the partition the plan was made with".to_owned(),
+            ));
+        }
+        space::check_system(home.needs, free_at("/home")?.free).map_err(refused)?;
+    }
+    // The ESP: its boot files, and its space for the boot refresh and a put-back.
+    let esp_dir = Path::new("/boot/efi");
+    esp::check_before_arming(esp_dir, Path::new("/"), &plan.root_uuid).map_err(refused)?;
+    {
+        let (backend, _shared) = native::open_shared(&DirectRunner, mount, log_lines)?;
+        let localhost = check::snapshot_dir(&backend.config().repo, snapshot).join("localhost");
+        let on_esp = esp::sizes_on_esp(esp_dir, &plan.root_uuid)
+            .ok_or_else(|| refused(Refusal::BootFiles(esp::CheckFailure::NoKernelLink)))?;
+        let restored = esp::sizes_in_boot(&localhost.join("boot"))
+            .ok_or_else(|| refused(Refusal::KernelIncomplete))?;
+        let needs = esp::esp_needs(on_esp, restored);
+        esp::check_esp_space(needs, free_at("/boot/efi")?.free).map_err(refused)?;
+    }
+    // The last checks before the link is made.
+    refusal::check_arming(
+        arm::link_state(&paths.link),
+        arm::link_state(&paths.etc_link),
+    )
+    .map_err(refused)?;
+    refusal::check_pending(&refusal::pop_upgrade_found(Path::new("/"))).map_err(refused)?;
+    // The arm.
+    let cleaned = arm::clean_leftovers(&paths)?;
+    if !cleaned.is_empty() {
+        log(&format!(
+            "leftovers removed before arming: {}",
+            cleaned.join(", ")
+        ));
+    }
+    let exe = std::env::current_exe()?;
+    let _ = DirectRunner.run(&arm::stop_disarm_timer_argv().map(Into::into));
+    arm::arm(&paths, &exe)?;
+    let timer: Vec<std::ffi::OsString> = arm::disarm_timer_argv(&exe)
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let started = DirectRunner.run(&timer)?;
+    if !started.success {
+        return Err(Error::Helper(format!(
+            "couldn't start the disarm timer: {}",
+            started.stderr.trim()
+        )));
+    }
+    Ok(())
+}
+
+/// The filesystem UUID of what's mounted at `point` (`findmnt`).
+fn mount_uuid(point: &str) -> apsis_core::Result<String> {
+    let argv: Vec<std::ffi::OsString> = [&native::FINDMNT_ROOT_UUID[..], &[point]]
+        .concat()
+        .iter()
+        .map(Into::into)
+        .collect();
+    let output = DirectRunner.run(&argv)?;
+    let uuid = output.stdout.trim();
+    if !output.success || uuid.is_empty() {
+        return Err(Error::Helper(format!("findmnt gave no UUID for {point}")));
+    }
+    Ok(uuid.to_owned())
+}
+
+/// logind's `Reboot(false)` over the system bus: the restart the arm is for.
+async fn reboot(connection: &Connection) -> apsis_core::Result<()> {
+    let proxy = zbus::Proxy::new(
+        connection,
+        "org.freedesktop.login1",
+        "/org/freedesktop/login1",
+        "org.freedesktop.login1.Manager",
+    )
+    .await
+    .map_err(|e| Error::Helper(format!("logind: {e}")))?;
+    proxy
+        .call::<_, _, ()>("Reboot", &(false,))
+        .await
+        .map_err(|e| Error::Helper(format!("logind refused the restart: {e}")))
+}
+
 /// How a job that succeeds ends (see [`Helper::start`]).
 enum Ending {
     /// `done`, the lock free.
@@ -846,8 +1050,8 @@ mod tests {
     use apsis_core::helper::names::{
         ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
         ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CHECK_RESTORE, METHOD_CREATE, METHOD_DELETE,
-        METHOD_DELETE_MANY, METHOD_JOB, METHOD_LIST, METHOD_READ_CONFIG, METHOD_RESTORE,
-        METHOD_STOP, METHOD_WRITE_CONFIG, SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
+        METHOD_DELETE_MANY, METHOD_JOB, METHOD_LIST, METHOD_READ_CONFIG, METHOD_RESTART_TO_RESTORE,
+        METHOD_RESTORE, METHOD_STOP, METHOD_WRITE_CONFIG, SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
     };
     use zbus::object_server::Interface;
 
@@ -869,6 +1073,7 @@ mod tests {
             METHOD_WRITE_CONFIG,
             METHOD_CHECK_RESTORE,
             METHOD_RESTORE,
+            METHOD_RESTART_TO_RESTORE,
         ] {
             assert!(
                 xml.contains(&format!("<method name=\"{method}\">")),
@@ -881,8 +1086,8 @@ mod tests {
                 "{signal}\n{xml}"
             );
         }
-        // Nothing else: exactly ten methods and two signals.
-        assert_eq!(xml.matches("<method ").count(), 10, "{xml}");
+        // Nothing else: exactly eleven methods and two signals.
+        assert_eq!(xml.matches("<method ").count(), 11, "{xml}");
         // `Restore(s snapshot, b restore_home, b safety_snapshot)`.
         assert!(
             xml.contains("<arg name=\"restore_home\" type=\"b\" direction=\"in\"/>"),

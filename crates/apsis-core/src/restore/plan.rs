@@ -20,6 +20,13 @@ pub const MAX_AGE_SECS: i64 = 30 * 60;
 /// How far ahead of the clock `prepared_at` may be before the plan's age counts as unknown.
 pub const MAX_FUTURE_SECS: i64 = 2 * 60;
 
+/// `RestartToRestore`'s refusal (as `InvalidInput`) for a plan older than [`MAX_AGE_SECS`]
+/// (PLAN 6b.5): the window says "The preparation is too old. Start the restore again."
+pub const TOO_OLD: &str = "the preparation is too old";
+/// `RestartToRestore`'s and `CancelRestore`'s refusal (as `InvalidInput`) when the helper has
+/// no plan for the snapshot (PLAN 6b.9): "The preparation is gone. Start the restore again."
+pub const GONE: &str = "the preparation is gone";
+
 const KEYS: [&str; 12] = [
     "snapshot",
     "snapshot_created",
