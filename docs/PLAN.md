@@ -424,8 +424,10 @@ restore can't bring back what the snapshot doesn't have.
 
 ## Phase 6b - Full-system restore (release 0.5.0)
 
-**Status: design approved with changes (owner, 2026-09-30); this version has them. Waiting for
-a final look before code.** Needs 0.4.1 first.
+**Status: design approved with changes (owner, 2026-09-30); this version has them. 0.4.1 is
+released; the core slice (6b.13 step 1) started 2026-10-01 on branch `restore-6b-core`.**
+Core so far: the filter and protect list, home detection (`apsis_core::restore::filter`), the
+restore's rsync argv (`apsis_core::restore::argv`).
 
 Goal: pick a snapshot, click Restore, and after a restart the system is back to that state.
 One person at the keyboard. The copy is rsync over `/` with excludes, like Timeshift's. When
@@ -515,7 +517,7 @@ file.
 | 2 | `- /boot/efi/***` | The ESP (vfat). Never written by rsync. The snapshot's copy of it is ignored. Only kernelstub writes the ESP, as on every kernel update, plus Apsis's own put-back (6b.6) |
 | 3 | `- /recovery/***` | Pop's recovery partition (vfat). Never touched: it's the way back (6b.11) |
 | 4 | `- /etc/fstab`, `- /etc/crypttab` | They describe the disks as they are now (cryptswap's partition, the ESP, other disks). The initramfs is rebuilt against them |
-| 5 | `- <mount point>/***` for every live mount point except `/` (and `/home` when home is restored), from `/proc/self/mountinfo` | Other disks, the backup disk wherever it's mounted (`/run/apsis/backup`, `/media/<user>/...`), `/boot/efi`, `/recovery`, a separate `/home`. rsync would otherwise go into them and `--delete` there |
+| 5 | `- <mount point>` (the plain anchored path, no `/***`: a mount point can be a file, and rsync never enters an excluded folder; owner, 2026-10-01) for every live mount point except `/` (and `/home` when home is restored), from `/proc/self/mountinfo` | Other disks, the backup disk wherever it's mounted (`/run/apsis/backup`, `/media/<user>/...`), `/boot/efi`, `/recovery`, a separate `/home`. rsync would otherwise go into them and `--delete` there |
 | 6 | `- /dev/***`, `- /proc/***`, `- /sys/***`, `- /run/***`, `- /tmp/***`, `- /mnt/***`, `- /media/***`, `- /lost+found`, `- /swapfile` | Pseudo and runtime filesystems, temporary files, other disks' mount places. Mostly also caught by 5 and the snapshot's list; stated once so it doesn't depend on either |
 | 7 | `- /timeshift/***` | A backup kept on the system disk itself (Timeshift's layout) |
 | 8 | `- /var/log/journal/***` | journald writes there during the apply; keeping it keeps the restore's own log (`journalctl -b -1 -u apsis-restore`) |
@@ -558,8 +560,14 @@ is kept.
   - backup disk: the safety snapshot's size + 1 GiB free;
   - system disk: the restore's transfer size + 1 GiB (or 2% of the disk, whichever is more)
     free on `/`. This is an upper bound: rsync also frees space as it deletes.
+  - **every destination partition** (owner, 2026-10-01): when home is restored and `/home` is
+    a separate mount, the part of the transfer that lands under `/home` is checked against
+    the free space of `/home`'s filesystem (same margin), and only the rest against `/`. Not
+    a refusal by itself: a separate `/home` is restored like any other (6b.2 rule 5), and only
+    a short partition refuses, with the system-disk line.
 - **Checked again at "Restart now"** (the free space can change while the prompt waits): a
-  `statvfs` of `/` against the need recorded in `request.json`. Everything is checked **before the
+  `statvfs` of `/` (and of a separate `/home` being restored) against the needs recorded in
+  `request.json`. Everything is checked **before the
   restart**. Short: refused with **one line**, and nothing is armed:
   - "Not enough space on the backup disk for a safety snapshot (needs 14 GB, 9 GB free)."
   - "Not enough space on the system disk to restore (needs 6 GB, 3 GB free)."
@@ -596,7 +604,11 @@ written by this restore), both fsynced before the step that depends on them.
 2. **Backup disk.** Wait up to 60 s for `/dev/disk/by-uuid/<uuid>` (USB disks are slow at
    boot), mount it read-only (`ro,nosuid,nodev,noexec`) at `/run/apsis/backup`, then the delete's
    path checks (`O_NOFOLLOW` walk, `info.json` a regular file, nothing mounted inside) and the
-   refusals of 6b.7 once more. Any of these fails: **never started** (6b.10).
+   refusals of 6b.7 once more. **A separate `/home`** (owner, 2026-10-01): when home is
+   restored and `/home` was a separate mount when the plan was made, `/home` must be mounted
+   now, and its filesystem UUID must be the one in `request.json`. Otherwise rsync would
+   write the home files onto the system disk under `/home`, or into another disk. Any of
+   these fails: **never started** (6b.10), before rsync runs.
 3. **Pass 1.** `attempts += 1`, `written = true`, fsync; then:
    ```
    rsync -a -A -X --numeric-ids --delete --force --sparse --stats --info=progress2 \
@@ -985,8 +997,9 @@ the one lock (a ready plan counts as held for everything but its own restart and
 - The starter's uid (`GetConnectionUnixUser`) is kept in `request.json`, so it survives the
   helper's idle exit.
 - `/var/lib/apsis/restore/` (root, 0700): `request.json` (snapshot, backup UUID, home choice,
-  format, safety snapshot name, root UUID, running kernel, space needed, starter uid,
-  prepared-at), `restore.filter`, `state.json`, `rsync-log`, `esp-backup/`, `result.json`, and
+  format, safety snapshot name, root UUID, running kernel, space needed per destination
+  partition, the separate `/home`'s filesystem UUID when home is restored and `/home` is its
+  own mount (else none), starter uid, prepared-at), `restore.filter`, `state.json`, `rsync-log`, `esp-backup/`, `result.json`, and
   the helper copy while armed. serde_json, already a dependency.
 - `apsis-helper --apply-restore` is the offline entry point. It uses no D-Bus.
 - Journal: `restore "2026-09-25_11-28-00" keep-home safety for :1.42: ready`, `armed;
@@ -999,7 +1012,7 @@ the one lock (a ready plan counts as held for everything but its own restart and
 
 | state | when | what happens | counted as an attempt? |
 |---|---|---|---|
-| **never started** | Step 1 or 2 fails: the backup disk isn't there after 60 s, the mount fails, a path check or refusal fails, the snapshot is gone | Nothing is written in this boot. Remove `/system-update`, the unit and the helper copy; write `result.json` `not-started` with the reason; boot normally. The boot screen says "The restore didn't start: the backup disk wasn't found. Starting normally." After login: the result line (6b.8) | **No** |
+| **never started** | Step 1 or 2 fails: the backup disk isn't there after 60 s, the mount fails, a path check or refusal fails, the snapshot is gone, a separate `/home` being restored isn't mounted or has another UUID than the plan's | Nothing is written in this boot. Remove `/system-update`, the unit and the helper copy; write `result.json` `not-started` with the reason; boot normally. The boot screen says "The restore didn't start: the backup disk wasn't found. Starting normally." After login: the result line (6b.8) | **No** |
 | **copy broke** | Pass 1 exits with anything but 0, 23 or 24 (disk pulled out, I/O error, disk full), or the power goes during pass 1 | `/system-update` stays. The boot screen says "The restore was interrupted. Restarting to try again (attempt 2 of 3)." and restarts; the next boot runs from step 1 (rsync picks up where the files differ) | **Yes** |
 | **boot files failed** | Step 4 or 6 | The ESP files are put back, the protected kernel is kept, `boot-kept` (or `boot-broken`), end (6b.6) | Not retried |
 
@@ -1082,9 +1095,11 @@ No root (run by Claude):
   from the kernelstub configuration.
 - **Home detection** from `exclude.list` (Apsis v2 with and without `+ /home/**`, Timeshift
   per-user lines, `/root` only).
-- **Space**: parsing `--stats`; both thresholds; the re-check at restart.
+- **Space**: parsing `--stats`; both thresholds; the re-check at restart; a separate `/home`
+  being restored is checked on its own filesystem.
 - **Apply state machine** (fake runner and fake ESP, temp root): never started does not count
-  and removes the link; copy broke counts and keeps it; the third break gives up with `failed`;
+  and removes the link (also for a separate `/home` that's missing or has another UUID, with
+  rsync never run); copy broke counts and keeps it; the third break gives up with `failed`;
   23 vs 11; ESP backup, a failed check puts the files back and keeps the protected kernel
   (`boot-kept`); a put-back that doesn't compare gives `boot-broken`; cleanup only after a
   passed check and only when the snapshot lacks the kernel; a power cut at each step

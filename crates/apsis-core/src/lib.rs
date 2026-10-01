@@ -12,6 +12,7 @@ pub mod job;
 mod model;
 pub mod native;
 pub mod progress;
+pub mod restore;
 mod runner;
 pub mod settings;
 pub mod status;

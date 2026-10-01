@@ -1738,3 +1738,78 @@ The owner ran the four apsis-test checks of PLAN's 0.4.1 section and reported al
 Version 0.4.1 in `Cargo.toml`, CHANGELOG, metainfo and the deb changelog; tag `v0.4.1`. The
 version was set by hand, not with `just tag`: that recipe tags the bare version, and the
 repo's tags are `v`-prefixed.
+
+## 2026-10-01 - 6b core, part 1: the restore filter
+
+`apsis_core::restore::filter` (PLAN 6b.2, 6b.3), on branch `restore-6b-core`. No root, nothing
+outside the repo. What the plan didn't say:
+
+- **Excludes are written once.** Groups 1 to 10 skip a rule that's already in the list (the ESP
+  and `/recovery` are both a fixed rule and a mount; `/dev`, `/proc`, `/sys`, `/run` are both
+  mounts and rule 6). The first match wins, so a repeat changes nothing. The snapshot's own
+  `exclude.list` (group 11) is appended line for line, repeats included; only empty lines are
+  dropped.
+- **Mount points are escaped.** `*`, `?`, `[` and `\` in a mount point get a `\` in front, so
+  the rule matches only that path. Checked with rsync 3.2.7 on temp folders: the escaped folder
+  was kept and a lookalike that the unescaped pattern would also match was deleted. A mount
+  point with a line break can't be written as one line of a filter file (rsync ends a line at
+  `\n` and `\r`), so the filter isn't built and the restore is refused.
+- **The protected kernel's version is checked** before it goes into a rule: letters, digits and
+  `.-_+~` only, so it can't be a path or a pattern.
+- **`has_home`**: any `exclude.list` line that starts with `+ /home/`. That covers Apsis's
+  `+ /home/**`, Timeshift's per-user lines and "hidden files only", and also a single kept
+  folder under `/home` (its `+ /home/` parent line).
+- **The package test** reads the assets from `crates/apsis/Cargo.toml`'s
+  `[package.metadata.deb]` and checks each installed path against the protect list.
+- **Open, for the owner: a mount point that is a file.** `- <mount>/***` only matches a folder
+  (checked with rsync 3.2.7: a plain file at that path was deleted). A file bind mount (a
+  container's `/etc/resolv.conf`, some sandboxes) is then not excluded: rsync would try to
+  replace or delete it. `- <mount>` matches a file or a folder, and rsync never enters an
+  excluded folder, so it protects the same things plus that case. The code follows the plan
+  (`/***`) until decided.
+
+## 2026-10-01 - 6b core: mount rules are the plain path (owner), the restore argv
+
+- **Rule 5 is `- <mount point>`, not `- <mount point>/***` (owner).** This closes the open
+  point of the entry above. Checked with rsync 3.2.7 on temp folders, `-a --delete --force
+  --exclude-from`:
+  - `- /etc/bound/***`: a plain file `/etc/bound` on the receiver was deleted. `/***` only
+    matches a folder.
+  - `- /etc/bound`: the file was kept. `- /data`: the folder and everything in it were kept
+    (rsync never enters an excluded folder).
+  - rsync then says `cannot delete non-empty directory: etc` for a parent the snapshot doesn't
+    have, and still exits 0.
+  The fixed rules (2, 3, 6 to 10) keep their `/***` as in the plan. A mount is now listed
+  beside them (`- /dev` and `- /dev/***`); the first match wins, so the pair is harmless.
+- **Escaping follows from that.** rsync reads `\` as an escape only in a rule that has a
+  wildcard character. A mount rule no longer ends in `/***`, so a mount point is escaped only
+  when it has `*`, `?` or `[` itself (then those and each `\` get a `\`); otherwise it's written
+  as it is. Checked with rsync 3.2.7: `- /srv/a\*b` kept `a*b` and deleted `aXb`; `- /srv/c\d`
+  kept the folder named `c\d` and deleted `cd`.
+- **The restore argv** (`restore::argv::rsync`, PLAN 6b.6 step 3) came forward from later in
+  the slice, for its tests: exact for both formats; never `--delete-excluded`, `-L`, `-H`,
+  `--link-dest` or the `--copy-*` options. One test holds both sides: the restore has
+  `--delete` without `--delete-excluded`, and create still has `--delete-excluded`.
+- **The target's own mount**: `/` never gets a rule, also when the mount table lists it more
+  than once (a stacked root). The filter has no other target: its rules are anchored at the
+  transfer root, so the same file works against `/mnt/` in the recovery steps (6b.11).
+- **A separate `/home`**: the plan decides it (6b.2 rule 5, 6b.3). Kept: excluded like any
+  other disk, never entered. Restored: `/home` is the one mount without a rule, so rsync
+  restores into that partition; mounts below it keep theirs. Not a refusal (6b.7 lists
+  `/boot`, `/usr` and `/var` only). Two things the plan doesn't say are with the owner: the
+  space check for a restored separate `/home`, and a `/home` that isn't mounted at apply time.
+
+## 2026-10-01 - 6b: a separate `/home` that is restored (owner)
+
+Two gaps in the plan, both decided by the owner; in PLAN 6b.4, 6b.6 step 2, 6b.9, 6b.10 and
+6b.12. Not built yet: each comes with its part of the core slice (space parsing, the plan
+file, the apply state machine).
+
+- **Space is checked on every destination partition.** When home is restored and `/home` is
+  its own mount, what lands under `/home` is checked against that filesystem's free space, the
+  rest against `/`. A separate `/home` is not a refusal.
+- **A missing `/home` is "never started".** The plan file records the separate `/home`'s
+  filesystem UUID. At apply time, when home is restored and `/home` was a separate mount at
+  plan time, `/home` must be mounted with that UUID. If not, the apply stops before rsync
+  runs: otherwise the home files would land on the system disk under `/home`, or in another
+  disk mounted there.
