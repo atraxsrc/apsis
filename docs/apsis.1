@@ -1,6 +1,6 @@
 .\" SPDX-License-Identifier: GPL-3.0-only
 .\" Man page for apsis, written directly in roff. Check with: man -l docs/apsis.1
-.TH APSIS 1 "2026-09-30" "apsis 0.4.0" "User Commands"
+.TH APSIS 1 "2026-10-01" "apsis 0.4.2" "User Commands"
 .\" No hyphenation: action names and paths must stay whole.
 .nh
 .SH NAME
@@ -79,7 +79,8 @@ rsync runs at idle I/O priority and nice 19.
 .TP
 .B Delete
 Delete the selected snapshots (a dialog asks first).
-Several are deleted one at a time; it stops at the first failure and says which were deleted.
+Several are deleted as one job, in list order, with the password asked once; it stops at the
+first failure and says which were deleted and which were not.
 .TP
 .BR Ctrl+R ", " F5
 Refresh the list.
@@ -182,9 +183,10 @@ The polkit actions below.
 .SH SECURITY
 The applet runs as the user and never as root.
 .B apsis\-helper
-checks each call with polkit, against the caller's D\-Bus name, and runs one operation at a
-time.
-It mounts the backup disk (by UUID, nosuid, nodev) for the length of one call, read\-only
+checks each call with polkit, against the caller's D\-Bus name, and runs one write (a create,
+a delete, a settings save) at a time; lists share a read\-only mount and run at the same time
+as each other, and a write waits for them (up to 15 seconds) before it mounts read\-write.
+It mounts the backup disk (by UUID, nosuid, nodev) for the length of the call, read\-only
 except for a create or a delete.
 A delete only removes a folder named like a snapshot under
 .I timeshift/snapshots/

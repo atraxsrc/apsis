@@ -1738,3 +1738,52 @@ The owner ran the four apsis-test checks of PLAN's 0.4.1 section and reported al
 Version 0.4.1 in `Cargo.toml`, CHANGELOG, metainfo and the deb changelog; tag `v0.4.1`. The
 version was set by hand, not with `just tag`: that recipe tags the bare version, and the
 repo's tags are `v`-prefixed.
+
+## 2026-10-01 - 0.4.2 built: reads share, writes wait, one bulk-delete job
+
+Built as designed in PLAN "0.4.2" (restore-6b-core's copy; main's PLAN doesn't carry the
+design), on `release-0.4.2` from `v0.4.1`. Unattended session; nothing run on apsis-test.
+
+- **Helper `State`**: `read()` admits a reader (a count, no job, no `JobChanged`); `begin()`
+  is async: it takes the write lock at once (so new readers are refused from then on, writer
+  priority) and waits for the readers in, up to `WRITE_WAIT` = 15 s, then gives up `Busy`
+  with the lock freed. `Running::end(state)` takes the job out, frees the lock, then
+  announces; `State::end` is gone, so no path can announce before releasing. A `Running`
+  dropped unended (a panic) frees the lock silently.
+- **Shared mount** (`native::SharedMount`): refcount under a mutex keyed by the device UUID;
+  the first reader mounts `ro`, the last out drops the `Mounted` (the unmount). A reader whose
+  config names another device while one is mounted is refused with a "changed" error (only a
+  hand edit of `config.toml` can do that: `WriteConfig` is a write and waits for readers). In
+  `list` the `Reading` guard is dropped after the mount share, so a write waiting on the
+  readers' count finds the device unmounted. The write's own `open` keeps its precautionary
+  `umount` first.
+- **`JobKind::List` removed** from core (not only never sent): `Job()` can't report a list,
+  and the applet's matches can't depend on one. `JobKind::DeleteMany` (`delete-many`) added;
+  `JobKind::changes_the_list()` is what the applet lists on. A 0.4.1 panel process still
+  running sees `delete-many` as an unknown kind, which `job::from_wire` treats as idle.
+- **`DeleteMany`**: `check_delete_many` in core (two or more, each a snapshot name, none
+  repeated), run by the client before the call and by the helper again. Each name is checked
+  against the fresh list as it's reached (as `Delete` does), not all up front: a stale name
+  from the window's list stops the job there and the message says what went before it. The
+  failure travels as `Error::DeleteManyStopped { deleted, failed, left, reason }`, encoded
+  `delete stopped: deleted=a,b failed=c left=d reason=<encoded reason>` (names have no spaces
+  or commas; the reason is last so it may hold anything), so a disk removed mid-job keeps its
+  kind inside. `State::step` announces every step (no throttle: steps are seconds apart).
+- **Applet**: `helper: Option<HelperClient>` in the model, made by `connect()` at start
+  (`Message::Connected`); the window's list and job poll, and the applet's background list,
+  run from `on_connected`. The job subscription is `Subscription::run_with` on a
+  `JobSource { generation, client }` hashed by generation; the stream ends in
+  `Message::BusLost`, which drops the client and reconnects. Between a bus drop and the
+  reconnect a task connects for itself (`helper(link)`), the only time a process has a
+  second name, and only briefly. `on_job` lists only when a create, delete or delete-many
+  ended (`helper_busy` no longer re-lists on any end); the 5 s `BusyRetry` stays for a Busy
+  from a write. The "Deleting 2 of 4: …" step comes from the helper's `JobChanged.snapshot`
+  looked up in the operation's names (the window's own `JobChanged` is stored in `job` too).
+- **Desktop entry**: `Exec=apsis` (the `%F` backlog item, one line).
+- **Docs**: CHANGELOG, metainfo, deb changelog, man page, README, and ARCHITECTURE's helper
+  table and call order (the lock rule is a fact the restore relies on, so it's recorded
+  there). PLAN's 0.4.2 section lives on restore-6b-core; main must be merged into
+  restore-6b-core after 0.4.2 is released.
+- **Not done here**: check 13 on apsis-test (both monitors on: one `delete-many` job, then
+  one `list` per process, none refused), the .deb and lintian (`just deb` needs the network
+  and wasn't run), the tag.

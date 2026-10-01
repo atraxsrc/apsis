@@ -22,7 +22,7 @@ Apsis takes snapshots of your system, the way Timeshift does, and lives in the C
 The panel shows when the last snapshot was taken and how full the backup disk is; the window
 creates, lists and deletes snapshots and holds the settings.
 
-> **Status:** 0.4.1. Apsis takes rsync snapshots itself and doesn't need Timeshift. It uses
+> **Status:** 0.4.2. Apsis takes rsync snapshots itself and doesn't need Timeshift. It uses
 > Timeshift's layout on the backup disk, so snapshots Timeshift made keep working in Apsis
 > (and the other way round). Manual only: there is no schedule, and a snapshot is only deleted
 > when you delete it. Restoring the whole system comes in 0.5.0.
@@ -108,7 +108,8 @@ any `*.apsis-before-*` file next to an original, is yours and can be deleted by 
    time left, and **Stop** if you change your mind.
 
 To delete: select one or more snapshots (Ctrl-click or Shift-click for several), **Delete**,
-confirm. A dimmed "Interrupted snapshot" row is what's left of a snapshot that was cut off
+confirm. Several are deleted in one go, in list order, and your password is asked once; if one
+fails, the rest are left alone and the status line says which were deleted. A dimmed "Interrupted snapshot" row is what's left of a snapshot that was cut off
 (power loss, a crash); the next snapshot removes it, or delete it yourself.
 
 **Why does it ask for my password?** Snapshots touch system files, so creating, deleting and
