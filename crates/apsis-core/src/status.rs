@@ -469,6 +469,7 @@ mod tests {
             created,
             tags: vec![Tag::OnDemand],
             comment: None,
+            rsync_flags: None,
         }
     }
 

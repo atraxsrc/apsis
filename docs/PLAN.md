@@ -1808,7 +1808,21 @@ Checks:
    refresh, the unit, pop-upgrade-init), 6b.7 (the new refusals), 6b.9 (`Helper3`, the list's
    format field, the lock rule, the ready plan) and 0.4.2 below (the bulk delete). What the
    slice builds, in order, each part with its tests first:
-   1. **Core additions** (no root): `restore::unit` gets the drop-in's text and path;
+   1. **Core additions** (no root). **Status (2026-10-01, unattended session, commit on
+      restore-6b-core):** done: `restore::unit` (new module: the unit's and the drop-in's
+      texts and paths, byte-exact tests), the drop-in in `filter::PROTECTED` (6 entries; the
+      package test and the real-rsync protect test pass), `refusal::pop_upgrade_found`
+      (`lstat` of the three names under a root) + `refusal::check_pending` +
+      `Refusal::PopUpgradePending`, `refusal::crypttab_differs` + `Refusal::CrypttabDiffers`,
+      `Snapshot::rsync_flags` with `helper::WireSnapshot3`/`WireList3` and their
+      `to_wire3`/`from_wire3` (types and serialisation only; `Helper2`'s `(sss)` untouched
+      until the helper moves), `native::info::is_old_format(&str)`, and
+      `apply::exit_code(End, restart_failed)`. Not done (the helper slice proper, or waiting
+      on check 0.4): `KernelIncomplete`'s hook-flag rule, `refresh_boot`'s contract, the
+      `Helper3` names, the `CheckRestore`/`RestoreResult` wire types, `Refusal`'s words on
+      the wire, `JobKind::Restore`, the ready plan. The design of the drop-in (text, path,
+      protection) is built as written and stands or falls with check 0.4c.
+      The list as designed: `restore::unit` gets the drop-in's text and path;
       `filter::PROTECTED` gets the drop-in (6 entries; the package test still passes);
       `refusal::check_pending` and `Refusal::PopUpgradePending` (the three Pop names);
       `refusal::crypttab_differs` with the normalisation of 6b.7; `KernelIncomplete` reads the

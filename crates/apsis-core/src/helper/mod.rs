@@ -3,7 +3,9 @@
 //! Talking to `apsis-helper`, the root D-Bus service that does the snapshot work for the applet.
 //!
 //! - [`names`]: the shared bus, interface, error and polkit names.
-//! - [`WireList`] and [`WireListWithUsage`]: a snapshot list and the backup disk's usage.
+//! - [`WireList`] and [`WireListWithUsage`]: a snapshot list and the backup disk's usage
+//!   (`Helper2`); [`WireList3`] and [`WireListWithUsage3`] carry each snapshot's format too
+//!   (`Helper3`, 0.5.0).
 //! - [`WireConfigInfo`] and [`WireConfig`]: what `ReadConfig` returns and `WriteConfig` takes.
 //! - [`crate::job::WireJob`]: what `Job` returns and `JobChanged` carries.
 //! - [`encode_error`] / [`decode_error`]: how errors keep their kind across the bus.
@@ -27,6 +29,13 @@ use crate::usage::DiskUsage;
 /// empty comment means none.
 pub type WireSnapshot = (String, String, String);
 
+/// One snapshot on the bus as `Helper3` (0.5.0) lists it: `(name, tags, comment,
+/// rsync_flags)`. The fourth is the raw `apsis-rsync-flags` string from its `info.json`,
+/// `""` when the key is missing (Timeshift's, Apsis 0.4.0 and older); the applet asks core
+/// ([`crate::native::info::is_old_format`]) what it means. A string, not a bool, so a later
+/// flag change (`-H`, 0.5.x) needs no wire change.
+pub type WireSnapshot3 = (String, String, String, String);
+
 /// A snapshot list on the bus, D-Bus type `(sssa(sss)asas)`: `(device, uuid, mode, snapshots,
 /// warnings, leftovers)`. Empty strings mean "none"; mode is `btrfs`, `rsync` or empty.
 pub type WireList = (
@@ -38,7 +47,81 @@ pub type WireList = (
     Vec<String>,
 );
 
-/// A [`SnapshotList`] as the helper sends it.
+/// A snapshot list on the bus as `Helper3` sends it, D-Bus type `(sssa(ssss)asas)`: as
+/// [`WireList`], with each snapshot's format ([`WireSnapshot3`]).
+pub type WireList3 = (
+    String,
+    String,
+    String,
+    Vec<WireSnapshot3>,
+    Vec<String>,
+    Vec<String>,
+);
+
+/// What `Helper3`'s `List` returns, D-Bus type `((sssa(ssss)asas)a{st})`: the list and the
+/// usage.
+pub type WireListWithUsage3 = (WireList3, WireUsage);
+
+/// A [`SnapshotList`] as `Helper3` sends it, with each snapshot's format.
+#[must_use]
+pub fn to_wire3(list: &SnapshotList) -> WireList3 {
+    let (device, uuid, mode, _, warnings, leftovers) = to_wire(list);
+    let snapshots = list
+        .snapshots
+        .iter()
+        .map(|s| {
+            (
+                s.name.clone(),
+                s.tags.iter().map(|t| t.letter()).collect(),
+                s.comment.clone().unwrap_or_default(),
+                s.rsync_flags.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    (device, uuid, mode, snapshots, warnings, leftovers)
+}
+
+/// The [`SnapshotList`] `Helper3` sent, checked again; each snapshot keeps its format (`""`
+/// is none).
+///
+/// # Errors
+///
+/// As [`from_wire`].
+pub fn from_wire3(wire: WireList3) -> Result<SnapshotList> {
+    let (device, uuid, mode, snapshots, warnings, leftovers) = wire;
+    let (snapshots, flags): (Vec<WireSnapshot>, Vec<String>) = snapshots
+        .into_iter()
+        .map(|(name, tags, comment, flags)| ((name, tags, comment), flags))
+        .unzip();
+    let mut list = from_wire((device, uuid, mode, snapshots, warnings, leftovers))?;
+    for (snapshot, flags) in list.snapshots.iter_mut().zip(flags) {
+        snapshot.rsync_flags = non_empty(flags);
+    }
+    Ok(list)
+}
+
+/// A [`SnapshotList`] with its disk usage, as `Helper3` sends it.
+#[must_use]
+pub fn to_wire_with_usage3(list: &SnapshotList) -> WireListWithUsage3 {
+    let (_, usage) = to_wire_with_usage(list);
+    (to_wire3(list), usage)
+}
+
+/// The [`SnapshotList`] and disk usage `Helper3` sent (the usage as [`from_wire_with_usage`]
+/// reads it).
+///
+/// # Errors
+///
+/// As [`from_wire`].
+pub fn from_wire_with_usage3(wire: WireListWithUsage3) -> Result<SnapshotList> {
+    let (list, usage) = wire;
+    let mut list = from_wire3(list)?;
+    list.usage = from_wire_with_usage((to_wire(&SnapshotList::default()), usage))?.usage;
+    Ok(list)
+}
+
+/// A [`SnapshotList`] as the helper sends it (`Helper2`: without the snapshots' format, which
+/// [`from_wire`] reads back as none).
 #[must_use]
 pub fn to_wire(list: &SnapshotList) -> WireList {
     let mode = match list.mode {
@@ -98,6 +181,7 @@ pub fn from_wire(wire: WireList) -> Result<SnapshotList> {
                 created,
                 tags,
                 comment: non_empty(comment),
+                rsync_flags: None,
             })
         })
         .collect::<Result<_>>()?;
@@ -272,6 +356,7 @@ mod tests {
             created: parse_snapshot_name(name).unwrap(),
             tags: vec![Tag::OnDemand],
             comment: None,
+            rsync_flags: None,
         };
         SnapshotList {
             device: Some("/dev/sdX1".to_owned()),
@@ -298,6 +383,47 @@ mod tests {
 
         let empty = SnapshotList::default();
         assert_eq!(from_wire(to_wire(&empty)).unwrap(), empty);
+    }
+
+    /// `Helper3`'s list carries each snapshot's format as the raw flags string; `Helper2`'s
+    /// drops it.
+    #[test]
+    fn the_format_survives_the_bus_as_the_raw_flags_string() {
+        let mut list = sample();
+        list.snapshots[0].rsync_flags = Some("-aAX --numeric-ids".to_owned());
+        list.snapshots[1].rsync_flags = None;
+        list.snapshots[2].rsync_flags = Some("-aHAX --numeric-ids".to_owned());
+        let wire = to_wire3(&list);
+        assert_eq!(wire.3[0].3, "-aAX --numeric-ids");
+        assert_eq!(wire.3[1].3, "", "no key: an empty string on the bus");
+        assert_eq!(
+            wire.3[2].3, "-aHAX --numeric-ids",
+            "a later format travels as is"
+        );
+        assert_eq!(from_wire3(wire).unwrap(), list);
+        // The applet reads the format from the string with core's rule.
+        let old = |flags: &str| crate::native::info::is_old_format(flags);
+        assert!(!old("-aAX --numeric-ids"));
+        assert!(old(""), "no key is the old format");
+        assert!(!old("-aHAX --numeric-ids"));
+        assert!(old("-a --numeric-ids"));
+        // With the usage.
+        list.usage = DiskUsage::from_statvfs(1000, 400, 350, 4096);
+        assert_eq!(
+            from_wire_with_usage3(to_wire_with_usage3(&list)).unwrap(),
+            list
+        );
+        // Helper2's list has no room for it: none on arrival.
+        let mut without = list.clone();
+        without.usage = None;
+        for s in &mut without.snapshots {
+            s.rsync_flags = None;
+        }
+        assert_eq!(from_wire(to_wire(&list)).unwrap(), without);
+        // Bad names and tags are refused as before.
+        let mut bad = to_wire3(&list);
+        bad.3[0].0 = "--help".to_owned();
+        assert!(matches!(from_wire3(bad), Err(Error::Helper(_))));
     }
 
     #[test]

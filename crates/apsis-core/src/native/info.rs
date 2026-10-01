@@ -60,6 +60,20 @@ pub struct Info {
     pub rsync_flags: Option<String>,
 }
 
+/// The old-format rule as a function of the raw `apsis-rsync-flags` string, as the list
+/// carries it over the bus (`""` when the key is missing): made without ACLs and extended
+/// attributes unless a short-flag word names both `A` and `X`. A later flag (`-H`, 0.5.x)
+/// changes the string, not this rule.
+#[must_use]
+pub fn is_old_format(rsync_flags: &str) -> bool {
+    let short_flags = |flag: char| {
+        rsync_flags
+            .split(' ')
+            .any(|word| !word.starts_with("--") && word.starts_with('-') && word.contains(flag))
+    };
+    !(short_flags('A') && short_flags('X'))
+}
+
 impl Info {
     /// The tags Apsis knows. Unknown words are dropped (they're kept in [`Info::tags`]).
     #[must_use]
@@ -68,17 +82,10 @@ impl Info {
     }
 
     /// Made without ACLs and extended attributes: there's no [`RSYNC_FLAGS_KEY`], or it names
-    /// neither.
+    /// neither ([`is_old_format`]).
     #[must_use]
     pub fn is_old_format(&self) -> bool {
-        let short_flags = |flag: char| {
-            self.rsync_flags.iter().any(|flags| {
-                flags.split(' ').any(|word| {
-                    !word.starts_with("--") && word.starts_with('-') && word.contains(flag)
-                })
-            })
-        };
-        !(short_flags('A') && short_flags('X'))
+        is_old_format(self.rsync_flags.as_deref().unwrap_or_default())
     }
 
     /// The file, byte for byte as Timeshift writes it, then Apsis's member if there is one.

@@ -75,6 +75,7 @@ fn fixture() -> SnapshotList {
         created: apsis_core::parse_snapshot_name(name).unwrap(),
         tags: vec![apsis_core::Tag::OnDemand],
         comment: comment.map(str::to_owned),
+        rsync_flags: None,
     };
     SnapshotList {
         device: Some("/dev/sdX1".to_owned()),

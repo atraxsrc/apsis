@@ -14,10 +14,13 @@ use crate::usage::mounts_under;
 
 /// Group 1, always first: what runs the restore, its state, and the live Apsis config. None of
 /// these belongs to the Apsis package (a test checks them against the .deb's file list).
-pub const PROTECTED: [&str; 5] = [
+pub const PROTECTED: [&str; 6] = [
     "/system-update",
     "/etc/systemd/system/apsis-restore.service",
     "/etc/systemd/system/system-update.target.wants/apsis-restore.service",
+    // The pop-upgrade-init drop-in (PLAN 6b.6): written on arm, and kept through the copy so
+    // a retry boot still has it after a snapshot without it was restored.
+    "/etc/systemd/system/pop-upgrade-init.service.d/50-apsis.conf",
     "/var/lib/apsis/***",
     "/etc/apsis/***",
 ];
@@ -231,6 +234,7 @@ mod tests {
                 "- /system-update",
                 "- /etc/systemd/system/apsis-restore.service",
                 "- /etc/systemd/system/system-update.target.wants/apsis-restore.service",
+                "- /etc/systemd/system/pop-upgrade-init.service.d/50-apsis.conf",
                 "- /var/lib/apsis/***",
                 "- /etc/apsis/***",
                 "- /boot/efi/***",

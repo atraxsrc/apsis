@@ -3205,3 +3205,48 @@ applet literally. Checked in the code: `main.rs` `mode` and `StartView::from_arg
 nothing today. **Recommended: drop `%F`** from `resources/app.desktop` (the app takes no
 files, `MimeType=` is empty, the field code is the template's leftover), a one-line change
 that can ride with 0.4.2's packaging; no explicit handling in code.
+
+## 2026-10-01 - 6b helper slice, core-only parts (unattended session)
+
+Built on restore-6b-core after 0.4.2 was built on its own branch. Nothing here runs as
+root, talks D-Bus or touches systemd; every piece is pure or works on a temp folder.
+
+- **`restore::unit`** (new): `UNIT_PATH`, `UNIT_WANTS_LINK`, `HELPER_COPY`, `DROP_IN_PATH`,
+  `unit_text()` and `drop_in_text()`, byte for byte as PLAN 6b.6 writes them, with tests
+  that compare the whole text and check the settled rules (`StandardOutput=journal`, no
+  `journal+console`, `FailureAction=reboot`, no `OnFailure=`, no `KillMode`, no `Before=`
+  or `Conflicts=` against the three offline-update units, the helper copy's path, the
+  condition `!/system-update/apsis-helper` being the helper copy reached through the link).
+  The drop-in is the fourth entry of `filter::PROTECTED` (6), between the wants link and
+  `/var/lib/apsis/***`; the whole-filter test and the package test carry it, and the
+  real-rsync lab has the live drop-in survive a snapshot's leaked one. **If check 0.4c fails**
+  (a drop-in's condition not added to the `/usr/lib` unit's), `drop_in_text`, `DROP_IN_PATH`
+  and the `PROTECTED` entry are what changes.
+- **`refusal::pop_upgrade_found(root)`** does the `lstat` (`symlink_metadata`) of
+  `POP_UPGRADE_NAMES` under a root and returns which exist; **`check_pending(found)`** is
+  the pure refusal. Split that way so the test proves the `lstat` rule on a temp folder (a
+  file, a folder and a dangling link each count; fwupd's `pending.db` and PackageKit's
+  `prepared-update` don't, nor does a `/system-update` link, which is `check_arming`'s), and
+  so the helper passes `Path::new("/")`. Not wired into `refusal::check`: PLAN calls it
+  beside `check` (dialog, preparing, arming), never at apply.
+- **`refusal::crypttab_differs(snapshot: Option<&str>, live)`**: the normalisation of 6b.7
+  (trim, drop blank and `#` lines, fields joined by one space, in order); `None` is empty.
+  Tests: byte-equal, comments and blank lines, whitespace, no trailing newline, a field
+  change, an entry more or fewer, a commented-out entry, the order of entries, no file
+  against a live entry. Not wired into `check` either, for the same reason.
+- **The list row's format**: `Snapshot` gains `rsync_flags: Option<String>` (the raw
+  `apsis-rsync-flags`), filled by the native list from `Info`; `Helper2`'s `to_wire` drops
+  it and `from_wire` reads none, so the live interface is unchanged. `WireSnapshot3`
+  `(ssss)`, `WireList3`, `WireListWithUsage3`, `to_wire3`/`from_wire3` and the usage pair
+  carry it (`""` for none). `native::info::is_old_format(&str)` is the rule as a function of
+  the string, and `Info::is_old_format` calls it. The helper's `List` keeps `(sss)` until the
+  interface moves to `Helper3` (names, policy file, the `(ssss)` introspection test) in the
+  helper slice.
+- **`apply::exit_code(end, restart_failed) -> u8`**: 1 only for `Finished`, `GaveUp` and
+  `Retry` when the reboot call failed (the unit's `FailureAction=reboot` then restarts; for
+  `Retry` the attempt is on disk, the one bounded exception); 0 for `LinkStuck` and
+  `NotArmed` whatever the call said (nothing may restart over a stuck or foreign link).
+  `Runner::restart` keeps its signature; the real runner records whether `systemctl reboot
+  --no-block` returned 0 and the helper maps with this after `apply` returns.
+- **Left for the helper slice** (not core-only, or waiting on check 0.4): see PLAN 6b.13
+  step 3 item 1's status line.

@@ -169,6 +169,12 @@ fn fill(lab: &Lab) {
     write(s, "etc/fstab", "the snapshot's fstab, of other disks\n");
     write(s, "etc/crypttab", "the snapshot's crypttab\n");
     write(s, "etc/apsis/config.toml", "the snapshot's Apsis config\n");
+    // A drop-in leaked into a snapshot (PLAN 6b.6): the live, protected one stays.
+    write(
+        s,
+        "etc/systemd/system/pop-upgrade-init.service.d/50-apsis.conf",
+        "a leaked drop-in\n",
+    );
     write(s, "etc/only-in-snapshot", "comes back\n");
     write(s, "usr/bin/tool", "tool 1.0\n");
     write(s, "usr/bin/dash", "a shell\n");
@@ -254,6 +260,11 @@ fn fill(lab: &Lab) {
         l,
         "etc/systemd/system/system-update.target.wants/apsis-restore.service",
         "../apsis-restore.service",
+    );
+    write(
+        l,
+        "etc/systemd/system/pop-upgrade-init.service.d/50-apsis.conf",
+        "[Unit]\nConditionPathExists=!/system-update/apsis-helper\n",
     );
     for name in ["request.json", "state.json", "result.json", "apsis-helper"] {
         write(l, &format!("var/lib/apsis/restore/{name}"), name);
@@ -627,10 +638,11 @@ fn everything_on_the_protect_list_is_untouched() {
         .iter()
         .map(|pattern| pattern.trim_end_matches("/***").trim_start_matches('/'))
         .collect();
-    assert_eq!(paths.len(), 5);
+    assert_eq!(paths.len(), 6);
     let before = nodes_of(&lab.live, &paths);
     for file in [
         "system-update",
+        "etc/systemd/system/pop-upgrade-init.service.d/50-apsis.conf",
         "var/lib/apsis/restore/request.json",
         "var/lib/apsis/restore/state.json",
         "var/lib/apsis/restore/result.json",
@@ -651,6 +663,14 @@ fn everything_on_the_protect_list_is_untouched() {
     assert_eq!(
         read(&lab.live, "var/lib/apsis/restore/request.json"),
         "request.json"
+    );
+    assert_eq!(
+        read(
+            &lab.live,
+            "etc/systemd/system/pop-upgrade-init.service.d/50-apsis.conf"
+        ),
+        "[Unit]\nConditionPathExists=!/system-update/apsis-helper\n",
+        "the live drop-in, not the snapshot's leaked one"
     );
     assert!(
         fs::symlink_metadata(lab.live.join("system-update"))

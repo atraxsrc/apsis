@@ -4,8 +4,9 @@
 //!
 //! Checked for the dialog, again when preparing, and again at apply. Everything here works on
 //! what the helper has already read (mountinfo, lsblk, `info.json`, a folder listing), so
-//! nothing is opened or run. The space lines (6b.4) need the dry runs, so they're checked after
-//! these, in [`super::space`]. Busy isn't here.
+//! nothing is opened or run; the one exception is [`pop_upgrade_found`], an `lstat` of three
+//! names, which hands [`check_pending`] what it found. The space lines (6b.4) need the dry
+//! runs, so they're checked after these, in [`super::space`]. Busy isn't here.
 
 use std::path::Path;
 
@@ -42,6 +43,14 @@ pub enum Refusal {
     /// `/system-update` or `/etc/system-update` exists already: another update is pending
     /// and waits for a restart ([`check_arming`]).
     PendingUpdate,
+    /// A Pop!_OS release upgrade is in progress or half done: one of [`POP_UPGRADE_NAMES`]
+    /// exists ([`check_pending`]). Checked in the dialog, when preparing and before arming,
+    /// not at apply (PLAN 6b.6, "pop-upgrade-init").
+    PopUpgradePending,
+    /// The snapshot's `etc/crypttab` differs from the live one ([`crypttab_differs`]): the
+    /// snapshot's initrd carries the entries its system needed at boot, and the apply doesn't
+    /// rebuild it (PLAN 6b.6 step 5; the rebuild is 0.5.x).
+    CrypttabDiffers,
     /// The backup disk is short for the safety snapshot ([`super::space`]). Both in bytes.
     BackupSpace {
         needs: u64,
@@ -214,6 +223,64 @@ pub fn check_arming(
         return Err(Refusal::PendingUpdate);
     }
     Ok(())
+}
+
+/// The names Pop!_OS's release upgrade leaves at the root while it's in progress or half done
+/// (`pop-upgrade`'s `upgrade.sh`; PLAN 6b.6): the two it makes before the offline boot, and
+/// the one it touches during it. Any of them present refuses arming. fwupd's history database
+/// and PackageKit's staged update are not among them, on purpose (owner, 2026-10-01).
+pub const POP_UPGRADE_NAMES: [&str; 3] = [
+    "/pop-upgrade",
+    "/pop_preparing_release_upgrade",
+    "/upgrade-attempted",
+];
+
+/// Which of [`POP_UPGRADE_NAMES`] exist under `root` (`/` on the live system), asked of each
+/// name itself (`lstat`): a file, a folder, a link or a dangling link all count. The input
+/// for [`check_pending`].
+#[must_use]
+pub fn pop_upgrade_found(root: &Path) -> Vec<&'static str> {
+    POP_UPGRADE_NAMES
+        .into_iter()
+        .filter(|name| {
+            let under_root = root.join(name.trim_start_matches('/'));
+            under_root.symlink_metadata().is_ok()
+        })
+        .collect()
+}
+
+/// Refuses while a Pop!_OS release upgrade is in progress or half done: `found` is what
+/// [`pop_upgrade_found`] saw. Pure, so the dialog, the preparation and the arming check
+/// (`check_arming`'s neighbour) share it; not run at apply, where `/system-update` is
+/// Apsis's own and the drop-in holds `pop-upgrade-init` off.
+///
+/// # Errors
+///
+/// [`Refusal::PopUpgradePending`] if any name was found.
+pub fn check_pending(found: &[&str]) -> Result<(), Refusal> {
+    if found.is_empty() {
+        Ok(())
+    } else {
+        Err(Refusal::PopUpgradePending)
+    }
+}
+
+/// Whether the snapshot's `etc/crypttab` (`None`: it has none, read as empty) sets up the
+/// encrypted disks differently from the live one. "Same" means: comment lines (`#` after
+/// trimming) and blank lines dropped, each remaining line's fields joined by one space,
+/// compared in order. A comment edit never refuses; a changed field does.
+#[must_use]
+pub fn crypttab_differs(snapshot: Option<&str>, live: &str) -> bool {
+    crypttab_entries(snapshot.unwrap_or_default()) != crypttab_entries(live)
+}
+
+/// The entries of a crypttab, normalised as [`crypttab_differs`] compares them.
+fn crypttab_entries(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
 }
 
 /// Checks the `root=` kernel options of a snapshot's kernelstub configuration: its `default`
@@ -781,6 +848,152 @@ mod tests {
                 "{found:?} in /etc"
             );
         }
+    }
+
+    /// A folder for the live root, with the given names made as files, folders or links.
+    fn root_with(label: &str, names: &[(&str, &str)]) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("apsis-pending-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for (name, kind) in names {
+            let path = root.join(name.trim_start_matches('/'));
+            match *kind {
+                "file" => std::fs::write(&path, b"").unwrap(),
+                "dir" => std::fs::create_dir_all(&path).unwrap(),
+                "dangling" => std::os::unix::fs::symlink("/nowhere/at/all", &path).unwrap(),
+                other => panic!("{other}"),
+            }
+        }
+        root
+    }
+
+    /// Each of the three Pop names refuses on its own, as a file, a folder or a dangling
+    /// link (`lstat`); fwupd's database and PackageKit's staged update don't.
+    #[test]
+    fn a_pop_upgrade_in_progress_or_half_done_is_refused() {
+        let clean = root_with("clean", &[]);
+        assert_eq!(pop_upgrade_found(&clean), Vec::<&str>::new());
+        assert_eq!(check_pending(&pop_upgrade_found(&clean)), Ok(()));
+        for (i, name) in POP_UPGRADE_NAMES.iter().enumerate() {
+            for kind in ["file", "dir", "dangling"] {
+                let root = root_with(&format!("{i}-{kind}"), &[(name, kind)]);
+                let found = pop_upgrade_found(&root);
+                assert_eq!(found, [*name], "{name} as a {kind}");
+                assert_eq!(check_pending(&found), Err(Refusal::PopUpgradePending));
+                std::fs::remove_dir_all(&root).unwrap();
+            }
+        }
+        let not_refused = root_with(
+            "others",
+            &[
+                ("/var/lib/fwupd", "dir"),
+                ("/var/lib/fwupd/pending.db", "file"),
+                ("/var/lib/PackageKit", "dir"),
+                ("/var/lib/PackageKit/prepared-update", "file"),
+                ("/system-update", "dangling"),
+            ],
+        );
+        assert_eq!(pop_upgrade_found(&not_refused), Vec::<&str>::new());
+        assert_eq!(check_pending(&pop_upgrade_found(&not_refused)), Ok(()));
+        // All three at once: still one refusal, naming all three.
+        let all = root_with(
+            "all",
+            &[
+                ("/pop-upgrade", "file"),
+                ("/pop_preparing_release_upgrade", "file"),
+                ("/upgrade-attempted", "file"),
+            ],
+        );
+        assert_eq!(pop_upgrade_found(&all), POP_UPGRADE_NAMES);
+        assert_eq!(
+            check_pending(&["/upgrade-attempted"]),
+            Err(Refusal::PopUpgradePending)
+        );
+        for root in [clean, not_refused, all] {
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// apsis-test's live crypttab: cryptswap with a random key.
+    const CRYPTTAB: &str = "cryptswap UUID=00000000-0000-0000-0000-00000000c0de /dev/urandom \
+                            swap,plain,offset=1024,cipher=aes-xts-plain64,size=512
+";
+
+    #[test]
+    fn a_crypttab_with_the_same_entries_is_the_same_whatever_its_comments() {
+        assert!(!crypttab_differs(Some(CRYPTTAB), CRYPTTAB), "byte-equal");
+        let commented = format!(
+            "# <target name> <source device> <key file> <options>
+
+{CRYPTTAB}
+# the end
+"
+        );
+        assert!(
+            !crypttab_differs(Some(&commented), CRYPTTAB),
+            "comments and blank lines"
+        );
+        let spaced = CRYPTTAB.replace(' ', "\t  ");
+        assert!(
+            !crypttab_differs(Some(&spaced), CRYPTTAB),
+            "whitespace between fields"
+        );
+        let unterminated = CRYPTTAB.trim_end();
+        assert!(!crypttab_differs(Some(unterminated), CRYPTTAB));
+        // Only comments: as good as none.
+        assert!(!crypttab_differs(
+            Some(
+                "# nothing
+"
+            ),
+            ""
+        ));
+        assert!(!crypttab_differs(None, ""), "no file against an empty one");
+        assert!(!crypttab_differs(
+            None,
+            "
+# header
+"
+        ));
+    }
+
+    #[test]
+    fn a_crypttab_whose_fields_changed_differs() {
+        let other_key = CRYPTTAB.replace("/dev/urandom", "/etc/keys/swap.key");
+        assert!(crypttab_differs(Some(&other_key), CRYPTTAB), "a field");
+        let other_options = CRYPTTAB.replace("size=512", "size=256");
+        assert!(crypttab_differs(Some(&other_options), CRYPTTAB));
+        let one_more = format!(
+            "{CRYPTTAB}cryptroot UUID=11111111-1111-1111-1111-111111111111 none luks,discard
+"
+        );
+        assert!(crypttab_differs(Some(&one_more), CRYPTTAB), "an entry more");
+        assert!(
+            crypttab_differs(Some(CRYPTTAB), &one_more),
+            "an entry fewer"
+        );
+        assert!(
+            crypttab_differs(None, CRYPTTAB),
+            "no file against a live entry"
+        );
+        assert!(
+            crypttab_differs(Some(CRYPTTAB), ""),
+            "an entry against no live one"
+        );
+        // A comment that was an entry, or the other way round, is a change.
+        let commented_out = format!("#{CRYPTTAB}");
+        assert!(crypttab_differs(Some(&commented_out), CRYPTTAB));
+        // The order of entries counts.
+        let two = format!(
+            "{CRYPTTAB}cryptroot UUID=11111111-1111-1111-1111-111111111111 none luks
+"
+        );
+        let swapped = format!(
+            "cryptroot UUID=11111111-1111-1111-1111-111111111111 none luks
+{CRYPTTAB}"
+        );
+        assert!(crypttab_differs(Some(&two), &swapped));
     }
 
     /// One reason is shown: what's wrong with the computer comes before what's wrong with

@@ -256,6 +256,26 @@ impl End {
     }
 }
 
+/// What `apsis-helper --apply-restore` exits with, from how the apply ended and whether
+/// [`Runner::restart`]'s call (`systemctl reboot --no-block`) went through (PLAN 6b.6, "a
+/// reboot call that fails"). The unit has `FailureAction=reboot`, so exit 1 is a restart by
+/// systemd:
+///
+/// - [`End::Finished`] and [`End::GaveUp`]: the link is gone and `system-update-cleanup` is
+///   skipped, so if the reboot call failed nothing else would restart: exit 1. With the call
+///   through, exit 0.
+/// - [`End::Retry`]: the same; the attempt is on disk, so systemd's restart is the retry the
+///   apply wanted. The one bounded exception to "never exit non-zero with the link in place".
+/// - [`End::LinkStuck`] and [`End::NotArmed`]: no restart was called; exit 0 whatever
+///   `restart_failed` says, so nothing restarts over a link that's stuck or another tool's.
+#[must_use]
+pub fn exit_code(end: End, restart_failed: bool) -> u8 {
+    match end {
+        End::Finished(_) | End::GaveUp | End::Retry { .. } => u8::from(restart_failed),
+        End::LinkStuck { .. } | End::NotArmed => 0,
+    }
+}
+
 /// Runs the apply for this boot, then restarts, unless the link is stuck or isn't Apsis's.
 ///
 /// Whether to restart is decided here, not by the helper. The rule: restart whenever the
@@ -2817,5 +2837,31 @@ mod tests {
         let report = report(&lab);
         assert_eq!((report.snapshot, report.when), (None, None));
         assert_eq!(report.message, "result could not be saved, see journal");
+    }
+
+    /// The helper's exit code: 1 only when a restart was called and its call failed, so the
+    /// unit's `FailureAction=reboot` restarts; never over a stuck link or another tool's.
+    #[test]
+    fn the_exit_code_restarts_through_systemd_only_when_the_reboot_call_failed() {
+        let restarting = [
+            End::Finished(Outcome::Done),
+            End::Finished(Outcome::BootBroken),
+            End::GaveUp,
+            End::Retry { attempt: 2 },
+        ];
+        for end in restarting {
+            assert_eq!(exit_code(end, false), 0, "{end:?}");
+            assert_eq!(exit_code(end, true), 1, "{end:?}");
+        }
+        let not_restarting = [
+            End::LinkStuck {
+                outcome: Outcome::Done,
+            },
+            End::NotArmed,
+        ];
+        for end in not_restarting {
+            assert_eq!(exit_code(end, false), 0, "{end:?}");
+            assert_eq!(exit_code(end, true), 0, "{end:?}: nothing may restart");
+        }
     }
 }

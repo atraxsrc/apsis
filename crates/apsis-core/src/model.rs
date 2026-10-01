@@ -107,6 +107,10 @@ pub struct Snapshot {
     pub created: DateTime,
     pub tags: Vec<Tag>,
     pub comment: Option<String>,
+    /// The raw `apsis-rsync-flags` string from its `info.json` (0.4.1), the format it was
+    /// made with; `None` when the key is missing (Timeshift's, Apsis 0.4.0 and older: the
+    /// old format). The rule that reads it is [`crate::native::info::is_old_format`].
+    pub rsync_flags: Option<String>,
 }
 
 /// The result of listing snapshots on the backup device.

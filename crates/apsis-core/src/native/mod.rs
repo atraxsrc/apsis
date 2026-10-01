@@ -645,6 +645,7 @@ impl<R: Runner> Backend for NativeRsync<R> {
                 created,
                 tags: info.known_tags(),
                 comment: Some(info.comments).filter(|c| !c.is_empty()),
+                rsync_flags: info.rsync_flags,
             });
         }
         let (leftovers, odd) = self.leftovers();

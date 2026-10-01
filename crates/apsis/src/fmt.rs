@@ -98,6 +98,7 @@ mod tests {
             name: "2026-09-27_09-12-33".to_owned(),
             created: date(2026, 9, 27).at(9, 12, 33, 0),
             tags: vec![Tag::OnDemand],
+            rsync_flags: None,
             comment: Some("bulk 1".to_owned()),
         };
         assert_eq!(label(&snapshot), "09-27 09:12 \"bulk 1\"");
