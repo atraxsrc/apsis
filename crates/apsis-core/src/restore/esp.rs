@@ -498,19 +498,25 @@ pub fn remove(state_dir: &Path) -> io::Result<()> {
 /// What the check found wrong with a kernel pair on the ESP (PLAN 6b.6 step 6): the current
 /// pair against `/boot/vmlinuz` and `/boot/initrd.img`, or the previous pair against
 /// `/boot/vmlinuz.old` and `/boot/initrd.img.old`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CheckFailure {
     /// The pair's kernel link in `/boot` isn't a link to a `vmlinuz-<version>`.
+    #[error("the kernel link in /boot doesn't name a kernel")]
     NoKernelLink,
     /// The ESP's kernel isn't the file the kernel link points to.
+    #[error("the kernel on the ESP isn't the one /boot links to")]
     KernelDiffers,
     /// The ESP's initrd isn't the file the initrd link points to.
+    #[error("the initrd on the ESP isn't the one /boot links to")]
     InitrdDiffers,
     /// There's no `/usr/lib/modules/<version>/` for the pair's kernel.
+    #[error("there are no modules for kernel {version}")]
     NoModules { version: String },
     /// There's no `loader/entries/Pop_OS-current.conf`.
+    #[error("the ESP has no Pop_OS-current.conf")]
     NoEntry,
     /// Only some of the previous pair and the oldkern entry are on the ESP.
+    #[error("the ESP has only part of the previous kernel's files")]
     PreviousIncomplete,
 }
 
@@ -591,6 +597,26 @@ pub fn check_before_arming(esp: &Path, root: &Path, root_uuid: &str) -> Result<C
         return Err(Refusal::BootFiles(CheckFailure::PreviousIncomplete));
     }
     Ok(checked)
+}
+
+/// Whether the ESP's current pair is, byte for byte, `version`'s own `vmlinuz-<version>` and
+/// `initrd.img-<version>` in `root`'s `/boot`, with its modules there. The `/boot` links
+/// aren't read: after a restore they name the snapshot's kernel, and this asks about the one
+/// the filter's rule 10 kept. It's what "the ESP boots the kernel from before" means, for
+/// [`super::apply`].
+#[must_use]
+pub fn boots_kernel(esp: &Path, root: &Path, root_uuid: &str, version: &str) -> bool {
+    if !is_kernel_version(version) {
+        return false;
+    }
+    let same = |file: BootFile, name: &str| {
+        let with = root.join("boot").join(format!("{name}-{version}"));
+        same_bytes(&esp.join(file.esp_path(root_uuid)), &with).unwrap_or(false)
+    };
+    let modules = root.join("usr/lib/modules").join(version);
+    same(BootFile::Kernel, "vmlinuz")
+        && same(BootFile::Initrd, "initrd.img")
+        && fs::symlink_metadata(modules).is_ok_and(|meta| meta.is_dir())
 }
 
 /// One kernel pair of the ESP against `root`'s `/boot/vmlinuz<link_suffix>` and
@@ -763,17 +789,17 @@ fn read_full(file: &mut File, buffer: &mut [u8]) -> io::Result<usize> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::restore) mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
     use super::super::file::tests::temp_dir;
     use super::*;
 
-    const UUID: &str = "11111111-2222-3333-4444-555555555555";
-    const NEW: &str = "6.9.3-76060903-generic";
-    const OLD: &str = "6.8.0-76060800-generic";
-    const OLDER: &str = "6.6.10-76060610-generic";
+    pub(in crate::restore) const UUID: &str = "11111111-2222-3333-4444-555555555555";
+    pub(in crate::restore) const NEW: &str = "6.9.3-76060903-generic";
+    pub(in crate::restore) const OLD: &str = "6.8.0-76060800-generic";
+    pub(in crate::restore) const OLDER: &str = "6.6.10-76060610-generic";
 
     /// The previous kernel's two files and its entry: there together or not at all.
     const PREVIOUS: [BootFile; 3] = [
@@ -795,14 +821,14 @@ mod tests {
 
     /// A machine as apsis-test: the ESP boots copies of the kernel and initrd, and `/boot`
     /// links to the files they were copied from.
-    struct Lab {
-        esp: PathBuf,
-        root: PathBuf,
-        state: PathBuf,
+    pub(in crate::restore) struct Lab {
+        pub esp: PathBuf,
+        pub root: PathBuf,
+        pub state: PathBuf,
     }
 
     impl Lab {
-        fn esp_file(&self, file: BootFile) -> PathBuf {
+        pub fn esp_file(&self, file: BootFile) -> PathBuf {
             self.esp.join(file.esp_path(UUID))
         }
 
@@ -811,7 +837,7 @@ mod tests {
         }
 
         /// A kernel in `/boot` and its modules, as a package installs them.
-        fn install_kernel(&self, version: &str) {
+        pub fn install_kernel(&self, version: &str) {
             let boot = self.root.join("boot");
             fs::write(boot.join(format!("vmlinuz-{version}")), kernel(version)).unwrap();
             fs::write(boot.join(format!("initrd.img-{version}")), initrd(version)).unwrap();
@@ -829,17 +855,17 @@ mod tests {
         }
 
         /// `/boot/vmlinuz` and `/boot/initrd.img` point to `version`.
-        fn link_kernel(&self, version: &str) {
+        pub fn link_kernel(&self, version: &str) {
             self.link("", version);
         }
 
         /// `/boot/vmlinuz.old` and `/boot/initrd.img.old` point to `version`.
-        fn link_previous(&self, version: &str) {
+        pub fn link_previous(&self, version: &str) {
             self.link(".old", version);
         }
 
         /// What kernelstub does: the linked kernel and initrd copied to the ESP.
-        fn kernelstub(&self, version: &str) {
+        pub fn kernelstub(&self, version: &str) {
             fs::write(self.esp_file(BootFile::Kernel), kernel(version)).unwrap();
             fs::write(self.esp_file(BootFile::Initrd), initrd(version)).unwrap();
             fs::write(self.esp_file(BootFile::Cmdline), cmdline(version)).unwrap();
@@ -847,21 +873,21 @@ mod tests {
         }
 
         /// And for the `.old` links: the previous pair and the oldkern entry.
-        fn kernelstub_previous(&self, version: &str) {
+        pub fn kernelstub_previous(&self, version: &str) {
             fs::write(self.esp_file(BootFile::PreviousKernel), kernel(version)).unwrap();
             fs::write(self.esp_file(BootFile::PreviousInitrd), initrd(version)).unwrap();
             fs::write(self.esp_file(BootFile::OldkernEntry), entry(version)).unwrap();
         }
 
         /// A machine with one kernel installed: no previous pair, no oldkern entry.
-        fn one_kernel(&self) {
+        pub fn one_kernel(&self) {
             for file in PREVIOUS {
                 fs::remove_file(self.esp_file(file)).unwrap();
             }
         }
 
         /// Every file on the ESP, from its top folder, with what it holds.
-        fn esp_tree(&self) -> Vec<(String, String)> {
+        pub fn esp_tree(&self) -> Vec<(String, String)> {
             fn walk(top: &Path, dir: &Path, found: &mut Vec<(String, String)>) {
                 for entry in fs::read_dir(dir).unwrap() {
                     let path = entry.unwrap().path();
@@ -884,11 +910,11 @@ mod tests {
         format!("root=UUID={UUID} ro quiet splash # {version}\n")
     }
 
-    fn kernel(version: &str) -> String {
+    pub(in crate::restore) fn kernel(version: &str) -> String {
         format!("kernel {version}\n").repeat(4000)
     }
 
-    fn initrd(version: &str) -> String {
+    pub(in crate::restore) fn initrd(version: &str) -> String {
         format!("initrd {version}\n").repeat(9000)
     }
 
@@ -897,7 +923,7 @@ mod tests {
     }
 
     /// Running `NEW`, booted from the ESP, with `OLD` as the previous kernel.
-    fn lab(name: &str) -> Lab {
+    pub(in crate::restore) fn lab(name: &str) -> Lab {
         let dir = temp_dir(name);
         let lab = Lab {
             esp: dir.join("esp"),
@@ -1356,6 +1382,41 @@ mod tests {
     fn the_check_passes_when_the_esp_boots_what_boot_links_to() {
         let lab = lab("esp-check");
         assert_eq!(check(&lab.esp, &lab.root, UUID), checked(NEW, good(OLD)));
+    }
+
+    /// What a put-back claims, and what tells an untouched ESP from a refreshed one.
+    #[test]
+    fn the_esp_boots_the_kernel_whose_boot_files_it_holds() {
+        let lab = lab("esp-boots");
+        assert!(boots_kernel(&lab.esp, &lab.root, UUID, NEW));
+        assert!(!boots_kernel(&lab.esp, &lab.root, UUID, OLD));
+        lab.kernelstub(OLD);
+        assert!(boots_kernel(&lab.esp, &lab.root, UUID, OLD));
+        assert!(!boots_kernel(&lab.esp, &lab.root, UUID, NEW));
+        // The links don't matter: it's asked of one version's own files.
+        lab.link_kernel(OLDER);
+        assert!(boots_kernel(&lab.esp, &lab.root, UUID, OLD));
+        fs::write(lab.esp_file(BootFile::Initrd), initrd(NEW)).unwrap();
+        assert!(!boots_kernel(&lab.esp, &lab.root, UUID, OLD));
+        lab.kernelstub(OLD);
+        fs::remove_dir(lab.root.join("usr/lib/modules").join(OLD)).unwrap();
+        assert!(!boots_kernel(&lab.esp, &lab.root, UUID, OLD));
+        assert!(!boots_kernel(&lab.esp, &lab.root, UUID, "../x"));
+    }
+
+    #[test]
+    fn a_check_failure_says_what_is_wrong() {
+        assert_eq!(
+            CheckFailure::NoModules {
+                version: NEW.to_owned()
+            }
+            .to_string(),
+            format!("there are no modules for kernel {NEW}")
+        );
+        assert_eq!(
+            CheckFailure::KernelDiffers.to_string(),
+            "the kernel on the ESP isn't the one /boot links to"
+        );
     }
 
     #[test]

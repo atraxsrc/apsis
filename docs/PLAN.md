@@ -434,9 +434,10 @@ files: `request.json` (`apsis_core::restore::plan`), `state.json` and `result.js
 (`apsis_core::restore::state`), with their shared format, version rule and atomic write
 (`apsis_core::restore::file`), the ESP backup with its manifest, the check after the boot
 refresh, the put-back and the ESP space refusal (`apsis_core::restore::esp`; follow-up the
-same day: the seven-file set, the previous pair, the check before arming). Format detection
-is 0.4.1's `Info::is_old_format`, unchanged.
-Still to come in the core slice: the apply state machine, the real-rsync temp-tree tests.
+same day: the seven-file set, the previous pair, the check before arming), the apply state
+machine over a runner trait, tested with a fake runner (`apsis_core::restore::apply`). Format
+detection is 0.4.1's `Info::is_old_format`, unchanged.
+Still to come in the core slice: the real-rsync temp-tree tests.
 
 Goal: pick a snapshot, click Restore, and after a restart the system is back to that state.
 One person at the keyboard. The copy is rsync over `/` with excludes, like Timeshift's. When
@@ -635,8 +636,20 @@ fixed `PATH` and cleared environment. Each step is logged to the journal and the
 progress and messages go to plymouth (`plymouth system-update --progress=N`, `plymouth
 display-message`) when it runs.
 
-`state.json` holds `attempts` (copies that started) and `written` (anything under `/` was ever
-written by this restore), both fsynced before the step that depends on them.
+`state.json` holds `attempts` (copies that started), `written` (anything under `/` was ever
+written by this restore), `step` (`armed`, `copy`, `boot-files`, `end`) and `problems` (the
+copy ended with exit 23). It's saved, and so fsynced, before each step that depends on it:
+
+| saved | before |
+|---|---|
+| `attempts + 1`, `written`, step `copy` | pass 1 (step 3) |
+| step `boot-files`, `problems` | the ESP backup and everything after it (steps 4 to 7) |
+| step `end` (after `result.json`) | the cleanup (step 8) |
+
+A state that can't be saved stops the apply before the step: no copy without its attempt on
+disk (`not-started`, or `failed` if an earlier copy wrote), and no boot refresh without
+`boot-files` on disk (`boot-kept`, the ESP untouched). **A boot after a power cut goes on from
+the saved step** (6b.10).
 
 1. **Arm check.** `/system-update` must point to `/var/lib/apsis/restore`, and `request.json`
    and `state.json` must be there. Otherwise remove the link and boot normally (a stray link
@@ -664,7 +677,11 @@ written by this restore), both fsynced before the step that depends on them.
    (file capabilities) even from unchanged files, to match a snapshot that never stored them.
    Never `--delete-excluded`, `-L` or `--link-dest`. Exit 0 or 24: go on. 23 (some files
    couldn't be written or deleted): go on; the result is "restored with problems" and names
-   the log. Anything else: **copy broke** (6b.10).
+   the log. Anything else, or no exit code (a signal): **copy broke** (6b.10).
+   The copy step returns only after a `sync`: once step `boot-files` is saved, the copy is on
+   disk and is **never run again**, also after a power cut. A boot that finds `attempts` at 3
+   and step `copy` (the power went during the third copy) gives up with `failed`; there's no
+   fourth copy.
 4. **ESP backup.** Copy the ESP file set to `/var/lib/apsis/restore/esp-backup/` (on `/`,
    protected), fsync, and byte-compare each copy with the original. **The file set** is one
    list in one place (`apsis_core::restore::esp`, `SET`): the only files Apsis reads, backs
@@ -722,7 +739,9 @@ written by this restore), both fsynced before the step that depends on them.
    - **Fails** (or a command failed): **boot files failed**. Put the backed-up files back
      on the ESP (each written to a temporary name in the same folder, fsynced, renamed), then
      byte-compare them with the backup. The protected kernel stays (step 7 is skipped), so the
-     ESP boots the kernel it booted before, whose modules and `/boot` files rule 10 kept. Then
+     ESP boots the kernel it booted before, whose modules and `/boot` files rule 10 kept.
+     That's checked too (`esp::boots_kernel`): a put-back that worked onto a kernel whose
+     files are gone is `boot-broken`, not `boot-kept`. Then
      step 8, result `boot-kept`: the system is the snapshot's, but it still starts the newer
      kernel. Not retried (a second kernelstub run would do the same). If putting back also
      fails to compare: result `boot-broken`, and the boot screen and result point to the
@@ -731,9 +750,13 @@ written by this restore), both fsynced before the step that depends on them.
    running kernel's version, remove the rule 10 files (the modules folder with
    `prune::remove_at`, one filesystem, no symlinks followed). The system now matches the
    snapshot. A power cut here is harmless: the ESP already boots the restored kernel.
-8. **End.** Remove `/system-update`, the unit and its wants link, the helper copy and
-   `esp-backup/`. Write `result.json` (`done`, `problems` or `boot-kept`, the snapshot, the
-   safety snapshot, the time), `sync`, restart.
+8. **End**, in this order: write `result.json` (the outcome, the snapshot, the safety
+   snapshot, the time); save step `end` in `state.json`; remove `/system-update` (first),
+   the unit and its wants link and the helper copy; remove `esp-backup/`; `sync`, restart.
+   The result is on disk before the link goes, so a power cut can't leave a finished restore
+   with no result; a boot that finds the link and step `end` only does the cleanup.
+   Every way the apply ends goes through this step and restarts: with the link gone that's
+   the normal boot.
 
 The unit (text in `apsis_core`, tested), written to `/etc/systemd/system/` on arm and **not**
 shipped in `/usr` (a snapshot older than Apsis would delete it mid-restore, and a retry needs
@@ -1103,14 +1126,24 @@ the one lock (a ready plan counts as held for everything but its own restart and
 | **copy broke** | Pass 1 exits with anything but 0, 23 or 24 (disk pulled out, I/O error, disk full), or the power goes during pass 1 | `/system-update` stays. The boot screen says "The restore was interrupted. Restarting to try again (attempt 2 of 3)." and restarts; the next boot runs from step 1 (rsync picks up where the files differ) | **Yes** |
 | **boot files failed** | Step 4 or 6 | The ESP files are put back, the protected kernel is kept, `boot-kept` (or `boot-broken`), end (6b.6) | Not retried |
 
-**A result that can't be saved** (owner, 2026-10-01): if saving the real `result.json` is
-refused (a field fails validation), the apply writes a minimal one instead: the outcome and
-the message "result could not be saved, see journal". The outcome is never lost to a bad
-field; the details are in the journal. **To decide before 0.5.0, in the state machine slice:**
-the minimal report may have `null` for the snapshot and the time, and only with the outcome
-`failed`; and `result.json`'s time is never checked against the plan's or any other time (a
-hardware clock in local time makes them disagree). Today's validation has no such cross-check
-(DECISIONS.md, 2026-10-01).
+**A result that can't be saved** (owner, 2026-10-01; decided in the state machine slice): if
+saving the real `result.json` is refused (a field fails validation), the apply writes a
+minimal one instead.
+- `result.json` version 1 (unshipped) lets `snapshot` and `when` be `null`, **only with the
+  outcome `failed`**. Every other outcome needs both.
+- So the minimal report's outcome is always `failed`. Its message is "result could not be
+  saved, see journal (the restore ended: `<the real outcome>`)", so the real outcome isn't
+  lost; the details are in the journal. It keeps the snapshot, the safety snapshot and the
+  time where they're valid, and if that's refused too it has only the message.
+- `result.json`'s time is never checked against the plan's or any other time (a hardware
+  clock in local time makes them disagree).
+- `RestoreResult` (6b.9) gives `""` and `0` for a `null` snapshot or time.
+
+**A plan or state that can't be read** (6b.6 step 1): the link is Apsis's, but
+`request.json` or `state.json` is missing or refused. Nothing is applied. The arm is removed
+and `result.json` says why, with the outcome `failed`: without the plan there's no snapshot
+to name (`null`), and without the state it isn't known whether an earlier boot wrote
+anything. A link that isn't Apsis's is removed with no result at all.
 
 "Never started" after an earlier broken copy (the disk was pulled, and is still missing at the
 next boot) also removes the link and boots normally. The result line then says the restore
@@ -1136,10 +1169,25 @@ didn't finish (the `written` flag), not that nothing changed, and offers Restore
   defaults (home kept, safety snapshot on; owner, 2026-09-30). It runs the whole restore again
   (checks, preparation, ready prompt), and rsync finishes the copy from wherever it stopped.
 
-A power cut in the other steps: during 4 to 6, the next boot sees `written` and runs from
-step 1. Pass 1 then finds almost nothing to copy, and steps 4 to 6 run again: the ESP backup
-is taken again only if the ESP still matches the protected kernel, otherwise the earlier backup
-is kept. During 7 or 8: harmless, and the next boot finishes the cleanup.
+**A power cut in the other steps** (state machine slice, 2026-10-01): the next boot runs
+steps 1 and 2, then goes on from the step in `state.json`.
+- Step `copy`: pass 1 again, as a new attempt.
+- Step `boot-files` (the copy ended, 4 to 7): the copy is skipped. **The ESP backup is never
+  taken twice**: by then the boot files may already be changed, and a second backup would be
+  of the changed ones.
+  - No `esp-backup/` folder: the first backup, as in step 4.
+  - The folder is there and verifies against its manifest (and is of this root UUID): kept.
+    The boot refresh, the check and, if it fails, the put-back run again.
+  - The folder is there and **doesn't verify** (no manifest: the power went during the
+    backup; or a file is damaged): no backup is taken, **no boot refresh is run and nothing
+    is put back**. The outcome is what the ESP boots as it is: it passes the check against
+    the restored tree: `done` (or `problems`), with step 7; else it's still the kernel from
+    before, whole (`esp::boots_kernel`): `boot-kept`; else `boot-broken`.
+- Step `end`: only the cleanup.
+
+A test cuts the power before and after every single thing the apply asks of its runner, for
+a good restore, a failed boot refresh, a restore that never starts and one with problems:
+the boots after it end in the same outcome.
 
 ### 6b.11 If a restore breaks booting
 
@@ -1204,9 +1252,10 @@ No root (run by Claude):
   23 vs 11; ESP backup, a failed check puts the files back and keeps the protected kernel
   (`boot-kept`); a put-back that doesn't compare gives `boot-broken`; cleanup only after a
   passed check and only when the snapshot lacks the kernel; a power cut at each step
-  (re-entering from step 1 with the saved state) ends in the same result; a plan of any age
-  is applied (no clock is read); a refused `result.json` is replaced by the minimal report
-  with the same outcome.
+  (going on from the saved step) ends in the same result; an ESP backup is never taken
+  twice; a plan of any age is applied (no clock is read); an unreadable plan or state disarms
+  and reports why; a refused `result.json` is replaced by the minimal report (`failed`, the
+  real outcome in its message).
 - **Real rsync** on temp trees (as the tester, no root): a fake snapshot over a fake live root
   with the real filter: changed files replaced, new system files removed, home kept (including
   `/home`'s own mode) or restored, the protect list and other protected paths untouched,
@@ -1300,7 +1349,12 @@ Checks:
      state}` (version 1, refused whole when invalid; DECISIONS.md, 2026-10-01). The helper
      makes `/var/lib/apsis/restore/` (root, 0700) and decides what an unreadable file means
      at each point;
-   - arming starts the 10-minute disarm timer (6b.5, 6b.9).
+   - arming starts the 10-minute disarm timer (6b.5, 6b.9);
+   - the apply is `apsis_core::restore::apply::apply(paths, runner)`: the helper writes the
+     real `Runner` (the link, the backup disk, rsync plus `sync`, `esp::back_up` and
+     `esp::put_back`, the boot refresh, the kept kernel's removal, disarm, the clock, the
+     journal and boot screen, the restart). Arming writes `State::default()`;
+   - removing a stale plan (6b.5) stays the helper's: core has none.
 4. **UI**, rebuilt from the preview (6b.8) in the real code: the toolbar's Restore (no key, no
    tooltip), the dialog, refusals, preparing status, ready prompt, results in the status line. The preview branch stays unmerged.
 5. Docs: README (experimental; "If a restore goes wrong"; how it differs from Timeshift, never

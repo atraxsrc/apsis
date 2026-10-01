@@ -3,8 +3,9 @@
 //! `state.json` and `result.json`: how far an armed restore got, and how it ended (PLAN
 //! 6b.6, 6b.9, 6b.10).
 //!
-//! `state.json` is written on arm and before each copy; `result.json` when the apply ends,
-//! and it stays for the window to show after login. Format and rules: [`super::file`].
+//! `state.json` is written on arm and before each step of the apply that depends on it
+//! ([`super::apply`]); `result.json` when the apply ends, and it stays for the window to show
+//! after login. Format and rules: [`super::file`].
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -22,6 +23,40 @@ pub const MAX_ATTEMPTS: u32 = 3;
 /// Written as JSON it stays far below the file limit, whatever the characters.
 pub const MAX_MESSAGE_BYTES: usize = 2048;
 
+/// Where an armed restore is (PLAN 6b.6). A boot after a power cut goes on from here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Step {
+    /// Armed, and no copy has started.
+    #[default]
+    Armed,
+    /// Pass 1 started (step 3) and hasn't ended well: it runs again.
+    Copy,
+    /// Pass 1 ended and is on disk: the boot files are next (steps 4 to 7), and the copy
+    /// isn't run again.
+    BootFiles,
+    /// `result.json` is written: only the cleanup is left (step 8).
+    End,
+}
+
+impl Step {
+    const ALL: [Self; 4] = [Self::Armed, Self::Copy, Self::BootFiles, Self::End];
+
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Armed => "armed",
+            Self::Copy => "copy",
+            Self::BootFiles => "boot-files",
+            Self::End => "end",
+        }
+    }
+
+    #[must_use]
+    pub fn from_word(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|step| step.word() == word)
+    }
+}
+
 /// How far an armed restore got. Saved (and so fsynced) before the step that depends on it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct State {
@@ -29,6 +64,9 @@ pub struct State {
     pub attempts: u32,
     /// Anything under `/` was ever written by this restore.
     pub written: bool,
+    pub step: Step,
+    /// The copy ended with rsync's exit 23: some files couldn't be written or deleted.
+    pub problems: bool,
 }
 
 impl State {
@@ -36,7 +74,7 @@ impl State {
     ///
     /// [`FileError::Invalid`] if `text` isn't a state this Apsis wrote, whole and in range.
     pub fn parse(text: &str) -> Result<Self, FileError> {
-        let map = file::object(text, &["attempts", "written"])?;
+        let map = file::object(text, &["attempts", "written", "step", "problems"])?;
         let state = Self {
             attempts: map
                 .get("attempts")
@@ -44,6 +82,9 @@ impl State {
                 .and_then(|attempts| u32::try_from(attempts).ok())
                 .ok_or_else(attempts_out_of_range)?,
             written: file::flag(&map, "written")?,
+            step: Step::from_word(file::text(&map, "step")?)
+                .ok_or_else(|| FileError::Invalid("\"step\" isn't a step".to_owned()))?,
+            problems: file::flag(&map, "problems")?,
         };
         state.validate()?;
         Ok(state)
@@ -59,6 +100,8 @@ impl State {
         Ok(file::to_text([
             ("attempts", self.attempts.into()),
             ("written", self.written.into()),
+            ("step", self.step.word().into()),
+            ("problems", self.problems.into()),
         ]))
     }
 
@@ -87,15 +130,35 @@ impl State {
             return Err(attempts_out_of_range());
         }
         // PLAN 6b.6 step 3 sets both before the copy starts.
+        let invalid = |reason: String| Err(FileError::Invalid(reason));
         match (self.attempts, self.written) {
-            (0, true) => Err(FileError::Invalid(
-                "something is marked written but no attempt was counted".to_owned(),
-            )),
-            (1.., false) => Err(FileError::Invalid(
-                "an attempt was counted but nothing is marked written".to_owned(),
-            )),
-            _ => Ok(()),
+            (0, true) => {
+                return invalid(
+                    "something is marked written but no attempt was counted".to_owned(),
+                );
+            }
+            (1.., false) => {
+                return invalid("an attempt was counted but nothing is marked written".to_owned());
+            }
+            _ => {}
         }
+        let word = self.step.word();
+        match (self.step, self.attempts) {
+            (Step::Armed, 1..) => {
+                return invalid(format!("an attempt was counted but the step is {word:?}"));
+            }
+            (Step::Copy | Step::BootFiles, 0) => {
+                return invalid(format!("the step is {word:?} but no attempt was counted"));
+            }
+            _ => {}
+        }
+        if self.problems && matches!(self.step, Step::Armed | Step::Copy) {
+            return invalid("problems are marked before the copy ended".to_owned());
+        }
+        if self.problems && self.attempts == 0 {
+            return invalid("problems are marked but no attempt was counted".to_owned());
+        }
+        Ok(())
     }
 }
 
@@ -153,8 +216,9 @@ impl Outcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub outcome: Outcome,
-    /// The snapshot that was restored, or was going to be.
-    pub snapshot: String,
+    /// The snapshot that was restored, or was going to be. `None` only with
+    /// [`Outcome::Failed`]: the plan that named it couldn't be read.
+    pub snapshot: Option<String>,
     /// The plan's safety snapshot, if one was taken.
     pub safety_snapshot: Option<String>,
     /// Whether home was kept or restored (the result's tooltip says it).
@@ -163,8 +227,10 @@ pub struct Report {
     /// A longer one than [`MAX_MESSAGE_BYTES`] is written and read as `... ` and its end, so
     /// no length is refused.
     pub message: String,
-    /// When the apply ended, in Unix seconds.
-    pub when: i64,
+    /// When the apply ended, in Unix seconds, by the clock of that boot. It's never compared
+    /// with the plan's time or any other: a hardware clock in local time puts them hours
+    /// apart. `None` only with [`Outcome::Failed`]: the clock gave no time.
+    pub when: Option<i64>,
 }
 
 impl Report {
@@ -186,11 +252,14 @@ impl Report {
         let report = Self {
             outcome: Outcome::from_word(file::text(&map, "outcome")?)
                 .ok_or_else(|| FileError::Invalid("\"outcome\" isn't an outcome".to_owned()))?,
-            snapshot: file::text(&map, "snapshot")?.to_owned(),
+            snapshot: file::optional_text(&map, "snapshot")?.map(str::to_owned),
             safety_snapshot: file::optional_text(&map, "safety_snapshot")?.map(str::to_owned),
             home: file::home(&map)?,
             message: cut(file::text(&map, "message")?).into_owned(),
-            when: file::time(&map, "when")?,
+            when: match map.get("when") {
+                Some(serde_json::Value::Null) => None,
+                _ => Some(file::time(&map, "when")?),
+            },
         };
         report.validate()?;
         Ok(report)
@@ -205,7 +274,7 @@ impl Report {
         self.validate()?;
         Ok(file::to_text([
             ("outcome", self.outcome.word().into()),
-            ("snapshot", self.snapshot.as_str().into()),
+            ("snapshot", self.snapshot.as_deref().into()),
             ("safety_snapshot", self.safety_snapshot.as_deref().into()),
             ("home", file::home_word(self.home).into()),
             ("message", cut(&self.message).into()),
@@ -234,11 +303,25 @@ impl Report {
     }
 
     fn validate(&self) -> Result<(), FileError> {
-        file::check_snapshot("snapshot", &self.snapshot)?;
+        let only_failed = |key: &str| {
+            if self.outcome == Outcome::Failed {
+                return Ok(());
+            }
+            Err(FileError::Invalid(format!(
+                "{key:?} is null, and the outcome isn't \"failed\""
+            )))
+        };
+        match &self.snapshot {
+            Some(snapshot) => file::check_snapshot("snapshot", snapshot)?,
+            None => only_failed("snapshot")?,
+        }
         if let Some(safety) = &self.safety_snapshot {
             file::check_snapshot("safety_snapshot", safety)?;
         }
-        file::check_time("when", self.when)
+        match self.when {
+            Some(when) => file::check_time("when", when),
+            None => only_failed("when"),
+        }
     }
 }
 
@@ -280,19 +363,113 @@ mod tests {
             State::default(),
             State {
                 attempts: 0,
-                written: false
+                written: false,
+                step: Step::Armed,
+                problems: false,
             }
         );
         assert_eq!(
             State::default().to_text().unwrap(),
-            "{\n  \"version\": 1,\n  \"attempts\": 0,\n  \"written\": false\n}\n"
+            r#"{
+  "version": 1,
+  "attempts": 0,
+  "written": false,
+  "step": "armed",
+  "problems": false
+}
+"#
+        );
+    }
+
+    fn state(attempts: u32, step: Step, problems: bool) -> State {
+        State {
+            attempts,
+            written: attempts > 0,
+            step,
+            problems,
+        }
+    }
+
+    fn state_text(attempts: &str, written: &str, step: &str, problems: &str) -> String {
+        format!(
+            r#"{{"version": 1, "attempts": {attempts}, "written": {written}, "step": {step}, "problems": {problems}}}"#
+        )
+    }
+
+    #[test]
+    fn every_step_has_its_word() {
+        for (step, word) in [
+            (Step::Armed, "armed"),
+            (Step::Copy, "copy"),
+            (Step::BootFiles, "boot-files"),
+            (Step::End, "end"),
+        ] {
+            let text = state(1, step, false).to_text();
+            if step == Step::Armed {
+                // Armed is before the first copy.
+                assert!(matches!(text, Err(FileError::Invalid(_))));
+                assert!(state(0, step, false).to_text().unwrap().contains(word));
+            } else {
+                assert!(text.unwrap().contains(&format!("\"step\": \"{word}\"")));
+            }
+        }
+    }
+
+    /// The step and the counters are saved together, so they agree.
+    #[test]
+    fn a_step_that_doesnt_fit_the_attempts_is_refused() {
+        for (attempts, step, problems, reason) in [
+            (
+                1,
+                Step::Armed,
+                false,
+                "an attempt was counted but the step is \"armed\"",
+            ),
+            (
+                0,
+                Step::Copy,
+                false,
+                "the step is \"copy\" but no attempt was counted",
+            ),
+            (
+                0,
+                Step::BootFiles,
+                false,
+                "the step is \"boot-files\" but no attempt was counted",
+            ),
+            (
+                1,
+                Step::Copy,
+                true,
+                "problems are marked before the copy ended",
+            ),
+            (
+                0,
+                Step::End,
+                true,
+                "problems are marked but no attempt was counted",
+            ),
+        ] {
+            let state = state(attempts, step, problems);
+            assert_eq!(invalid(state.to_text()), reason, "{state:?}");
+        }
+        assert_eq!(
+            invalid(State::parse(&state_text("1", "true", "\"ready\"", "false"))),
+            "\"step\" isn't a step"
         );
     }
 
     #[test]
     fn every_state_an_apply_can_reach_round_trips() {
-        for (attempts, written) in [(0, false), (1, true), (2, true), (3, true)] {
-            let state = State { attempts, written };
+        for state in [
+            state(0, Step::Armed, false),
+            state(1, Step::Copy, false),
+            state(3, Step::Copy, false),
+            state(2, Step::BootFiles, false),
+            state(2, Step::BootFiles, true),
+            state(0, Step::End, false),
+            state(3, Step::End, true),
+        ] {
             assert_eq!(State::parse(&state.to_text().unwrap()).unwrap(), state);
         }
     }
@@ -301,15 +478,11 @@ mod tests {
     #[test]
     fn an_attempt_without_the_written_flag_is_refused() {
         assert_eq!(
-            invalid(State::parse(
-                r#"{"version": 1, "attempts": 1, "written": false}"#
-            )),
+            invalid(State::parse(&state_text("1", "false", "\"copy\"", "false"))),
             "an attempt was counted but nothing is marked written"
         );
         assert_eq!(
-            invalid(State::parse(
-                r#"{"version": 1, "attempts": 0, "written": true}"#
-            )),
+            invalid(State::parse(&state_text("0", "true", "\"armed\"", "false"))),
             "something is marked written but no attempt was counted"
         );
     }
@@ -318,40 +491,49 @@ mod tests {
     fn more_attempts_than_a_restore_gets_are_refused() {
         assert_eq!(MAX_ATTEMPTS, 3);
         assert_eq!(
-            invalid(State::parse(
-                r#"{"version": 1, "attempts": 4, "written": true}"#
-            )),
+            invalid(State::parse(&state_text("4", "true", "\"copy\"", "false"))),
             "\"attempts\" isn't 0 to 3"
         );
-        let state = State {
-            attempts: 4,
-            written: true,
-        };
+        let state = state(4, Step::Copy, false);
         assert!(matches!(state.to_text(), Err(FileError::Invalid(_))));
     }
 
     #[test]
     fn a_state_field_of_the_wrong_kind_is_refused() {
+        let copy = "\"copy\"";
         for (text, reason) in [
             (
-                r#"{"version": 1, "attempts": "1", "written": true}"#,
+                state_text("\"1\"", "true", copy, "false"),
                 "\"attempts\" isn't 0 to 3",
             ),
             (
-                r#"{"version": 1, "attempts": -1, "written": true}"#,
+                state_text("-1", "true", copy, "false"),
                 "\"attempts\" isn't 0 to 3",
             ),
             (
-                r#"{"version": 1, "attempts": 1, "written": 1}"#,
+                state_text("1", "1", copy, "false"),
                 "\"written\" isn't true or false",
             ),
-            (r#"{"version": 1, "attempts": 1}"#, "no \"written\""),
+            (state_text("1", "true", "1", "false"), "\"step\" isn't text"),
             (
-                r#"{"version": 3, "attempts": 1, "written": true}"#,
+                state_text("1", "true", copy, "null"),
+                "\"problems\" isn't true or false",
+            ),
+            (
+                r#"{"version": 1, "attempts": 1}"#.to_owned(),
+                "no \"written\"",
+            ),
+            // The two-field file of before the step was saved.
+            (
+                r#"{"version": 1, "attempts": 1, "written": true}"#.to_owned(),
+                "no \"step\"",
+            ),
+            (
+                state_text("1", "true", copy, "false").replace("\"version\": 1", "\"version\": 3"),
                 "version 3 (this Apsis reads 1)",
             ),
         ] {
-            assert_eq!(invalid(State::parse(text)), reason, "{text}");
+            assert_eq!(invalid(State::parse(&text)), reason, "{text}");
         }
     }
 
@@ -359,10 +541,7 @@ mod tests {
     fn a_saved_state_loads_from_state_json_and_replaces_the_one_before() {
         let dir = temp_dir("state-save");
         State::default().save(&dir).unwrap();
-        let started = State {
-            attempts: 1,
-            written: true,
-        };
+        let started = state(1, Step::Copy, false);
         started.save(&dir).unwrap();
         assert!(dir.join("state.json").is_file());
         assert_eq!(State::load(&dir).unwrap(), started);
@@ -378,11 +557,102 @@ mod tests {
     fn report() -> Report {
         Report {
             outcome: Outcome::Done,
-            snapshot: SNAPSHOT.to_owned(),
+            snapshot: Some(SNAPSHOT.to_owned()),
             safety_snapshot: Some(SAFETY.to_owned()),
             home: Home::Keep,
             message: String::new(),
-            when: 1_790_000_600,
+            when: Some(1_790_000_600),
+        }
+    }
+
+    /// PLAN 6b.10: the report of last resort. Only `failed` may lack the snapshot or the time.
+    #[test]
+    fn a_failed_result_may_have_no_snapshot_and_no_time() {
+        let minimal = Report {
+            outcome: Outcome::Failed,
+            snapshot: None,
+            safety_snapshot: None,
+            home: Home::Keep,
+            message: "result could not be saved, see journal".to_owned(),
+            when: None,
+        };
+        assert_eq!(
+            minimal.to_text().unwrap(),
+            r#"{
+  "version": 1,
+  "outcome": "failed",
+  "snapshot": null,
+  "safety_snapshot": null,
+  "home": "keep",
+  "message": "result could not be saved, see journal",
+  "when": null
+}
+"#
+        );
+        assert_eq!(Report::parse(&minimal.to_text().unwrap()).unwrap(), minimal);
+        // One of the two alone is fine too.
+        for report in [
+            Report {
+                snapshot: Some(SNAPSHOT.to_owned()),
+                ..minimal.clone()
+            },
+            Report {
+                when: Some(1_790_000_600),
+                ..minimal.clone()
+            },
+        ] {
+            assert_eq!(Report::parse(&report.to_text().unwrap()).unwrap(), report);
+        }
+    }
+
+    #[test]
+    fn any_other_outcome_needs_its_snapshot_and_its_time() {
+        for outcome in [
+            Outcome::Done,
+            Outcome::Problems,
+            Outcome::BootKept,
+            Outcome::BootBroken,
+            Outcome::NotStarted,
+        ] {
+            let no_snapshot = Report {
+                outcome,
+                snapshot: None,
+                ..report()
+            };
+            assert_eq!(
+                invalid(no_snapshot.to_text()),
+                "\"snapshot\" is null, and the outcome isn't \"failed\""
+            );
+            let no_time = Report {
+                outcome,
+                when: None,
+                ..report()
+            };
+            let reason = "\"when\" is null, and the outcome isn't \"failed\"";
+            assert_eq!(invalid(no_time.to_text()), reason);
+            let text = Report {
+                outcome,
+                ..report()
+            }
+            .to_text()
+            .unwrap();
+            assert_eq!(
+                invalid(Report::parse(&text.replace("1790000600", "null"))),
+                reason
+            );
+        }
+    }
+
+    /// A hardware clock in local time puts the apply's clock hours off the plan's: a result's
+    /// time is taken by itself, and no report knows a plan.
+    #[test]
+    fn a_results_time_is_only_checked_to_be_a_time() {
+        for when in [1, 1_000, i64::MAX] {
+            let report = Report {
+                when: Some(when),
+                ..report()
+            };
+            assert_eq!(Report::parse(&report.to_text().unwrap()).unwrap(), report);
         }
     }
 
@@ -472,7 +742,7 @@ mod tests {
     fn a_result_that_wouldnt_read_back_isnt_written() {
         let dir = temp_dir("result-bad");
         let bad = Report {
-            when: 0,
+            when: Some(0),
             ..report()
         };
         assert!(matches!(bad.save(&dir), Err(FileError::Invalid(_))));

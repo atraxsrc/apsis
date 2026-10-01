@@ -2319,3 +2319,112 @@ changes `restore::esp`.
   scratch workspace; the workspace run is the owner's. The partial-set test was seen failing
   first (`Ok(.. Wrong(PreviousIncomplete))` where the refusal was expected); the full and
   empty set test passed from the start, as it holds what was already so.
+
+## 2026-10-01 - 6b: the apply state machine (core)
+
+`restore::apply::apply(paths, runner)` is PLAN 6b.6 as a state machine. `Paths` is the state
+folder, the ESP and the root, so it runs on temp trees. `Runner` is everything that needs
+root or a real machine: `is_armed`, `open_backup` (step 2), `copy` (pass 1), `back_up_esp`,
+`refresh_boot`, `put_back_esp`, `remove_protected_kernel`, `disarm`, `now`, `say`, `restart`.
+It returns `End::NotArmed`, `End::Retry { attempt }` or `End::Finished(Outcome)`. The plan,
+the state, the result and the ESP backup go only through `plan`, `state` and `esp`: there's
+no JSON in the module. The tests use a fake runner on the ESP module's temp-tree lab (its
+test module is now shared inside `restore`).
+
+The outcomes, as built (PLAN's names):
+
+| what happens | outcome | ESP |
+|---|---|---|
+| step 2 fails, nothing written yet | `not-started` | untouched |
+| step 2 fails after an earlier copy wrote | `failed` | untouched |
+| the copy breaks, attempts 1 and 2 | retry, no result | untouched |
+| the copy breaks on attempt 3, or the power cut attempt 3 | `failed` | untouched |
+| the ESP backup fails (also `PreviousIncomplete`, the backstop) | `boot-kept` | untouched, no refresh |
+| the refresh fails, or exits 0 and the check against the restored tree fails | `boot-kept` | put back |
+| the put-back fails, or works onto a kernel whose files are gone | `boot-broken` | unknown |
+| the check passes | `done`, or `problems` after exit 23 | refreshed |
+| the check passes, the kept kernel can't be removed | `problems` | refreshed |
+| `request.json` or `state.json` missing or refused | `failed` | untouched |
+
+Picked where PLAN was open, or changed from it:
+
+1. **`state.json` has two more fields: `step` and `problems`** (version 1, unshipped).
+   `step` is `armed`, `copy`, `boot-files` or `end`. Without it a boot after a power cut
+   can't tell a copy that ended from one that was cut, and `attempts` would need a fourth
+   count for a re-run after the third copy ended. `problems` carries exit 23 over a power
+   cut. Validation: `armed` only with no attempt; `copy` and `boot-files` only with one;
+   `problems` only after the copy ended.
+2. **A copy that ended is never run again** (PLAN said the next boot runs pass 1 again and
+   "finds almost nothing to copy"). The price: `Runner::copy` must `sync` before it returns,
+   since rsync doesn't. It's in the trait's doc and in PLAN step 3. It also saves a full scan
+   of `/` on a resumed boot.
+3. **The power cutting the third copy is `failed`**, with no fourth copy: `attempts` is
+   saved before the copy, so 3 with step `copy` means the third never ended.
+4. **The ESP backup is never taken twice** (owner: "never retake it once rsync has
+   started"). A folder that's there and verifies (and is of this root UUID) is kept. This
+   replaces PLAN 6b.10's "taken again only if the ESP still matches the protected kernel".
+5. **A backup that's there and doesn't verify**: no retake, no boot refresh, no put-back.
+   The outcome is read off the ESP as it is: it passes the check against the restored tree:
+   `done` or `problems`, with step 7; else it's the kernel from before, whole
+   (`esp::boots_kernel`, new): `boot-kept`; else `boot-broken`.
+   - This covers the power going during the backup itself (no manifest), where a retake
+     would in fact be safe (no refresh can have run). It ends `boot-kept` instead. Allowing
+     that one retake is a small change if the owner prefers it.
+   - In the "passes the check" branch nobody knows whether both commands exited 0 in the
+     boot that was cut. The check is the same byte compare, so it's taken as passed.
+6. **`boot-kept` is checked, not assumed**: after a put-back that worked, the ESP must boot
+   the plan's running kernel with its `/boot` files and modules there. If not: `boot-broken`.
+7. **The order of step 8**: `result.json`, then step `end`, then disarm (the link first),
+   then `esp-backup/`, then restart. PLAN listed the removals first. With the result first,
+   a power cut never leaves a finished restore without a result; a boot that finds the link
+   and step `end` only cleans up.
+8. **Every end restarts** (`Runner::restart`, once, last). "Boot normally" is a restart with
+   the link gone. How the helper does it (logind, `reboot.target`) is its own.
+9. **A state that can't be saved stops the step that depends on it**: before the copy,
+   `not-started` (or `failed`); before the boot files, `boot-kept` with the ESP untouched.
+   The `end` save is the only one that's allowed to fail.
+10. **An unreadable `request.json`**: no apply, disarm, `failed` with `snapshot: null` and
+    the reason, plus "nothing was written" if `state.json` reads and says so, else "the
+    system may be partly restored". It can't be `not-started`, because only `failed` may
+    lack the snapshot (item 12).
+11. **An unreadable `state.json`** (the plan reads): the same, `failed` with the snapshot
+    named and "whether anything was written isn't known".
+12. **`result.json` version 1 changed** (unshipped): `snapshot` and `when` may be `null`,
+    only with `failed`. `Report::snapshot` and `Report::when` are `Option`s.
+13. **The minimal report is always `failed`.** PLAN said "the outcome is never lost"; the
+    owner's rule says null only with `failed`. Both hold this way: the message is "result
+    could not be saved, see journal (the restore ended: <outcome>)". It keeps the snapshot,
+    the safety snapshot and a time after 1970; if that's refused as well, it's the message
+    alone. The one way to get there with a good plan is a clock at or before 1970, where a
+    finished restore is then shown as `failed`. That's the cost of the rule; say if `when`
+    should be allowed to be null for every outcome instead.
+14. **`End::Finished` gives the outcome that's in `result.json`**, so the journal and the
+    window agree.
+15. **Step 7 has a guard in core**: the runner is never asked to remove a kernel the ESP
+    boots (the checked current or previous version), whatever the snapshot holds. A kernel
+    that can't be removed is `problems`, not a failure.
+16. **No clock decides anything.** `Runner::now` is asked once, for the result's time.
+    `Plan::is_too_old` isn't called. Tested with a plan from 1970, one from the clock's
+    future, and a clock set back.
+17. **`CheckFailure` has words** (`Display`), for the result's message.
+18. **Stale plan removal isn't in core**: PLAN 6b.5 gives it to the helper ("removed at the
+    helper's next call", "the next arm or the helper's next start"). Nothing was built.
+
+Not covered here:
+
+- The real runner, and so anything about rsync itself: the real-rsync temp-tree tests are
+  the next slice.
+- A power cut inside one runner step (rsync half done, a put-back between two files) is the
+  step's own to survive: rsync picks up, `esp::put_back` removes its leftover temporary
+  file. The cut test stops before and after each thing asked of the runner, not inside.
+- The cut tests make about 230 temp labs with fsyncs, so apsis-core's unit tests now take
+  about 10 s instead of under 1 s.
+
+- **Verified** with apsis-core's tests (300 unit, 35 of them the apply's) and clippy
+  `-D warnings` through the scratch workspace; the workspace run is the owner's. The state
+  and result tests, and `boots_kernel`'s, failed first as compile errors on the missing API.
+  The apply's 35 failed first on a body that was `todo!()`. Since they then passed in one
+  step, five deliberate breakages were run and undone, each failing on assertions: the
+  attempt not saved before the copy (5 tests), a backup that doesn't verify taken again
+  (4), the end not saved before the cleanup (6), a refresh that exits 0 taken as passed
+  without the check (1), no limit on attempts cut by the power (1).
