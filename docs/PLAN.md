@@ -424,8 +424,11 @@ restore can't bring back what the snapshot doesn't have.
 
 ## Phase 6b - Full-system restore (release 0.5.0)
 
-**Status: design approved with changes (owner, 2026-09-30); this version has them. 0.4.1 is
-released; the core slice (6b.13 step 1) started 2026-10-01 on branch `restore-6b-core`.**
+**Status: design approved with changes (owner, 2026-09-30); this version has them. 0.4.1 and
+0.4.2 are released (0.4.2 on 2026-10-01, check 13 passed; main merged into `restore-6b-core`
+the same day); the core slice (6b.13 step 1) is done on `restore-6b-core`, the core-only parts
+of the helper slice too. Next: check 0.4 (6b.12), then the helper slice build (6b.13 step 3,
+from item 2).**
 Core so far: the filter and protect list, home detection (`apsis_core::restore::filter`), the
 restore's rsync argv (`apsis_core::restore::argv`), the refusals of 6b.7 except Busy
 (`apsis_core::restore::refusal`), the Apsis in a snapshot (`apsis_core::restore::apsis`),
@@ -1783,7 +1786,8 @@ Checks:
 
 ### 6b.13 Order of work (after the final look)
 
-0. **0.4.1** (above), released on its own, with its apsis-test checks.
+0. **0.4.1** (above), released on its own, with its apsis-test checks. **0.4.2** (below)
+   likewise, released 2026-10-01 with check 13 passed, and merged into `restore-6b-core`.
 1. **Core** (no root): filter and protect list, refusals, home and format detection, Apsis
    version reading, space parsing, plan and state files, argv, ESP backup and check, the apply
    state machine with a fake runner, real-rsync temp-tree tests. The state machine does no
@@ -1832,10 +1836,13 @@ Checks:
       --preserve-live-mode`; the names of `Helper3` (interface, error prefix, methods, the
       `restore` action, `OP_RESTORE`, `OP_DELETE_MANY`); the wire types of `CheckRestore` and
       `RestoreResult`; the words of `Refusal` on the wire and back.
-   2. **`State`**: `Running::end` (release, then announce); the `ready` plan next to the
-      lock (refuses writes, not reads; a job of kind `restore`; keeps the helper alive;
-      removed when the starter's bus name goes); `JobKind::Restore`.
-   3. **`DeleteMany`** if 0.4.2 hasn't shipped it (below).
+   2. **`State`**: `Running::end` (release, then announce) **is in from 0.4.2**, as is the
+      end-before-`Finished` ordering (the end's announcement carries a `oneshot` that
+      `start` awaits, 2 s at most); the `ready` plan next to the lock (refuses writes, not
+      reads; a job of kind `restore`; keeps the helper alive; removed when the starter's bus
+      name goes); `JobKind::Restore`. **This is where the build starts.**
+   3. **`DeleteMany`**: shipped in 0.4.2 on `Helper2`; here it only moves to `Helper3` with
+      the other methods.
    4. **`CheckRestore`**: read-only mount, the reads (mountinfo, lsblk, `findmnt`, the ESP's
       names, `/sys/firmware/efi`, the kernelstub configuration, the pending names, the live
       crypttab; the snapshot's `info.json`, `exclude.list`, `boot/`, `usr/lib/modules/`, its
@@ -2042,7 +2049,25 @@ recommendation the design is written to. **Answered by the owner the same day** 
     retry after Busy; with shared reads nothing gets Busy from a read, and the `BusyRetry`
     timer stays as the fallback for a Busy from a write. Recommended.
 
-## 0.4.2 - Reads that share, one bulk-delete job (design 2026-10-01, not built)
+## 0.4.2 - Reads that share, one bulk-delete job (released 2026-10-01)
+
+**Status: released as v0.4.2 (2026-10-01), from main at 41bcac9; check 13 passed on
+apsis-test, both monitors on.** What the owner saw, against the design below: lists from the
+window and the two panel applets overlap in the journal (`list for :1.A: ok`, `list for
+:1.B: ok` in the same second) with the same bus name per process every time, and none
+refused; a create's end is followed by exactly one list per process (three); a selection of
+three is one `delete-many` job (one password, "Deleting 1 of 3" to "Deleted 3 snapshots",
+then three lists); the stop-at-failure case (two selected, the older deleted behind Apsis's
+back) shows "Delete stopped at <name>" with the Deleted / Not deleted tooltip **after the
+race fix** (the window's own end arriving after its `Finished` was taken for another
+window's; commit 2d3f8c7, in the release: the end is on the bus before `Finished`, and the
+applet copes with either order); the helper's idle exit still works (inactive after the
+minute); zero refusals in the whole session. The `%F` backlog item below rode along
+(`Exec=apsis`). Also in the release: the helper's reasons shown without the `apsis-helper:`
+prefix (41bcac9). After the tag: the fake-runner mount tests no longer touch
+`/run/apsis/backup`, which CI's runner can't create (10ac37c on main; test-only). DECISIONS
+2026-10-01 has the build, the fix and check 13's account. The text below is the design as
+built.
 
 **A small release before 0.5.0, first** (owner, 2026-10-01): it changes the lock order the
 restore depends on, so it's proven in a small release before the restore is built on it.
@@ -2143,8 +2168,8 @@ both monitors on: one `delete-many` job, then one `list` per process (three), no
 :1.42: ok`, `list for :1.7: ok`, `list for :1.9: ok` (one per process, concurrent, none
 refused) and nothing more until the next action.
 
-**Backlog, not 0.4.2 unless trivial** (owner, 2026-10-01): the applet entry
-`io.github.atraxsrc.Apsis.desktop` has `Exec=apsis %F`, and cosmic-panel passes `%F` to the
+**Backlog, not 0.4.2 unless trivial** (owner, 2026-10-01; **done in 0.4.2**, `Exec=apsis`):
+the applet entry `io.github.atraxsrc.Apsis.desktop` had `Exec=apsis %F`, and cosmic-panel passes `%F` to the
 applet literally. Today it's harmless: `main.rs` `mode` and `StartView::from_args` match only
 `--window`, `--settings` and `--about` and ignore everything else, so a literal `%F` does
 nothing. **Recommended: drop `%F`** (the app takes no files; `MimeType=` is empty; the
