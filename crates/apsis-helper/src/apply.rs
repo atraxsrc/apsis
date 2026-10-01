@@ -15,7 +15,7 @@ use apsis_core::progress::parse_rsync;
 use apsis_core::restore::apply::{self, Copied, Paths, SnapshotFound};
 use apsis_core::restore::esp::{self, EspError, Manifest};
 use apsis_core::restore::plan::Plan;
-use apsis_core::restore::{argv, file, filter, refusal};
+use apsis_core::restore::{argv, filter, refusal};
 use apsis_core::usage::fstype_at;
 use apsis_core::{Error, Runner};
 
@@ -45,19 +45,26 @@ pub fn apply_restore() -> ExitCode {
         }
     }));
     let mut runner = RealRunner::system();
-    let end = apply::apply(
-        &Paths {
-            state_dir: Path::new(file::DIR),
-            esp: Path::new("/boot/efi"),
-            root: Path::new("/"),
-        },
-        &mut runner,
-    );
+    let end = run(&mut runner);
     eprintln!("apsis-helper: apply-restore ended: {end:?}");
     match apply::exit_code(end, runner.restart_failed) {
         0 => ExitCode::SUCCESS,
         _ => ExitCode::FAILURE,
     }
+}
+
+/// The apply for this boot on `runner`'s root: the boot screen's line first, once (owner,
+/// 2026-10-02: one `plymouth display-message` at the start; a live bar during the copy is
+/// 0.5.x's), then core's state machine.
+pub fn run<R: Runner>(runner: &mut RealRunner<R>) -> apply::End {
+    use apply::Runner as _;
+    runner.say(COPYING);
+    let paths = Paths {
+        state_dir: &runner.paths.state_dir.clone(),
+        esp: &runner.esp.clone(),
+        root: &runner.root.clone(),
+    };
+    apply::apply(&paths, runner)
 }
 
 /// The real runner: `/` and `/boot/efi` for real, a temp root in the tests; `tools` runs the
@@ -236,7 +243,6 @@ impl<R: Runner> apply::Runner for RealRunner<R> {
     }
 
     fn copy(&mut self, plan: &Plan) -> Copied {
-        self.say(COPYING);
         let localhost = self.snapshot_dir(plan).join("localhost");
         let argv = argv::rsync(
             &localhost,
@@ -592,6 +598,23 @@ mod tests {
         fs::remove_dir_all(&mount).unwrap();
     }
 
+    /// The apply's first words (owner, 2026-10-02): the boot screen's line, once, before
+    /// anything else, through plymouth; a live bar during the copy is 0.5.x's.
+    #[test]
+    fn the_apply_says_its_line_first_and_leaves_another_tools_link_alone() {
+        let root = temp("root");
+        let mut runner = RealRunner::under(&root, &temp("mount"), FakeTools::default());
+        let end = run(&mut runner);
+        assert_eq!(end, apsis_core::restore::apply::End::NotArmed);
+        let calls = runner.tools.calls();
+        assert_eq!(calls[0], plymouth_message_argv(COPYING));
+        assert!(
+            !calls.iter().any(|c| c == &reboot_argv()),
+            "no restart when not armed"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn say_and_restart_go_through_the_tools() {
         let root = temp("root");
@@ -625,10 +648,7 @@ mod tests {
         let mount = temp("mount");
         let stdout = format!("file one\n{DELETIONS_SKIPPED}\nfile two\n");
         let stderr: String = (1..=30).map(|n| format!("rsync: error {n}\n")).collect();
-        // The boot screen's line goes to plymouth first, then rsync runs.
-        let tools = FakeTools::default()
-            .answer(true, 0, "", "")
-            .answer(false, 23, &stdout, &stderr);
+        let tools = FakeTools::default().answer(false, 23, &stdout, &stderr);
         let mut runner = RealRunner::under(&root, &mount, tools);
         let copied = runner.copy(&plan());
         assert_eq!(copied.exit, Some(23));
@@ -646,8 +666,7 @@ mod tests {
             copied.tail
         );
         let calls = runner.tools.calls();
-        assert_eq!(calls[0], plymouth_message_argv(COPYING));
-        let argv = &calls[1];
+        let argv = &calls[0];
         assert_eq!(argv[0], "rsync");
         assert!(argv.iter().any(
             |a| a == "--exclude-from=/var/lib/apsis/restore/restore.filter"

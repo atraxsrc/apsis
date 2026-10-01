@@ -377,6 +377,7 @@ impl Lab {
             home: run.home,
             protected_kernel: run.protected_kernel,
             snapshot_excludes: EXCLUDE_LIST,
+            restore_root: true,
         })
         .unwrap();
         let path = self.state.join("restore.filter");
@@ -970,6 +971,7 @@ fn a_separate_home_has_its_mount_rule_only_when_its_kept() {
             home,
             protected_kernel: None,
             snapshot_excludes: "",
+            restore_root: true,
         })
         .unwrap()
     };

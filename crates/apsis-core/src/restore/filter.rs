@@ -49,6 +49,10 @@ pub struct Request<'a> {
     pub protected_kernel: Option<&'a str>,
     /// The text of the snapshot's own `exclude.list`.
     pub snapshot_excludes: &'a str,
+    /// `/root` is restored (the snapshot has it, with content: `dialog::Dialog::has_root`).
+    /// Otherwise `/root` is kept whole, like a kept `/home` (owner, 2026-10-02): the
+    /// snapshot's own `+ /root/**` line would let `--delete` empty it against an empty source.
+    pub restore_root: bool,
 }
 
 /// The whole filter, one rule per entry, in order.
@@ -85,6 +89,9 @@ pub fn rules(request: &Request<'_>) -> Result<Vec<String>> {
     }
     if request.home == Home::Keep {
         exclude("/home/***");
+    }
+    if !request.restore_root {
+        exclude("/root/***");
     }
     if let Some(version) = request.protected_kernel {
         if !is_kernel_version(version) {
@@ -252,7 +259,31 @@ mod tests {
             home,
             protected_kernel: Some(KERNEL),
             snapshot_excludes: EXCLUDES,
+            restore_root: true,
         }
+    }
+
+    /// `/root` is kept whole when the snapshot has nothing there (owner, 2026-10-02): the
+    /// rule comes before the snapshot's own lines, whose `+ /root/**` would otherwise let
+    /// `--delete` empty it.
+    #[test]
+    fn root_is_kept_when_the_snapshot_has_nothing_there() {
+        let kept = rules(&Request {
+            restore_root: false,
+            ..request(MOUNTINFO, Home::Keep)
+        })
+        .unwrap();
+        let rule = kept
+            .iter()
+            .position(|r| r == "- /root/***")
+            .expect("the rule");
+        let plus = kept
+            .iter()
+            .position(|r| r == "+ /root/**")
+            .expect("the snapshot's line");
+        assert!(rule < plus, "{kept:?}");
+        let restored = rules(&request(MOUNTINFO, Home::Keep)).unwrap();
+        assert!(!restored.iter().any(|r| r == "- /root/***"), "{restored:?}");
     }
 
     fn with_separate_home() -> String {

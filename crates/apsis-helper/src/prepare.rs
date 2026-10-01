@@ -179,6 +179,7 @@ pub fn prepare(request: &Request, state: &Arc<State>, cancel: Arc<Cancel>) -> Re
         home: request.home,
         protected_kernel: Some(&running_kernel),
         snapshot_excludes: excludes,
+        restore_root: dialog.has_root,
     })?;
     filter::save(dir, &rules).map_err(file_error)?;
     let localhost = snapshot_dir.join("localhost");

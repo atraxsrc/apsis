@@ -436,6 +436,7 @@ pub(super) mod tests {
             home: Home::Keep,
             protected_kernel: None,
             snapshot_excludes: "",
+            restore_root: true,
         })
         .unwrap();
         fs::write(lab.join("restore.filter"), filter::to_text(&rules)).unwrap();

@@ -3848,3 +3848,41 @@ rest, all green), `cargo clippy --workspace --all-targets -- -D warnings` clean,
 first real apply, needs its runbook, for which the check 0.4 runbook is the template
 (DECISIONS 2026-10-01, "check 0.4 passed"). The helper's journal lines to expect are named
 in the entries above.
+
+## 2026-10-02 - 6b helper slice: the owner's answers to the four open items
+
+Each accepted, with an addition, and built the same day (tests first).
+
+1. **`has_root`**: "the snapshot's `exclude.list` lets `/root` in" is accepted, **and the
+   snapshot's `/root` must have content.** If the list allows `/root` but the folder is empty
+   or missing, `has_root` is false, so a restore with `--delete` can never wipe `/root` against
+   an empty source. **Where the check lives**: the helper reads it in
+   `check::SnapshotFiles::read` (`root_has_content`: `localhost/root` is a folder by its own
+   name with at least one entry), hands it to core as `dialog::Inputs::root_has_content`, and
+   core's `dialog::build` makes `has_root = filter::has_root(excludes) && root_has_content`.
+   So it's in the dialog (`CheckRestore`) and again at plan time (`prepare` runs the same
+   `check::dialog`). **What makes it bite**: `filter::Request` gained `restore_root`
+   (`prepare` passes `dialog.has_root`), and `filter::rules` adds `- /root/***` when it's
+   false, before the snapshot's own lines (whose `+ /root/**` would otherwise let `--delete`
+   empty it). Tests: `dialog::tests::root_counts_only_when_the_snapshot_has_something_there`,
+   `filter::tests::root_is_kept_when_the_snapshot_has_nothing_there`, and `check`'s snapshot
+   test (a file in `root/`, then an empty folder, then none).
+2. **A refused "Restart now" removes the plan**, for every refusal and failure, not only "too
+   old". Reason: no waiting state (PLAN 6b.5, owner 2026-09-30); anything changed between the
+   safety snapshot and a later restart is in no snapshot, so a kept prompt could silently wipe
+   it. **The "Can't restore" dialog must say the plan was dropped and that a fresh Restore
+   re-measures**: added to 6b.8's string table for the UI slice (`restart-refused-note`: "The
+   preparation was dropped. Restore again to measure afresh."); it wasn't in the list before.
+3. **Plymouth's bar after the copy**: accepted for 0.5.0, **with one `plymouth
+   display-message` at the start of the apply** ("Restoring the system. Don't turn off the
+   computer.", the boot screen's wording). Built: `apply::run` says it first, before core's
+   state machine; `copy` no longer says it. One call, no second runner. **A live bar during
+   the copy is a 0.5.x backlog item** (PLAN "0.5.x - After the restore").
+4. **The dry runs under `LC_ALL=C.UTF-8`**: accepted, provided the real restore runs under the
+   same locale. **It does**: `RealRunner::system()` runs rsync through `QuietRunner::new(SAFE_PATH)`,
+   the same runner type with the same cleared environment and `LC_ALL=C.UTF-8`
+   (`apsis_core::native::runner`), as `prepare`'s dry runs do; so the `--stats` numbers of the
+   dry run and the real run come from the same locale. **Unverified, for the owner**: that
+   `C.UTF-8` exists on the HP and in the offline boot. Read-only check:
+   `ssh apsis-test 'LC_ALL=C.UTF-8 locale charmap'` (expect `UTF-8`). Added to the claims
+   table.

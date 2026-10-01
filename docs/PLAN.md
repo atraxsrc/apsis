@@ -1256,6 +1256,8 @@ dashes, no rsync or paths on screen (the helper's own words only in tooltips).
 | buttons | `Cancel restore`, `Restart now` |
 | status | `Restore cancelled. The safety snapshot was kept.` / `Restore cancelled` |
 | ready, too old | `The preparation is too old. Start the restore again.` |
+| ready, gone | `The preparation is gone. Start the restore again.` |
+| refusal at Restart now (owner, 2026-10-02) | `The preparation was dropped. Restore again to measure afresh.` (a third line in the "Can't restore" dialog when the refusal came from "Restart now") |
 | boot screen | the six lines under "Boot screen" |
 | result | `System restored to {date}` |
 | result | `System restored · still boots the previous kernel · see README` |
@@ -2002,6 +2004,7 @@ Checks:
    | The baseline snapshot's two kernelstub hooks contain `--preserve-live-mode` | verified | owner, `grep -c` 1 each |
    | `/boot/vmlinuz` is a link to the newest installed kernel on Pop!_OS, so the check and kernelstub agree | verified | owner, 2026-10-01: `/boot/vmlinuz` -> `vmlinuz-7.1.5-76070105-generic`, `/boot/vmlinuz.old` -> 7.0.11; the same for `initrd.img` and `initrd.img.old` |
    | `udevadm wait --timeout` exists | verified | systemd 255.4 |
+   | `C.UTF-8` exists on the HP and in the offline boot (the dry runs and the real restore both run rsync under `LC_ALL=C.UTF-8`) | **unverified** | `ssh apsis-test 'LC_ALL=C.UTF-8 locale charmap'` (expect `UTF-8`) |
    | Flatpak's ostree repositories are hard-link heavy; `/usr` has few | verified | owner: user repo 1.9G `du` vs 4.1G `du -l`; `/usr` 28 multiply-linked files; system repo empty on apsis-test (decision 6) |
    | Every `List` from the applet opens a new system-bus connection, so each call has its own unique name | verified | `HelperClient::connect` runs `Connection::system()` per call; `list_snapshots`, `background_list`, `poll_job` each connect |
    | A process told Busy lists again on any job's end, and a `List` is itself a job that announces its end: three processes make 3 + 2 + 1 = 6 lists with 3 refusals | verified in the code; the count matches the journal | `app.rs` `on_job` (`changed \|\| self.helper_busy`), `service.rs` `list` (`begin(JobKind::List)`) |
@@ -2261,6 +2264,11 @@ can ride with 0.4.2's packaging. The argument scans stay as they are, which alre
 anything unknown; no explicit `%F` handling in code.
 
 ## 0.5.x - After the restore (not scheduled)
+
+- **A live plymouth progress bar during the copy** (owner, 2026-10-02): 0.5.0 sends the boot
+  screen's line once at the start of the apply and the bar's percents after rsync returns
+  (`run_streaming`'s callback can't borrow the runner's tools). A second runner for plymouth,
+  or a channel from the callback, would show the bar as the copy runs.
 
 1. **`-H`** in create and restore (decision 6, owner, 2026-10-01): hard links kept across a
    snapshot and a restore. The cost on create is rsync's table of multiply-linked files on

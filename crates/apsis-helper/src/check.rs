@@ -117,6 +117,8 @@ pub struct SnapshotFiles {
     pub crypttab: Option<String>,
     /// `localhost/var/lib/dpkg/status`.
     pub dpkg_status: Option<String>,
+    /// `localhost/root` is a folder with at least one entry (owner, 2026-10-02).
+    pub root_has_content: bool,
 }
 
 impl SnapshotFiles {
@@ -147,6 +149,7 @@ impl SnapshotFiles {
             has_kernelstub: root.join("usr/bin/kernelstub").symlink_metadata().is_ok(),
             crypttab: read_nofollow(&root.join("etc/crypttab")),
             dpkg_status: read_nofollow(&root.join("var/lib/dpkg/status")),
+            root_has_content: !names_in(&root.join("root")).is_empty(),
             ..top
         }
     }
@@ -182,6 +185,7 @@ pub fn dialog(live: &Live, snapshot: &SnapshotFiles) -> Dialog {
         live_crypttab: &live.crypttab,
         boot_files: live.boot_files.clone(),
         snapshot_excludes: snapshot.excludes.as_deref(),
+        root_has_content: snapshot.root_has_content,
         rsync_flags,
         dpkg_status: snapshot.dpkg_status.as_deref(),
     })
@@ -338,6 +342,7 @@ mod tests {
         write(root.join("usr/bin/kernelstub"), "#!/usr/bin/python3\n");
         write(root.join("etc/crypttab"), "# none\n");
         write(root.join("var/lib/dpkg/status"), DPKG);
+        write(root.join("root/.bashrc"), "# root's\n");
     }
 
     /// A Pop!_OS root with its ESP booting the kernel `boot` links to.
@@ -377,6 +382,12 @@ mod tests {
         assert!(files.has_kernelstub);
         assert_eq!(files.crypttab.as_deref(), Some("# none\n"));
         assert_eq!(files.dpkg_status.as_deref(), Some(DPKG));
+        assert!(files.root_has_content);
+        // An empty /root, or none: no content (the owner's rule, 2026-10-02).
+        fs::remove_file(dir.join("localhost/root/.bashrc")).unwrap();
+        assert!(!SnapshotFiles::read(&dir).root_has_content);
+        fs::remove_dir(dir.join("localhost/root")).unwrap();
+        assert!(!SnapshotFiles::read(&dir).root_has_content);
         fs::remove_dir_all(&dir).unwrap();
     }
 

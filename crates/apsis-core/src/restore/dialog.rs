@@ -25,7 +25,8 @@ pub struct Dialog {
     pub refusal: Option<Refusal>,
     /// The snapshot holds home files, so the dialog offers the choice (6b.3).
     pub has_home: bool,
-    /// The snapshot holds `/root`, restored with the system (not a choice).
+    /// The snapshot holds `/root` with content, so it's restored with the system (not a
+    /// choice); otherwise the filter keeps the live `/root` whole.
     pub has_root: bool,
     /// Made without ACLs and extended attributes (0.4.1).
     pub old_format: bool,
@@ -48,6 +49,10 @@ pub struct Inputs<'a> {
     pub boot_files: Result<(), Refusal>,
     /// The snapshot's `exclude.list`, if it has one.
     pub snapshot_excludes: Option<&'a str>,
+    /// The snapshot's `localhost/root` is a folder with something in it (owner, 2026-10-02):
+    /// a list that lets `/root` in isn't `has_root` without it, or the restore's `--delete`
+    /// would empty `/root` against an empty source.
+    pub root_has_content: bool,
     /// The raw `apsis-rsync-flags` string from its `info.json`, `""` when missing.
     pub rsync_flags: &'a str,
     /// The snapshot's `var/lib/dpkg/status`, if it has one.
@@ -75,7 +80,7 @@ pub fn build(inputs: &Inputs<'_>) -> Dialog {
     Dialog {
         refusal,
         has_home: has_home(excludes),
-        has_root: has_root(excludes),
+        has_root: has_root(excludes) && inputs.root_has_content,
         old_format: is_old_format(inputs.rsync_flags),
         apsis: in_snapshot(inputs.dpkg_status),
     }
@@ -137,6 +142,7 @@ mod tests {
             live_crypttab: "",
             boot_files: Ok(()),
             snapshot_excludes: Some(EXCLUDES),
+            root_has_content: true,
             rsync_flags: "-aAX --numeric-ids",
             dpkg_status: Some(DPKG_0_5),
         }
@@ -154,6 +160,21 @@ mod tests {
                 apsis: InSnapshot::Current,
             }
         );
+    }
+
+    /// The owner's rule (2026-10-02): a list that lets `/root` in isn't enough; the
+    /// snapshot's `/root` must have content, or the restore would wipe `/root` against an
+    /// empty source. Then `has_root` is false and the filter keeps `/root`.
+    #[test]
+    fn root_counts_only_when_the_snapshot_has_something_there() {
+        let mut inputs = good();
+        assert!(build(&inputs).has_root);
+        inputs.root_has_content = false;
+        assert!(!build(&inputs).has_root);
+        // Content without the list letting it in: still false (rsync wouldn't copy it).
+        inputs.root_has_content = true;
+        inputs.snapshot_excludes = Some("/dev/*\n/root/**\n");
+        assert!(!build(&inputs).has_root);
     }
 
     /// 6b.7's order: the system and snapshot checks, the Pop!_OS upgrade, the crypttab, the
