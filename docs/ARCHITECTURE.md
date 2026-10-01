@@ -87,9 +87,12 @@ built-in `/root/**` and `/home/*/**`).
 
 The applet calls the helper on a background task (libcosmic `Task`) and never blocks the UI
 thread. `helper::HelperClient` is the applet's client: async (zbus on the applet's tokio),
-since create and delete wait for a signal. `job()` asks `NameHasOwner` first so it never
-starts the helper just to hear it's idle; `job_changes()` streams `JobChanged` and the helper
-leaving the bus, without starting it.
+since create and delete wait for a signal. One per process (cosmic-panel runs one applet
+process per display, plus the window): made at start, kept in the model, re-made when the bus
+drops, so all of a process's calls come from one bus name. `job()` asks `NameHasOwner` first
+so it never starts the helper just to hear it's idle; `job_changes()` streams `JobChanged` and
+the helper leaving the bus, without starting it. A process lists once per create or delete end
+it hears of; a selection of several is one `DeleteMany` call.
 
 ## Config
 
@@ -148,11 +151,12 @@ files in `resources/helper/` against them.
 |---|---|
 | bus name | `io.github.atraxsrc.Apsis.Helper` (system bus, owned by root only) |
 | object / interface | `/io/github/atraxsrc/Apsis/Helper`, `io.github.atraxsrc.Apsis.Helper2` |
-| `List() -> ((sssa(sss)asas)a{st})` | `(device, uuid, mode, [(name, tags, comment)], warnings, leftovers)` and the backup device's usage in bytes (`total`, `used`, `free`, all or none, `statvfs` while mounted); polkit `list`, not interactive |
+| `List() -> ((sssa(sss)asas)a{st})` | `(device, uuid, mode, [(name, tags, comment)], warnings, leftovers)` and the backup device's usage in bytes (`total`, `used`, `free`, all or none, `statvfs` while mounted); polkit `list`, not interactive. A read, not a job (0.4.2): lists share one read-only mount and run at the same time; never announced |
 | `Create(s comment)` | a snapshot (leftovers removed first); polkit `create`, interactive; returns once started, `Finished("create", ..)` follows |
 | `Delete(s name)` | one snapshot or leftover (see Backend above), only a name the fresh list has; polkit `delete`, interactive; returns once started, `Finished("delete", ..)` follows |
+| `DeleteMany(as names)` | (0.4.2) two or more distinct snapshot names, as one job: each in order, `Job`'s `snapshot` the one being deleted and `percent` done of total, stopping at the first failure; polkit `delete` once, interactive; returns once started, `Finished("delete-many", ..)` follows, its failure message encoding what was deleted, what failed and what's left (`Error::DeleteManyStopped`) |
 | `Stop(s snapshot)` | stops the running create if it makes `snapshot`; no prompt for the starter's uid, else polkit `stop`; refused once the snapshot is being put in place |
-| `Job() -> (sssxdx)` | `(kind, state, snapshot, started, percent, eta_seconds)`, idle `("", "", "", 0, -1, -1)`; polkit `list`, not interactive |
+| `Job() -> (sssxdx)` | `(kind, state, snapshot, started, percent, eta_seconds)`, idle `("", "", "", 0, -1, -1)`; kinds `create`, `delete`, `delete-many`, `configure` (never `list`); polkit `list`, not interactive |
 | `ReadConfig() -> (s(sbbas)sas)` | `(config.toml text or empty, the config in effect, lsblk JSON, notes)`; notes only while converted or imported; polkit `list`, not interactive |
 | `WriteConfig(s expected, (sbbas) config) -> s` | writes `/etc/apsis/config.toml` if it still reads `expected` (empty: none yet); polkit `configure`, interactive; returns once done |
 | `JobChanged((sssxdx) job)` | signal to everyone: a job started, got further (at most one per 500 ms, the end always), is stopping, or ended (`done`, `failed`, `stopped`, once). No comment, caller, error text or path |
@@ -168,21 +172,29 @@ anything else is its text. After a failed create or delete the helper checks the
 Each call, in order:
 1. Input checked again (`validate_comment`, snapshot name pattern, the config); the applet
    isn't trusted.
-2. Refused with `Busy` if another operation runs, before any password dialog.
+2. A write (`Create`, `Delete`, `DeleteMany`, `WriteConfig`) is refused with `Busy` if another
+   write runs or waits, before any password dialog. A read (`List`) is refused with `Busy`
+   while a write runs or waits (writer priority); reads never refuse each other.
 3. polkit `CheckAuthorization` with subject `system-bus-name` = the caller's unique bus name (not
    a PID, so a reused PID can't inherit an answer); `AllowUserInteraction` for everything but
    `list`. No answer from polkit counts as a no.
-4. The single-operation lock is taken; a second call gets `Busy`, never waits in a queue. Every
-   use of the backup mount point goes through it.
+4. A write takes the one write lock; a second write gets `Busy`, never waits in a queue. Readers
+   already in are waited for, up to 15 s (a list is a second or two), then the write is refused
+   `Busy`. Every use of the backup mount point goes through the lock or the readers' share.
 5. Tools run with a fixed argv, found on a fixed `PATH`, with a cleared environment
    (`HOME=/root`, `USER`/`LOGNAME=root`, `LC_ALL=C.UTF-8`) and stdin null.
-6. The backup device from the config is mounted at `/run/apsis/backup` by UUID for the call:
-   `ro,nosuid,nodev,noexec` for list, `rw,nosuid,nodev` for create and delete; unmounted when
-   the call ends. Encrypted devices and anything that isn't a Linux
+6. The backup device from the config is mounted at `/run/apsis/backup` by UUID:
+   `ro,nosuid,nodev,noexec` for lists, one mount shared by the lists running at the same time
+   (the first mounts, the last out unmounts); `rw,nosuid,nodev` for a create or delete, for
+   that one job, after the readers are gone. Encrypted devices and anything that isn't a Linux
    filesystem are refused.
 7. Create and delete return as soon as they start. The job (kind, snapshot name, progress,
    state) is kept beside the lock for `Job` and announced with `JobChanged`. When it ends, the
-   end is announced, the lock is released and `Finished` is sent to the caller.
+   lock is released **first**, then the end is announced, then `Finished` is sent to the
+   caller: the refresh either one sets off is never refused by the job it refreshes for (the
+   rule the restore builds on). `Finished` waits until the end is on the bus (the announcing
+   task says so; 2 s at most), so the caller, a listener too, sees its job end before it
+   hears the result. The applet copes with either order anyway (`OwnEnd` in `app.rs`).
 8. Every call and its result is logged to the journal (`journalctl -u apsis-helper`); comments
    are cut to 40 characters. A delete logs `delete "<name>" for :1.42: started`, the path it
    deleted, and `done` or the reason.

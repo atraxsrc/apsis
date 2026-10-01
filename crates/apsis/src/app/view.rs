@@ -436,11 +436,9 @@ impl AppModel {
         if !own && job.is_none() {
             return None;
         }
-        let kind = job.map(|j| j.kind).or(match &self.running {
-            Some(super::Operation::Create(_)) => Some(JobKind::Create),
-            Some(super::Operation::Delete { .. }) => Some(JobKind::Delete),
-            None => None,
-        })?;
+        let kind = job
+            .map(|j| j.kind)
+            .or(self.running.as_ref().map(super::Operation::kind))?;
         let stopping = job.is_some_and(|j| j.state == JobState::Stopping);
         let (text, fraction) = if stopping {
             (fl!("stopping"), None)
@@ -522,32 +520,35 @@ impl AppModel {
         }
     }
 
-    /// `Deleting 09-27 09:12…` or `Deleting 2 of 4: 09-27 09:12…`.
-    fn delete_progress(&self) -> String {
+    /// `Deleting 09-27 09:12…` or, for this window's delete of several, `Deleting 2 of 4:
+    /// 09-27 09:12…`: the step is where the helper's `JobChanged` says it is (its `snapshot`).
+    pub(super) fn delete_progress(&self) -> String {
+        let current = self
+            .job
+            .as_ref()
+            .map(|j| j.snapshot.as_str())
+            .filter(|s| !s.is_empty());
         match &self.running {
-            Some(super::Operation::Delete { names, done }) if names.len() > 1 => fl!(
-                "deleting-many",
-                step = (done + 1).to_string(),
-                count = names.len().to_string(),
-                name = names
-                    .get(*done)
-                    .map(|n| self.snapshot_label(n))
-                    .unwrap_or_default()
-            ),
-            Some(super::Operation::Delete { names, .. }) => fl!(
-                "deleting",
-                name = names
-                    .first()
-                    .map(|n| self.snapshot_label(n))
-                    .unwrap_or_default()
-            ),
+            Some(super::Operation::DeleteMany(names)) => {
+                let step = current
+                    .and_then(|now| names.iter().position(|n| n == now))
+                    .unwrap_or(0);
+                fl!(
+                    "deleting-many",
+                    step = (step + 1).to_string(),
+                    count = names.len().to_string(),
+                    name = names
+                        .get(step)
+                        .map(|n| self.snapshot_label(n))
+                        .unwrap_or_default()
+                )
+            }
+            Some(super::Operation::Delete(name)) => {
+                fl!("deleting", name = self.snapshot_label(name))
+            }
             _ => fl!(
                 "deleting",
-                name = self
-                    .job
-                    .as_ref()
-                    .map(|j| self.snapshot_label(&j.snapshot))
-                    .unwrap_or_default()
+                name = current.map(|n| self.snapshot_label(n)).unwrap_or_default()
             ),
         }
     }

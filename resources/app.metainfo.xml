@@ -79,6 +79,17 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.4.2" date="2026-10-01">
+      <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.4.2</url>
+      <description>
+        <p>Deleting several snapshots works again with more than one display.</p>
+        <ul>
+          <li>Several snapshots are deleted as one job; the password is asked once</li>
+          <li>Lists share the backup disk and never refuse each other</li>
+          <li>Snapshots and deletes wait for lists to finish instead of being refused</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.4.1" date="2026-10-01">
       <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.4.1</url>
       <description>

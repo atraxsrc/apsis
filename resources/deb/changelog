@@ -1,3 +1,13 @@
+apsis (0.4.2-1) noble; urgency=medium
+
+  * New upstream release, see CHANGELOG.md: deleting several snapshots is one
+    helper job (DeleteMany), so it works with more than one display; lists
+    share a read-only mount and are no longer jobs; a snapshot or delete waits
+    for lists instead of being refused; one helper connection per process; the
+    applet's desktop entry drops %F.
+
+ -- atraxsrc <92285717+atraxsrc@users.noreply.github.com>  Thu, 01 Oct 2026 19:30:00 +1000
+
 apsis (0.4.0-1) noble; urgency=medium
 
   * New upstream release, see CHANGELOG.md: a window laid out like

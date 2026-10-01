@@ -4,6 +4,41 @@ All notable changes to Apsis are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.2] - 2026-10-01
+
+Deleting several snapshots works again with more than one display, and lists never get in
+each other's way.
+
+### Fixed
+
+- A window no longer reports its own failed operation as another window's: the helper's end
+  announcement could reach the window after its own result and was shown as "A delete
+  started elsewhere failed" over the real line. The helper now puts the end on the bus
+  before the result, and the window knows its own job's end in either order.
+- The helper's reasons are shown as it said them: the status line, the tooltip and the
+  dialogs no longer carry an `apsis-helper:` prefix (the journal keeps it).
+- Deleting several snapshots at once: the second one was refused as busy on a machine with
+  two monitors (each display runs its own panel applet, and every applet listed the moment
+  the first delete ended, holding the helper's lock). Now the window sends the whole
+  selection as one job (`DeleteMany` on the helper's interface), the password is asked once,
+  and it stops at the first failure saying which were deleted and which were not.
+- Lists share: the helper mounts the backup disk read-only once for all the lists running at
+  the same time, and a list is no longer a job (it isn't announced, and never shows as
+  "busy" to another list). A snapshot or delete waits up to 15 s for lists to finish instead
+  of being refused; a list that arrives while one runs or waits is refused as before.
+- The helper releases its lock before it announces a job's end, so the refresh that follows
+  is never refused.
+- Each Apsis process (one per display, plus the window) keeps one connection to the helper
+  and lists once per snapshot or delete, so the journal shows one `list` per process after a
+  job, none refused.
+- The applet's desktop entry no longer passes `%F` to `apsis` (it takes no files; the panel
+  passed it literally and it was ignored).
+
+### Changed
+
+- `apsis-helper`: `DeleteMany(as names)` added to `io.github.atraxsrc.Apsis.Helper2`; `Job()`
+  and `JobChanged` can say `delete-many` and no longer say `list`.
+
 ## [0.4.1] - 2026-10-01
 
 Snapshots now hold everything a full restore (0.5.0) needs.
@@ -271,6 +306,8 @@ First release.
   password every time.
 - App and symbolic icons, AppStream metainfo, desktop entries, `just install` / `just uninstall`.
 
+[0.4.2]: https://github.com/atraxsrc/apsis/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/atraxsrc/apsis/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/atraxsrc/apsis/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/atraxsrc/apsis/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/atraxsrc/apsis/compare/v0.2.0...v0.3.0

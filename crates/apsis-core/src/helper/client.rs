@@ -9,13 +9,13 @@ use std::future::Future;
 
 use super::names::{
     BUS_NAME, ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
-    ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CREATE, METHOD_DELETE, METHOD_JOB, METHOD_LIST,
-    METHOD_READ_CONFIG, METHOD_STOP, METHOD_WRITE_CONFIG, OBJECT_PATH, OP_CREATE, OP_DELETE,
-    SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
+    ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CREATE, METHOD_DELETE, METHOD_DELETE_MANY, METHOD_JOB,
+    METHOD_LIST, METHOD_READ_CONFIG, METHOD_STOP, METHOD_WRITE_CONFIG, OBJECT_PATH, OP_CREATE,
+    OP_DELETE, OP_DELETE_MANY, SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
 };
 use super::{
-    WireConfigInfo, WireListWithUsage, config_info_from_wire, config_to_wire, decode_error,
-    from_wire_with_usage,
+    WireConfigInfo, WireListWithUsage, check_delete_many, config_info_from_wire, config_to_wire,
+    decode_error, from_wire_with_usage,
 };
 use crate::config::{Config, ConfigInfo};
 use crate::error::{Error, Result};
@@ -25,7 +25,8 @@ use crate::progress::Progress;
 
 /// The applet's side of `apsis-helper`, on the system bus.
 ///
-/// Needs a tokio runtime (zbus runs on the caller's tokio).
+/// One per process: it holds the bus connection, so every call from a process comes from
+/// one bus name (clones share it). Needs a tokio runtime (zbus runs on the caller's tokio).
 #[derive(Debug, Clone)]
 pub struct HelperClient {
     connection: Connection,
@@ -34,6 +35,7 @@ pub struct HelperClient {
 impl HelperClient {
     /// Connects if the helper is installed (D-Bus can start it) or already running. `None`
     /// when it isn't, or the system bus can't be reached: Apsis can't do anything then.
+    /// Made once per process and kept: each call opens a connection, with two round trips.
     pub async fn connect() -> Option<Self> {
         let connection = Connection::system().await.ok()?;
         let bus = DBusProxy::new(&connection).await.ok()?;
@@ -94,6 +96,31 @@ impl HelperClient {
     pub async fn delete(&self, name: &str) -> Result<()> {
         self.operate_on(METHOD_DELETE, OP_DELETE, name, &mut |_| {})
             .await
+    }
+
+    /// Deletes `names` (snapshots or interrupted creates' folders) as one job, in order, and
+    /// waits until it's done. The password is asked once. It stops at the first failure:
+    /// [`Error::DeleteManyStopped`] says what was deleted, what failed and why, and what's
+    /// left. `on_progress` gets each step (`percent` is done of total).
+    ///
+    /// # Errors
+    ///
+    /// The names aren't two or more distinct snapshot names ([`check_delete_many`]), or what
+    /// the helper reported.
+    pub async fn delete_many(
+        &self,
+        names: &[String],
+        on_progress: &mut (dyn FnMut(Progress) + Send),
+    ) -> Result<()> {
+        check_delete_many(names)?;
+        let names = names.to_vec();
+        self.operate(
+            OP_DELETE_MANY,
+            move |proxy| async move { proxy.call::<_, _, ()>(METHOD_DELETE_MANY, &(names,)).await },
+            on_progress,
+        )
+        .await
+        .map(drop)
     }
 
     /// Stops the running create if it is making `snapshot`. Returns once stopping has begun;

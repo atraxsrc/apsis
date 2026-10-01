@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The D-Bus interface `Helper2`: `List`, `Create`, `Delete`, `Stop`, `Job`, `ReadConfig`,
-//! `WriteConfig`, and the `JobChanged` and `Finished` signals. Nothing else.
+//! The D-Bus interface `Helper2`: `List`, `Create`, `Delete`, `DeleteMany`, `Stop`, `Job`,
+//! `ReadConfig`, `WriteConfig`, and the `JobChanged` and `Finished` signals. Nothing else.
+//!
+//! `List` is a read: it shares the read-only mount with other lists and is never a job
+//! (`state.rs` has the rules). Everything that writes is a job under the one lock.
 //!
 //! Every call is logged with its result on stderr, which systemd puts in the journal
 //! (`journalctl -u apsis-helper`). Comments are cut to [`LOGGED_COMMENT_CHARS`].
@@ -11,11 +14,11 @@ use std::sync::Arc;
 
 use apsis_core::helper::names::{
     ACTION_CONFIGURE, ACTION_CREATE, ACTION_DELETE, ACTION_LIST, ACTION_STOP, OBJECT_PATH,
-    OP_CREATE, OP_DELETE,
+    OP_CREATE, OP_DELETE, OP_DELETE_MANY,
 };
 use apsis_core::helper::{
-    WireConfig, WireConfigInfo, WireListWithUsage, config_from_wire, encode_error,
-    to_wire_with_usage,
+    WireConfig, WireConfigInfo, WireListWithUsage, check_delete_many, config_from_wire,
+    encode_error, to_wire_with_usage,
 };
 use apsis_core::job::{self, JobKind, JobState, WireJob};
 use apsis_core::native::{Cancel, TooLate};
@@ -27,11 +30,11 @@ use zbus::names::{BusName, UniqueName};
 use zbus::object_server::SignalEmitter;
 use zbus::{Connection, DBusError, interface};
 
-use crate::native::{self, Access};
+use crate::native::{self, SharedMount};
 use crate::polkit;
 use crate::runner::DirectRunner;
 use crate::settings::{self, Files};
-use crate::state::{Running, State};
+use crate::state::{Announcement, Running, State};
 use crate::usage;
 
 /// Longest part of a comment that goes into the journal.
@@ -40,11 +43,16 @@ const LOGGED_COMMENT_CHARS: usize = 40;
 /// The helper object at [`OBJECT_PATH`].
 pub struct Helper {
     state: Arc<State>,
+    /// The read-only mount the lists share.
+    mount: Arc<SharedMount<DirectRunner>>,
 }
 
 impl Helper {
     pub fn new(state: Arc<State>) -> Self {
-        Self { state }
+        Self {
+            state,
+            mount: Arc::new(SharedMount::default()),
+        }
     }
 }
 
@@ -84,9 +92,11 @@ impl From<Error> for HelperError {
 
 #[interface(name = "io.github.atraxsrc.Apsis.Helper2")]
 impl Helper {
-    /// The snapshots on the backup device (each one's `info.json`, the device mounted
-    /// read-only for the call), leftovers of interrupted creates, and its `statvfs` (polkit:
-    /// `list`, no password for the active session).
+    /// The snapshots on the backup device (each one's `info.json`, read on the read-only
+    /// mount the lists share), leftovers of interrupted creates, and its `statvfs` (polkit:
+    /// `list`, no password for the active session). A read, not a job: lists run at the same
+    /// time as each other and are never announced; one that arrives while a write runs or
+    /// waits is refused `Busy`.
     async fn list(
         &self,
         #[zbus(header)] header: Header<'_>,
@@ -97,23 +107,16 @@ impl Helper {
         let label = format!("list for {caller}");
         let result = async {
             authorize(connection, &caller, ACTION_LIST, false).await?;
-            let running = self.state.begin(JobKind::List)?;
-            let state = Arc::clone(&self.state);
+            let reading = self.state.read()?;
+            let mount = Arc::clone(&self.mount);
             blocking(move || {
-                let result = (|| {
-                    let (backend, _mounted) =
-                        native::open(&DirectRunner, Access::ReadOnly, log_lines)?;
-                    let mut list = backend.list()?;
-                    list.usage = usage::of_mount_point(Path::new(native::MOUNT_POINT));
-                    Ok(list)
-                })();
-                state.end(if result.is_ok() {
-                    JobState::Done
-                } else {
-                    JobState::Failed
-                });
-                drop(running);
-                result
+                // Dropped last, after the share of the mount: when the readers' count reaches
+                // zero the device is unmounted, and a waiting write may mount it read-write.
+                let _reading = reading;
+                let (backend, _shared) = native::open_shared(&DirectRunner, &mount, log_lines)?;
+                let mut list = backend.list()?;
+                list.usage = usage::of_mount_point(Path::new(native::MOUNT_POINT));
+                Ok(list)
             })
             .await
         }
@@ -142,7 +145,7 @@ impl Helper {
             let uid = unix_user(connection, &caller).await?;
             self.refuse_if_running()?;
             authorize(connection, &caller, ACTION_CREATE, true).await?;
-            let running = self.state.begin(JobKind::Create)?;
+            let running = self.state.begin(JobKind::Create).await?;
             let cancel = Cancel::new();
             self.state.stoppable(Arc::clone(&cancel), uid);
             Ok((running, cancel))
@@ -160,8 +163,7 @@ impl Helper {
             started,
             move |state| {
                 let cancel = cancel.ok_or_else(|| Error::Helper("not started".to_owned()))?;
-                let (backend, _mounted) =
-                    native::open(&DirectRunner, Access::ReadWrite, log_lines)?;
+                let (backend, _mounted) = native::open(&DirectRunner, log_lines)?;
                 let device = backend.config().device_uuid.clone();
                 let (named, progress) = (Arc::clone(state), Arc::clone(state));
                 let backend = backend
@@ -195,7 +197,7 @@ impl Helper {
             }
             self.refuse_if_running()?;
             authorize(connection, &caller, ACTION_DELETE, true).await?;
-            self.state.begin(JobKind::Delete)
+            self.state.begin(JobKind::Delete).await
         }
         .await;
         self.start(
@@ -206,19 +208,68 @@ impl Helper {
             started,
             move |state| {
                 state.named(&name);
-                let (backend, _mounted) =
-                    native::open(&DirectRunner, Access::ReadWrite, log_lines)?;
+                let (backend, _mounted) = native::open(&DirectRunner, log_lines)?;
                 let device = backend.config().device_uuid.clone();
                 let list = backend.list()?;
-                let known =
-                    list.snapshots.iter().any(|s| s.name == name) || list.leftovers.contains(&name);
-                if !known {
-                    return Err(Error::NoSuchSnapshot(name.clone()));
-                }
-                backend
-                    .delete(&name)
+                delete_known(&backend, &list, &name)
                     .map(|()| String::new())
                     .map_err(|e| removed_or(e, device.as_deref(), Path::new(BY_UUID)))
+            },
+        )
+    }
+
+    /// Starts deleting `names` (snapshots or interrupted creates' folders) as one job, in
+    /// order (polkit: `delete`, asked once), and returns; `Finished("delete-many", ..)`
+    /// follows. At least two names, each a snapshot name, none repeated. It stops at the first
+    /// failure; the message then says what was deleted, what failed and what's left.
+    async fn delete_many(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+        names: Vec<String>,
+    ) -> Result<(), HelperError> {
+        let _call = self.state.call();
+        let caller = caller(&header)?;
+        let label = format!("delete-many {} for {caller}", logged_names(&names));
+        let started = async {
+            check_delete_many(&names)?;
+            self.refuse_if_running()?;
+            authorize(connection, &caller, ACTION_DELETE, true).await?;
+            self.state.begin(JobKind::DeleteMany).await
+        }
+        .await;
+        let journal = label.clone();
+        self.start(
+            connection,
+            caller,
+            OP_DELETE_MANY,
+            label,
+            started,
+            move |state| {
+                let (backend, _mounted) = native::open(&DirectRunner, log_lines)?;
+                let device = backend.config().device_uuid.clone();
+                let list = backend.list()?;
+                let total = names.len();
+                let mut deleted = Vec::with_capacity(total);
+                for (done, name) in names.iter().enumerate() {
+                    state.step(name, done, total);
+                    if let Err(error) = delete_known(&backend, &list, name) {
+                        return Err(Error::DeleteManyStopped {
+                            deleted,
+                            failed: name.clone(),
+                            left: names[done + 1..].to_vec(),
+                            reason: Box::new(removed_or(
+                                error,
+                                device.as_deref(),
+                                Path::new(BY_UUID),
+                            )),
+                        });
+                    }
+                    log(&format!("{journal}: deleted {name}"));
+                    deleted.push(name.clone());
+                }
+                state.step("", total, total);
+                Ok(String::new())
             },
         )
     }
@@ -325,19 +376,20 @@ impl Helper {
             let config = config_from_wire(config);
             self.refuse_if_running()?;
             authorize(connection, &caller, ACTION_CONFIGURE, true).await?;
-            let running = self.state.begin(JobKind::Configure)?;
-            let state = Arc::clone(&self.state);
-            blocking(move || {
+            let running = self.state.begin(JobKind::Configure).await?;
+            let (result, announced) = blocking(move || {
                 let result = Files::system().write(&DirectRunner, &expected, &config);
-                state.end(if result.is_ok() {
+                let announced = running.end(if result.is_ok() {
                     JobState::Done
                 } else {
                     JobState::Failed
                 });
-                drop(running);
-                result
+                Ok((result, announced))
             })
-            .await
+            .await?;
+            // The end is on the bus before the reply.
+            announced.wait().await;
+            result
         }
         .await;
         match result {
@@ -372,7 +424,8 @@ impl Helper {
 
 impl Helper {
     /// Refuses before the password dialog, so nobody types a password for a call that can't
-    /// run. [`State::begin`] still decides, after polkit, if two calls race.
+    /// run. [`State::begin`] still decides, after polkit, if two calls race. Readers in don't
+    /// refuse a write: `begin` waits for them.
     fn refuse_if_running(&self) -> apsis_core::Result<()> {
         if self.state.is_running() {
             return Err(Error::Busy);
@@ -381,7 +434,7 @@ impl Helper {
     }
 
     /// Logs whether the operation could start. If it did, runs `work` in the background
-    /// holding the lock, then announces how it ended (`JobChanged`), releases the lock, logs
+    /// holding the lock, then releases the lock, announces how it ended (`JobChanged`), logs
     /// it and tells `caller` with `Finished`: the text `work` returned, or the error.
     fn start(
         &self,
@@ -406,19 +459,27 @@ impl Helper {
         let state = Arc::clone(&self.state);
         tokio::spawn(async move {
             let _call = call;
-            // The lock is free before `Finished` arrives, so the caller's refresh isn't
-            // refused as busy.
-            let result = blocking(move || {
+            // The lock is free before the end is announced and before `Finished` arrives, so
+            // no refresh they set off is refused as busy (the rule the restore builds on).
+            // And the end is on the bus before `Finished` is sent, so the caller (a listener
+            // too) sees its job end before it hears the result, never the other way round.
+            let result = match blocking(move || {
                 let result = work(&state);
-                state.end(match &result {
+                let announced = running.end(match &result {
                     Ok(_) => JobState::Done,
                     Err(Error::Stopped) => JobState::Stopped,
                     Err(_) => JobState::Failed,
                 });
-                drop(running);
-                result
+                Ok((result, announced))
             })
-            .await;
+            .await
+            {
+                Ok((result, announced)) => {
+                    announced.wait().await;
+                    result
+                }
+                Err(error) => Err(error),
+            };
             let (ok, message) = match result {
                 Ok(text) => {
                     log(&format!("{label}: done"));
@@ -448,16 +509,30 @@ impl Helper {
 /// the helper does.
 pub async fn announce_jobs(
     connection: Connection,
-    mut changes: tokio::sync::mpsc::UnboundedReceiver<WireJob>,
+    mut changes: tokio::sync::mpsc::UnboundedReceiver<Announcement>,
 ) {
     let Ok(emitter) = SignalEmitter::new(&connection, OBJECT_PATH) else {
         log("couldn't set up JobChanged");
         return;
     };
-    while let Some(job) = changes.recv().await {
+    while let Some(Announcement { job, sent }) = changes.recv().await {
         // A lost one is fine: the next change, `Job` or `Finished` follows.
         let _ = Helper::job_changed(&emitter, job).await;
+        // An end: `Finished` may go out now, behind it on the same connection.
+        if let Some(sent) = sent {
+            let _ = sent.send(());
+        }
     }
+}
+
+/// Deletes `name` if the fresh `list` has it as a snapshot or a leftover.
+fn delete_known(backend: &impl Backend, list: &SnapshotList, name: &str) -> apsis_core::Result<()> {
+    let known =
+        list.snapshots.iter().any(|s| s.name == name) || list.leftovers.contains(&name.to_owned());
+    if !known {
+        return Err(Error::NoSuchSnapshot(name.to_owned()));
+    }
+    backend.delete(name)
 }
 
 /// `Stop` needs a password unless the caller's uid started the create.
@@ -527,6 +602,17 @@ fn describe_error(error: &Error) -> String {
     }
 }
 
+/// `DeleteMany`'s names as they go into the journal: `["a", "b", +2 more]`.
+fn logged_names(names: &[String]) -> String {
+    let shown: Vec<String> = names.iter().take(2).map(|n| format!("{n:?}")).collect();
+    let more = names.len().saturating_sub(shown.len());
+    if more == 0 {
+        format!("[{}]", shown.join(", "))
+    } else {
+        format!("[{}, +{more} more]", shown.join(", "))
+    }
+}
+
 /// The comment as it goes into the journal: quoted, and cut to [`LOGGED_COMMENT_CHARS`].
 fn logged_comment(comment: &str) -> String {
     let comment = comment.trim();
@@ -590,8 +676,9 @@ mod tests {
     use apsis_core::helper::decode_error;
     use apsis_core::helper::names::{
         ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
-        ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CREATE, METHOD_DELETE, METHOD_JOB, METHOD_LIST,
-        METHOD_READ_CONFIG, METHOD_STOP, METHOD_WRITE_CONFIG, SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
+        ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CREATE, METHOD_DELETE, METHOD_DELETE_MANY,
+        METHOD_JOB, METHOD_LIST, METHOD_READ_CONFIG, METHOD_STOP, METHOD_WRITE_CONFIG,
+        SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
     };
     use zbus::object_server::Interface;
 
@@ -606,6 +693,7 @@ mod tests {
             METHOD_LIST,
             METHOD_CREATE,
             METHOD_DELETE,
+            METHOD_DELETE_MANY,
             METHOD_STOP,
             METHOD_JOB,
             METHOD_READ_CONFIG,
@@ -622,8 +710,13 @@ mod tests {
                 "{signal}\n{xml}"
             );
         }
-        // Nothing else: exactly seven methods and two signals.
-        assert_eq!(xml.matches("<method ").count(), 7, "{xml}");
+        // Nothing else: exactly eight methods and two signals.
+        assert_eq!(xml.matches("<method ").count(), 8, "{xml}");
+        // `DeleteMany(as names)`.
+        assert!(
+            xml.contains("<arg name=\"names\" type=\"as\" direction=\"in\"/>"),
+            "{xml}"
+        );
         assert_eq!(xml.matches("<signal ").count(), 2, "{xml}");
         // The list with its warnings, leftovers and the disk usage.
         assert!(xml.contains("type=\"((sssa(sss)asas)a{st})\""), "{xml}");
@@ -732,6 +825,47 @@ mod tests {
                 HelperError::InvalidInput(_)
             ));
         }
+    }
+
+    #[test]
+    fn a_stopped_delete_of_several_travels_as_a_failure_with_its_parts() {
+        let stopped = Error::DeleteManyStopped {
+            deleted: vec!["2026-09-19_09-29-57".to_owned()],
+            failed: "2026-09-20_10-00-00".to_owned(),
+            left: vec!["2026-09-25_11-28-53".to_owned()],
+            reason: Box::new(Error::NoSuchSnapshot("2026-09-20_10-00-00".to_owned())),
+        };
+        assert_eq!(
+            describe_error(&stopped),
+            "failed: delete stopped at 2026-09-20_10-00-00: no snapshot called \
+             \"2026-09-20_10-00-00\" on the backup device"
+        );
+        let HelperError::Failed(message) = HelperError::from(stopped) else {
+            panic!("not Failed")
+        };
+        assert!(matches!(
+            decode_error(&message),
+            Error::DeleteManyStopped { deleted, failed, left, .. }
+                if deleted.len() == 1 && failed == "2026-09-20_10-00-00" && left.len() == 1
+        ));
+    }
+
+    #[test]
+    fn journal_gets_short_names_lists() {
+        let names = |list: &[&str]| list.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            logged_names(&names(&["2026-09-19_09-29-57", "2026-09-20_10-00-00"])),
+            "[\"2026-09-19_09-29-57\", \"2026-09-20_10-00-00\"]"
+        );
+        assert_eq!(
+            logged_names(&names(&[
+                "2026-09-19_09-29-57",
+                "2026-09-20_10-00-00",
+                "2026-09-25_11-28-53",
+                "2026-09-26_14-02-11"
+            ])),
+            "[\"2026-09-19_09-29-57\", \"2026-09-20_10-00-00\", +2 more]"
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@
 //! - [`WireConfigInfo`] and [`WireConfig`]: what `ReadConfig` returns and `WriteConfig` takes.
 //! - [`crate::job::WireJob`]: what `Job` returns and `JobChanged` carries.
 //! - [`encode_error`] / [`decode_error`]: how errors keep their kind across the bus.
+//! - [`check_delete_many`]: what `DeleteMany`'s names must be.
 //! - [`HelperClient`]: the applet's side.
 
 mod client;
@@ -302,11 +303,15 @@ const INVALID_INPUT_HEADER: &str = "refused: ";
 const DEVICE_REMOVED_HEADER: &str = "backup disk removed: ";
 /// An encoded [`Error::Stopped`].
 const STOPPED: &str = "stopped";
+/// An encoded [`Error::DeleteManyStopped`]: `deleted=<a,b> failed=<c> left=<d,e> reason=`
+/// and the encoded reason follow. Snapshot names have no spaces or commas, so the fields are
+/// unambiguous; the reason comes last because it can hold anything.
+const DELETE_MANY_HEADER: &str = "delete stopped: ";
 
 /// An error as one message for the bus (a D-Bus error's text, or `Finished`'s `message`).
-/// [`Error::DeviceNotFound`], [`Error::DeviceRemoved`], [`Error::InvalidInput`] and
-/// [`Error::Stopped`] keep their kind, so [`decode_error`] gives them back; anything else is
-/// its text.
+/// [`Error::DeviceNotFound`], [`Error::DeviceRemoved`], [`Error::InvalidInput`],
+/// [`Error::Stopped`] and [`Error::DeleteManyStopped`] keep their kind, so [`decode_error`]
+/// gives them back; anything else is its text.
 #[must_use]
 pub fn encode_error(error: &Error) -> String {
     match error {
@@ -316,6 +321,17 @@ pub fn encode_error(error: &Error) -> String {
         }
         Error::InvalidInput(reason) => format!("{INVALID_INPUT_HEADER}{reason}"),
         Error::Stopped => STOPPED.to_owned(),
+        Error::DeleteManyStopped {
+            deleted,
+            failed,
+            left,
+            reason,
+        } => format!(
+            "{DELETE_MANY_HEADER}deleted={} failed={failed} left={} reason={}",
+            deleted.join(","),
+            left.join(","),
+            encode_error(reason)
+        ),
         other => other.to_string(),
     }
 }
@@ -324,6 +340,11 @@ pub fn encode_error(error: &Error) -> String {
 /// [`Error::Helper`] with the text.
 #[must_use]
 pub fn decode_error(message: &str) -> Error {
+    if let Some(rest) = message.strip_prefix(DELETE_MANY_HEADER)
+        && let Some(stopped) = decode_delete_many(rest)
+    {
+        return stopped;
+    }
     if let Some(device) = message.strip_prefix(DEVICE_NOT_FOUND_HEADER) {
         return Error::DeviceNotFound {
             device: device.to_owned(),
@@ -343,6 +364,54 @@ pub fn decode_error(message: &str) -> Error {
         return Error::Stopped;
     }
     Error::Helper(message.to_owned())
+}
+
+/// The fields after [`DELETE_MANY_HEADER`]; `None` if they aren't as [`encode_error`] writes
+/// them (then the whole message is plain text).
+fn decode_delete_many(rest: &str) -> Option<Error> {
+    let names = |list: &str| -> Vec<String> {
+        list.split(',')
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let (deleted, rest) = rest.strip_prefix("deleted=")?.split_once(' ')?;
+    let (failed, rest) = rest.strip_prefix("failed=")?.split_once(' ')?;
+    let (left, reason) = rest.strip_prefix("left=")?.split_once(" reason=")?;
+    if failed.is_empty() {
+        return None;
+    }
+    Some(Error::DeleteManyStopped {
+        deleted: names(deleted),
+        failed: failed.to_owned(),
+        left: names(left),
+        reason: Box::new(decode_error(reason)),
+    })
+}
+
+/// Checks `DeleteMany`'s names before anything runs: at least two, each a snapshot name
+/// (`YYYY-MM-DD_HH-MM-SS`), none repeated. The helper runs this too; the window runs it first
+/// so a mistake shows before the password dialog.
+///
+/// # Errors
+///
+/// [`Error::InvalidSnapshotName`] for a name that isn't one, [`Error::InvalidInput`] for a
+/// repeat or fewer than two names.
+pub fn check_delete_many(names: &[String]) -> Result<()> {
+    if names.len() < 2 {
+        return Err(Error::InvalidInput(
+            "a delete of several needs at least two names".to_owned(),
+        ));
+    }
+    for (i, name) in names.iter().enumerate() {
+        if parse_snapshot_name(name).is_none() {
+            return Err(Error::InvalidSnapshotName(name.clone()));
+        }
+        if names[..i].contains(name) {
+            return Err(Error::InvalidInput(format!("{name} is named twice")));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -592,6 +661,91 @@ mod tests {
         assert!(
             matches!(decode_error(&encode_error(&refused)), Error::InvalidInput(m) if m == "not deleting x: no info.json")
         );
+    }
+
+    #[test]
+    fn a_stopped_delete_of_several_survives_the_bus() {
+        let name = |n: &str| n.to_owned();
+        let stopped = Error::DeleteManyStopped {
+            deleted: vec![name("2026-09-19_09-29-57"), name("2026-09-20_10-00-00")],
+            failed: name("2026-09-25_11-28-53"),
+            left: vec![name("2026-09-26_14-02-11")],
+            reason: Box::new(Error::DeviceRemoved {
+                device: "0000".to_owned(),
+                reason: "rsync exited with code 23: Input/output error".to_owned(),
+            }),
+        };
+        let message = encode_error(&stopped);
+        assert_eq!(
+            message,
+            "delete stopped: deleted=2026-09-19_09-29-57,2026-09-20_10-00-00 \
+             failed=2026-09-25_11-28-53 left=2026-09-26_14-02-11 reason=backup disk removed: \
+             0000: rsync exited with code 23: Input/output error"
+        );
+        let Error::DeleteManyStopped {
+            deleted,
+            failed,
+            left,
+            reason,
+        } = decode_error(&message)
+        else {
+            panic!("not decoded")
+        };
+        assert_eq!(deleted, ["2026-09-19_09-29-57", "2026-09-20_10-00-00"]);
+        assert_eq!(failed, "2026-09-25_11-28-53");
+        assert_eq!(left, ["2026-09-26_14-02-11"]);
+        assert!(matches!(*reason, Error::DeviceRemoved { ref device, .. } if device == "0000"));
+
+        // Failed on the first: nothing deleted, nothing left, a plain reason.
+        let first = Error::DeleteManyStopped {
+            deleted: Vec::new(),
+            failed: name("2026-09-25_11-28-53"),
+            left: Vec::new(),
+            reason: Box::new(Error::Native("no space".to_owned())),
+        };
+        let Error::DeleteManyStopped {
+            deleted,
+            left,
+            reason,
+            ..
+        } = decode_error(&encode_error(&first))
+        else {
+            panic!("not decoded")
+        };
+        assert!(deleted.is_empty() && left.is_empty());
+        assert!(matches!(*reason, Error::Helper(ref m) if m == "no space"));
+
+        // Not as the helper writes it: plain text.
+        assert!(matches!(
+            decode_error("delete stopped: at random"),
+            Error::Helper(_)
+        ));
+        assert!(matches!(
+            decode_error("delete stopped: deleted= failed= left= reason=x"),
+            Error::Helper(_)
+        ));
+    }
+
+    #[test]
+    fn delete_many_needs_two_distinct_snapshot_names() {
+        let names = |list: &[&str]| list.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        assert!(check_delete_many(&names(&["2026-09-19_09-29-57", "2026-09-20_10-00-00"])).is_ok());
+        assert!(matches!(
+            check_delete_many(&names(&["2026-09-19_09-29-57"])),
+            Err(Error::InvalidInput(_))
+        ));
+        assert!(matches!(
+            check_delete_many(&[]),
+            Err(Error::InvalidInput(_))
+        ));
+        assert!(matches!(
+            check_delete_many(&names(&["2026-09-19_09-29-57", "../x"])),
+            Err(Error::InvalidSnapshotName(n)) if n == "../x"
+        ));
+        assert!(matches!(
+            check_delete_many(&names(&["2026-09-19_09-29-57", "2026-09-19_09-29-57"])),
+            Err(Error::InvalidInput(m)) if m.contains("twice")
+        ));
     }
 
     #[test]
