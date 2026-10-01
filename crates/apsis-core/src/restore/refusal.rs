@@ -4,7 +4,8 @@
 //!
 //! Checked for the dialog, again when preparing, and again at apply. Everything here works on
 //! what the helper has already read (mountinfo, lsblk, `info.json`, a folder listing), so
-//! nothing is opened or run. The space lines (6b.4) and Busy aren't here.
+//! nothing is opened or run. The space lines (6b.4) need the dry runs, so they're checked after
+//! these, in [`super::space`]. Busy isn't here.
 
 use std::path::Path;
 
@@ -39,6 +40,16 @@ pub enum Refusal {
     KernelIncomplete,
     /// `/system-update` exists already: a system update waits for a restart.
     PendingUpdate,
+    /// The backup disk is short for the safety snapshot ([`super::space`]). Both in bytes.
+    BackupSpace {
+        needs: u64,
+        free: u64,
+    },
+    /// `/`, or a separate `/home` being restored, is short for the restore. Both in bytes.
+    SystemSpace {
+        needs: u64,
+        free: u64,
+    },
 }
 
 /// Why a snapshot can't be read as something to restore.

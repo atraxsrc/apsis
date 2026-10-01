@@ -1888,3 +1888,45 @@ What the plan left open:
   Apsis again). How an empty one is shown is the UI slice's.
 - **Verified** with apsis-core's tests and clippy only; the workspace test and clippy run is
   the owner's.
+
+## 2026-10-01 - 6b: disk space (core)
+
+6b.7 refusals (baa071a) and Apsis version reading (38e51c9): workspace test, clippy and fmt
+passed on MAIN.
+Correction to the format entry: old means the recorded flags lack -A or -X (either), not
+neither.
+
+`restore::space` holds 6b.4's numbers, and `Refusal` has the two space cases, `BackupSpace`
+and `SystemSpace`, each with `needs` and `free` in bytes and no text. They aren't in
+`refusal::check`: 6b.4's order is the refusals, then both dry runs and space, so the helper
+calls `check` first and the space checks once it has the dry runs' output.
+
+- `transfer_size(stats)`: "Total transferred file size" from rsync `--dry-run --stats`.
+- `backup_needs(transfer)`: the safety snapshot's size and 1 GiB.
+- `system_needs(transfer, total)`: the transfer and 1 GiB, or 2% of the partition if more.
+- `check_backup(needs, free)`, `check_system(needs, free)`: refuse when `free < needs`.
+- `split(transfer, under_home)`: what lands on `/` and what on a separate `/home`.
+
+What the plan left open:
+
+- **The size must be a plain byte count**: digits, with or without rsync's commas, then
+  ` bytes`. Anything else (`1.23M` from `-h`, dots as separators, no such line) is unknown
+  (`None`), never a smaller number. What the helper does with an unknown size (it should
+  fail the preparation) is the helper slice's. The test text is rsync 3.2.7's real output.
+- **The safety snapshot's size** is read the same way, from the create's own dry run.
+- **GiB is 2^30 bytes; 2% is the partition's size / 50** (statvfs's total, `DiskUsage::total`).
+  The same margin for `/` and for a separate `/home`.
+- **Exactly enough is enough** (`free == needs` passes). Sums that overflow stay at the
+  largest number, so they refuse.
+- **`needs` includes the margin**, and it's the number the refusal carries (the line's
+  "needs {n}") and the one to record in `request.json`. The check at "Restart now" is the
+  same `check_system(needs, free)` with a fresh `statvfs`.
+- **A short separate `/home`** gives `SystemSpace` with that partition's numbers (the plan's
+  "with the system-disk line"). The caller checks `/` first.
+- **The part under `/home`** is a number the helper passes in. How it gets it (a second dry
+  run limited to `/home`, most likely) is the helper slice's. Two dry runs can disagree by a
+  file that changed between them, so `split` never lets the home part be more than the
+  whole, and `/` never needs less than nothing.
+- **Verified** with apsis-core's tests and clippy only, run through a scratch workspace that
+  holds only apsis-core (the workspace commands can't run in the sandbox); the workspace
+  test and clippy run is the owner's.
