@@ -5,6 +5,10 @@
 use std::ffi::OsString;
 use std::path::Path;
 
+/// rsync's messages and numbers are read as text ([`super::space`], the result's message), so
+/// every run of it is in the C locale.
+pub const LOCALE: (&str, &str) = ("LC_ALL", "C");
+
 /// rsync from a snapshot's `localhost/` over `target` (`/` for real), with the restore's
 /// filter and its own log.
 ///
@@ -22,17 +26,42 @@ pub fn rsync(
     log: &Path,
     old_format: bool,
 ) -> Vec<OsString> {
+    let run = [
+        OsString::from("--info=progress2"),
+        option("--log-file=", log),
+    ];
+    build(localhost, target, filter, old_format, run)
+}
+
+/// The same copy as a dry run, for the space check before anything is written (PLAN 6b.4):
+/// the same flags and filter as [`rsync`], so `--stats` counts what the restore would copy.
+/// `--no-human-readable` makes the sizes plain byte counts ([`super::space::dry_run_size`]).
+/// Nothing is written, not even a log.
+#[must_use]
+pub fn rsync_dry_run(
+    localhost: &Path,
+    target: &Path,
+    filter: &Path,
+    old_format: bool,
+) -> Vec<OsString> {
+    let run = ["--dry-run", "--no-human-readable"].map(OsString::from);
+    build(localhost, target, filter, old_format, run)
+}
+
+/// What the restore and its dry run share, with `run`'s options before the filter.
+fn build(
+    localhost: &Path,
+    target: &Path,
+    filter: &Path,
+    old_format: bool,
+    run: [OsString; 2],
+) -> Vec<OsString> {
     let with_slash = |path: &Path| {
         let mut text = path.as_os_str().to_owned();
         if !text.as_encoded_bytes().ends_with(b"/") {
             text.push("/");
         }
         text
-    };
-    let option = |name: &str, value: &Path| {
-        let mut arg = OsString::from(name);
-        arg.push(value);
-        arg
     };
     let mut argv: Vec<OsString> = vec!["rsync".into(), "-a".into()];
     if !old_format {
@@ -45,15 +74,20 @@ pub fn rsync(
             "--force",
             "--sparse",
             "--stats",
-            "--info=progress2",
         ]
         .map(OsString::from),
     );
-    argv.push(option("--log-file=", log));
+    argv.extend(run);
     argv.push(option("--exclude-from=", filter));
     argv.push(with_slash(localhost));
     argv.push(with_slash(target));
     argv
+}
+
+fn option(name: &str, value: &Path) -> OsString {
+    let mut arg = OsString::from(name);
+    arg.push(value);
+    arg
 }
 
 #[cfg(test)]
@@ -73,6 +107,61 @@ mod tests {
             Path::new(LOG),
             old_format,
         )
+    }
+
+    /// The dry run for the space check (PLAN 6b.4): the restore's own flags and filter, so it
+    /// counts what the restore would copy, with plain byte counts and nothing written, not
+    /// even a log.
+    #[test]
+    fn the_dry_run_is_the_restore_with_dry_run_and_plain_numbers() {
+        let dry = |old_format| {
+            rsync_dry_run(
+                Path::new(LOCALHOST),
+                Path::new("/"),
+                Path::new(FILTER),
+                old_format,
+            )
+        };
+        assert_eq!(
+            dry(false),
+            [
+                "rsync",
+                "-a",
+                "-A",
+                "-X",
+                "--numeric-ids",
+                "--delete",
+                "--force",
+                "--sparse",
+                "--stats",
+                "--dry-run",
+                "--no-human-readable",
+                "--exclude-from=/var/lib/apsis/restore/restore.filter",
+                "/run/apsis/backup/timeshift/snapshots/2026-09-25_11-28-53/localhost/",
+                "/",
+            ]
+            .map(OsString::from)
+        );
+        // It differs from the restore's argv by exactly these, for either format.
+        for old_format in [false, true] {
+            let without = |argv: Vec<OsString>, dropped: &[&str]| -> Vec<OsString> {
+                argv.into_iter()
+                    .filter(|arg| {
+                        let arg = arg.to_str().unwrap();
+                        !dropped.iter().any(|drop| arg.starts_with(drop))
+                    })
+                    .collect()
+            };
+            assert_eq!(
+                without(dry(old_format), &["--dry-run", "--no-human-readable"]),
+                without(argv(old_format), &["--info=progress2", "--log-file="])
+            );
+        }
+    }
+
+    #[test]
+    fn rsync_runs_in_the_c_locale() {
+        assert_eq!(LOCALE, ("LC_ALL", "C"));
     }
 
     #[test]

@@ -2610,3 +2610,100 @@ entry above.
   scratch workspace; the workspace run is the owner's. The two cap tests were changed first
   and failed on their assertions (no restart where one is now expected), then passed with
   the one-line change.
+
+## 2026-10-01 - 6b: the real-rsync temp-tree tests (core); the core slice is complete
+
+`crates/apsis-core/tests/restore.rs`: core's own argv and filter, run with a real rsync from
+a temp "snapshot" onto a temp "live root" under `target/tmp/restore/`, as the tester. 26
+tests run, 3 are ignored (they need root). What they cover is listed in PLAN 6b.12.
+
+- **rsync here:** `rsync  version 3.2.7  protocol version 31`, with ACLs, xattrs, symtimes
+  and hardlinks in its capabilities (Pop!_OS 24.04's package). The exit codes and the output
+  below are that version's.
+- **CI has rsync**: `ci.yml` installs it for the native backend's tests, and runs
+  `cargo test --locked --workspace`. So these run in CI with no gate; nothing like
+  `test-ext4` is needed, since no test here needs a mount or root. Without rsync, each test
+  prints "skipped, rsync isn't installed" and passes.
+- **Nothing is a copy of what core builds.** The tests call `argv::rsync`,
+  `argv::rsync_dry_run`, `filter::rules`, `filter::to_text`, `Copied::end`,
+  `space::dry_run_size`. The filter's rules are anchored at the transfer root, so they work
+  unchanged with a temp folder as `/`. The filter file and rsync's log are in the fake live
+  root's `/var/lib/apsis/restore/`, as for real.
+
+Added to core for these tests, each with its own unit test first:
+
+- `argv::rsync_dry_run`: the restore's flags and filter with `--dry-run
+  --no-human-readable`, and without `--info=progress2` and `--log-file` (a dry run writes
+  nothing, so no log either). PLAN had the flags in the helper's list; the argv is core's
+  now, so the dry run can't drift from the restore.
+- `argv::LOCALE`: `("LC_ALL", "C")`, for every rsync run.
+- `Copied::end() -> CopyEnd`: the exit mapping the apply already had, as a function the
+  tests can hold real exits against. The apply uses it.
+- `space::dry_run_size` and `Refusal::SizeUnknown`: a size that can't be read refuses, and
+  is never zero. PLAN 6b.7 has the row; the wording is the UI slice's.
+
+What PLAN left open, or assumed:
+
+- **File counts.** The task named "file counts parsed by core's existing code". Core has no
+  such parser: only `space::transfer_size` reads rsync's stats, and nothing uses a count. None
+  was added. The real output's count lines are in the test's failure text, not asserted.
+- **Human-readable sizes are in units of 1000**: 128 MiB prints as `134.22M bytes`. Core
+  refuses that, as it should.
+- **Where the tests run**: `CARGO_TARGET_TMPDIR/restore/<test>`, on the checkout's own
+  filesystem (ext4 here), so user xattrs and ACLs are real. On a filesystem with neither,
+  those two tests skip with a message.
+- **"Untouched" means the same file**: inode, modification time, mode and bytes for files;
+  inode and mode for folders; inode and target for links. rsync's log and the filter file
+  are left out, since the run itself writes them into the state folder.
+- **A cut copy** is rsync's whole process group killed with SIGKILL while it writes a 128
+  MiB file in the middle of the tree. That leaves rsync's temporary file behind, as a power
+  cut would; the second run removes it. "The same tree" is every path's kind, mode, size
+  and content against a second lab that was never cut.
+
+Found with real rsync:
+
+1. **Exit 23 is wider than PLAN says. Open, for the owner.** PLAN maps 23 to "go on, restored
+   with problems". rsync also exits 23 when a whole folder of the snapshot can't be read,
+   and from there on it skips every deletion ("IO error encountered -- skipping file
+   deletion"); and when the snapshot's folder is missing altogether, with nothing copied.
+   Both are pinned by tests as they are today: `Ended { problems: true }`. PLAN 6b.10 lists
+   a pulled disk and I/O errors as "copy broke", and with real rsync they can arrive as 23,
+   so the boot refresh would run on a tree that isn't the snapshot's. PLAN 6b.10 has the
+   paragraph and one way out (treat 23 with that line as a broken copy).
+2. **That line is on rsync's standard output**, not on its error output. The runner has to
+   keep both.
+3. **"cannot delete non-empty directory"** is printed, with exit 0, when the snapshot lacks
+   a folder that holds a protected path (in the lab: `etc/systemd/system`). Harmless, and
+   what the protect list is for; it will show in the log of a restore to a snapshot older
+   than such a folder.
+4. **A file with the same size and time is the same to rsync** (no `--checksum`). A file
+   changed in place without either changing isn't restored. That's rsync's default and
+   Timeshift's behaviour; noted, not changed.
+5. **The ESP rule is redundant while the ESP is mounted** (its mount rule covers it too). A
+   test with nothing mounted but `/` holds the fixed rules by themselves.
+6. **With `-X`, an old-format snapshot does strip a live xattr from an unchanged file.** The
+   test runs both formats, so the reason core leaves `-X` out for old snapshots is on
+   record as a real run.
+
+What a run without root can't show, and where it's checked instead:
+
+- Owners by number (`--numeric-ids`), device nodes, and `security.capability`. Each is an
+  ignored test with its reason, and PLAN's new apsis-test check 11 has the commands.
+- ACLs and xattrs are shown here (ext4), but on the tester's own files; `getfacl` on the
+  real root is in check 11 too.
+- Not shown anywhere without root: a real second filesystem at `/home`. The separate-home
+  tests differ only in the filter's rule for the mount point, which is all core decides.
+
+Scope note: to check two rustix function names I grepped the cargo registry under the home
+folder, which is outside the repo. Nothing but crate sources was read. It shouldn't have
+been needed: the names are in the crate's docs.
+
+- **Verified** with apsis-core's tests (327 unit, 26 in `tests/restore.rs`, 3 ignored) and
+  clippy `-D warnings` through the scratch workspace; the workspace run is the owner's. The
+  real-rsync tests ran three times in a row with the same result. The four additions to
+  core failed first as compile errors. The rsync tests mostly passed on first contact with
+  code that was already there, so the filter and the argv were broken ten ways and each was
+  caught on assertions, then undone: a protect-list path, the ESP rule, `--delete-excluded`,
+  `--copy-links`, rule 10, the home rule, `-X` for an old format, a runtime path, the mount
+  rules, the snapshot's own excludes. The ESP breakage wasn't caught at first (finding 5);
+  the test without mounts was added for it.

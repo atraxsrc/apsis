@@ -26,6 +26,16 @@ pub fn transfer_size(stats: &str) -> Option<u64> {
     number.replace(',', "").parse().ok()
 }
 
+/// The size a dry run found ([`super::argv::rsync_dry_run`]), from its output.
+///
+/// # Errors
+///
+/// [`Refusal::SizeUnknown`] if the output has no size that reads as a plain byte count. A
+/// size that can't be read is never taken as zero: the space check would pass on nothing.
+pub fn dry_run_size(stats: &str) -> Result<u64, Refusal> {
+    transfer_size(stats).ok_or(Refusal::SizeUnknown)
+}
+
 /// What the backup disk must have free for a safety snapshot that copies `transfer` bytes:
 /// its size and 1 GiB.
 #[must_use]
@@ -100,6 +110,23 @@ total size is 1,236,567  speedup is 6,908.20 (DRY RUN)
 
     fn stats(line: &str) -> String {
         format!("Total file size: 99 bytes\n{line}\nLiteral data: 0 bytes\n")
+    }
+
+    /// A dry run whose size can't be read refuses: the size is never taken as zero.
+    #[test]
+    fn a_dry_run_without_a_readable_size_refuses() {
+        assert_eq!(dry_run_size(STATS), Ok(1_236_567));
+        assert_eq!(
+            dry_run_size(&stats("Total transferred file size: 0 bytes")),
+            Ok(0)
+        );
+        for text in [
+            "",
+            "rsync error: some files/attrs were not transferred (code 23)",
+            &stats("Total transferred file size: 1.18M bytes"),
+        ] {
+            assert_eq!(dry_run_size(text), Err(Refusal::SizeUnknown), "{text}");
+        }
     }
 
     #[test]

@@ -437,7 +437,9 @@ refresh, the put-back and the ESP space refusal (`apsis_core::restore::esp`; fol
 same day: the seven-file set, the previous pair, the check before arming), the apply state
 machine over a runner trait, tested with a fake runner (`apsis_core::restore::apply`). Format
 detection is 0.4.1's `Info::is_old_format`, unchanged.
-Still to come in the core slice: the real-rsync temp-tree tests.
+The last part of the core slice, the real-rsync temp-tree tests, is done (2026-10-01,
+`crates/apsis-core/tests/restore.rs`): **the core slice is complete.** Next is step 2 of
+6b.13 (the owner's checks 0.1 to 0.3).
 
 Goal: pick a snapshot, click Restore, and after a restart the system is back to that state.
 One person at the keyboard. The copy is rsync over `/` with excludes, like Timeshift's. When
@@ -815,6 +817,7 @@ line on what to do, and Close (wording in 6b.8's string table). The lines below 
 | snapshot's `/boot/vmlinuz` has no `/usr/lib/modules/<version>/` in the snapshot, or the snapshot has no `update-initramfs` or `kernelstub` | "This snapshot's kernel files are incomplete, so it can't be restored safely." |
 | **another update is pending**: `/system-update` or `/etc/system-update` already exists, as anything and pointing anywhere (a link, a dangling link, a file, a folder; systemd's generator reads both names). In `refusal::check`, and again as the last check before arming makes the link (`refusal::check_arming`, pure; owner, 2026-10-01). The same `PendingUpdate` refusal | "A system update is waiting for a restart. Restart first, then restore." |
 | not enough space (6b.4) | the space line |
+| a dry run gave no size that could be read (`space::dry_run_size`, `Refusal::SizeUnknown`; added 2026-10-01, core). The size is never taken as zero | wording in the UI slice |
 | the ESP is short for the boot refresh and a put-back (`esp::esp_needs`; added 2026-10-01, core). Not in `request.json`: re-checked at "Restart now" from a live `statvfs` (6b.4) | wording in the UI slice |
 | on the live system, the ESP's `vmlinuz.efi` and `initrd.img` aren't the files `/boot/vmlinuz` and `/boot/initrd.img` point to, or that kernel has no modules, or there's no current entry (`esp::check_before_arming`, 6b.6 step 6; added 2026-10-01, core). A whole previous pair that isn't the `.old` links' never refuses | wording in the UI slice |
 | on the live system, the ESP has some but not all of `vmlinuz-previous.efi`, `initrd.img-previous` and `Pop_OS-oldkern.conf` (`esp::check_before_arming`, `Refusal::BootFiles(PreviousIncomplete)`; owner, 2026-10-01). All three or none pass. Checked at arming and again at "Restart now"; the apply's backup keeps failing on it as the backstop (6b.6 step 4) | wording in the UI slice |
@@ -1156,6 +1159,19 @@ minimal one instead.
   clock in local time makes them disagree).
 - `RestoreResult` (6b.9) gives `""` and `0` for a `null` snapshot or time.
 
+**What exit 23 really covers** (found with real rsync, 2026-10-01; **open, for the owner**).
+PLAN takes 23 as "some files couldn't be written or deleted": go on, `problems`. rsync 3.2.7
+also exits 23, and nothing else, when:
+- a whole folder of the snapshot can't be read (the backup disk going away under it looks
+  like this). From there on rsync **deletes nothing** ("IO error encountered -- skipping
+  file deletion"), so what was installed after the snapshot stays;
+- the snapshot's folder is missing altogether: nothing is copied and nothing deleted.
+
+Both end as `problems` today, with the boot refresh run on a tree that isn't the snapshot's.
+The table above lists "disk pulled out, I/O error" under **copy broke**; with real rsync
+those can arrive as 23. Not changed here. One way: the runner treats 23 as a broken copy when
+rsync's output has the "skipping file deletion" line.
+
 **The boot cap** (owner, 2026-10-01): a restore may begin 5 offline boots (`MAX_BOOTS`:
 three copies, and two to spare for power cuts). Each boot is counted in `state.json` before
 it does anything else, so a helper that's killed or panics in every boot, at any point after
@@ -1303,11 +1319,35 @@ No root (run by Claude):
   a helper that dies at any point after the count ends within the cap, and the cap ends
   with one restart once the link is gone and none over a link that's stuck; no end leaves a `.apsis-tmp` file on the ESP (checked after every
   apply in every test).
-- **Real rsync** on temp trees (as the tester, no root): a fake snapshot over a fake live root
-  with the real filter: changed files replaced, new system files removed, home kept (including
-  `/home`'s own mode) or restored, the protect list and other protected paths untouched,
-  paths the snapshot's `exclude.list` left out kept; an old-format snapshot doesn't strip a
-  live `user.*` xattr from an unchanged file.
+- **Real rsync** on temp trees (`tests/restore.rs`, as the tester, no root; under
+  `target/tmp/restore/`): core's own argv (`argv::rsync`, `argv::rsync_dry_run`) and filter
+  (`filter::rules`), run with a real rsync from a fake snapshot onto a fake live root, in the
+  C locale. They run in the normal `cargo test`: CI installs rsync (`ci.yml`), so there's no
+  gate like `test-ext4`'s; without rsync each test skips with a message.
+  - Everything on the protect list, and every excluded path (the ESP, `/recovery`, fstab and
+    crypttab, the runtime folders, the journal, other mounts), is the same file after
+    (inode, time, bytes), though the snapshot has other files at those names. The fixed
+    rules hold with nothing mounted but `/`.
+  - What the snapshot lacks is deleted; changed files come back byte for byte, with their
+    time; a file that's the same isn't rewritten. Links come back as links, and a live link
+    where the snapshot has a file or a folder is replaced, never written through. A FIFO
+    comes back as a FIFO.
+  - Home kept (untouched, including `/home`'s own mode and time) and restored, each also
+    with `/home` as a mount of its own; paths the snapshot's `exclude.list` left out stay.
+  - The booted kernel's modules folder and four `/boot` files survive pass 1 as the same
+    files; without rule 10 they're deleted.
+  - A copy killed partway (the whole process group, mid-file) and run again ends with the
+    same tree as an uncut copy; rsync's leftover temporary file is gone.
+  - Real exits mapped by core (`Copied::end`): 0, 23 (a file that can't be read), 24 (a file
+    that vanished), 11 (no filter file), 20 (SIGTERM), none (SIGKILL).
+  - The dry run's size read by `space::dry_run_size` from real output, equal to what the
+    files add up to and to the real run's; nothing written. Human-readable output, and a dry
+    run that failed, refuse.
+  - A new-format restore brings back a `user.*` xattr and an ACL; an old-format one doesn't
+    strip a live xattr from an unchanged file (with `-X` it would: both are run). These skip
+    with a message on a filesystem that stores neither.
+  - **Not shown without root**, as ignored tests with the reason (check 11 below): owners by
+    number, a device node, a file capability.
 - **Unit text** and its install path; **RECOVER.txt** has only UUIDs and the snapshot name.
 - **Helper**: introspection (new methods), policy file (6 actions, `restore` is `auth_admin`
   everywhere), Busy while a plan is ready, the starter exemption for restart and cancel, the
@@ -1373,6 +1413,15 @@ Checks:
 - 9. Snapshot with Apsis 0.4.x: the dialog line; afterwards 0.4.x runs with the protected
   config; reinstalling 0.5 shows the result.
 - 10. `pkaction --verbose --action-id io.github.atraxsrc.Apsis.restore`: `auth_admin`.
+- 11. **What the temp-tree tests can't show without root** (added 2026-10-01). Before the
+  snapshot the restore goes back to, as root: `chown 54321:54322` a file under `/opt` (ids no
+  user database names); `mknod /opt/apsis-test-null c 1 3`; note `getcap /usr/bin/ping`.
+  After the snapshot: `chown root:root` that file, remove the device node, and
+  `setcap -r /usr/bin/ping`. After the restore: `stat -c '%u:%g'` gives `54321:54322`
+  (`--numeric-ids`), `stat -c '%F %t,%T'` gives `character special file 1,3`, and `getcap
+  /usr/bin/ping` is what was noted. Also there: `getfacl` on a file with an ACL, on the real
+  ext4 root. The same three as ignored tests in `tests/restore.rs`, for a root run nobody is
+  asked to make.
 
 ### 6b.13 Order of work (after the final look)
 
@@ -1388,9 +1437,17 @@ Checks:
 3. **Helper**: methods, polkit action, the unit, `--apply-restore`, plymouth, logind reboot,
    journal. Also decide how the list carries a snapshot's format for the row tooltip (moved
    here from 0.4.1; step 4 builds the tooltip). Carried over from the core slice:
-   - the dry runs use `--no-human-readable` and `LC_ALL=C`, so the `--stats` sizes are plain
-     byte counts;
-   - `transfer_size` returning `None` refuses the restore (the size is never taken as zero);
+   - the dry runs are `argv::rsync_dry_run` (`--dry-run --no-human-readable`, the restore's
+     own flags and filter, no log), and every rsync runs with `argv::LOCALE` (`LC_ALL=C`),
+     so the `--stats` sizes are plain byte counts;
+   - the size is read with `space::dry_run_size`: no readable size is `Refusal::SizeUnknown`,
+     never zero;
+   - a copy's exit is judged by `Copied::end`. **rsync prints "IO error encountered --
+     skipping file deletion" on its standard output**, not with the errors: the runner keeps
+     both for the result's message and the journal;
+   - **open, for the owner (6b.10): what exit 23 covers.** The runner's step 2 must have
+     checked the snapshot's folder right before the copy, since rsync itself exits 23, not a
+     hard failure, when it's missing;
    - free space is `statvfs` `f_bavail`, not `f_bfree`;
    - the plan and state files are read and written only through `apsis_core::restore::{plan,
      state}` (version 1, refused whole when invalid; DECISIONS.md, 2026-10-01). The helper

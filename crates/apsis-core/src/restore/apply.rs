@@ -48,6 +48,27 @@ pub struct Copied {
     pub tail: String,
 }
 
+/// What a copy's exit means (PLAN 6b.6 step 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyEnd {
+    /// Exit 0, or 24 (source files that vanished): the apply goes on. `problems` is exit 23:
+    /// some files couldn't be written or deleted.
+    Ended { problems: bool },
+    /// Any other exit, or none: the copy broke (PLAN 6b.10).
+    Broke,
+}
+
+impl Copied {
+    #[must_use]
+    pub fn end(&self) -> CopyEnd {
+        match self.exit {
+            Some(0 | 24) => CopyEnd::Ended { problems: false },
+            Some(23) => CopyEnd::Ended { problems: true },
+            _ => CopyEnd::Broke,
+        }
+    }
+}
+
 /// What the apply needs done on the machine. The helper has the real one; the tests a fake.
 pub trait Runner {
     /// `/system-update` is a link to the state folder (PLAN 6b.6 step 1). If it isn't, the
@@ -303,10 +324,9 @@ fn run(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
             state.attempts
         ));
         let copied = runner.copy(&plan);
-        let problems = match copied.exit {
-            Some(0 | 24) => false,
-            Some(23) => true,
-            _ if state.attempts >= MAX_ATTEMPTS => {
+        let problems = match copied.end() {
+            CopyEnd::Ended { problems } => problems,
+            CopyEnd::Broke if state.attempts >= MAX_ATTEMPTS => {
                 let message = format!(
                     "the copy broke on each of {MAX_ATTEMPTS} tries: {}",
                     copied.tail
@@ -320,7 +340,7 @@ fn run(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
                     message,
                 );
             }
-            _ => {
+            CopyEnd::Broke => {
                 let attempt = state.attempts + 1;
                 runner.say(&format!(
                     "the copy broke ({}): restarting to try again, attempt {attempt} of \
@@ -1614,6 +1634,32 @@ mod tests {
             "the kernel from before the restore couldn't be removed (Read-only file system)"
         );
         assert_eq!(passed(&lab), restored_boot_files());
+    }
+
+    /// PLAN 6b.6 step 3: which exits of pass 1 go on, and which are a copy that broke.
+    #[test]
+    fn a_copys_exit_says_whether_it_ended() {
+        let end = |exit| {
+            Copied {
+                exit,
+                tail: String::new(),
+            }
+            .end()
+        };
+        assert_eq!(end(Some(0)), CopyEnd::Ended { problems: false });
+        assert_eq!(end(Some(24)), CopyEnd::Ended { problems: false });
+        assert_eq!(end(Some(23)), CopyEnd::Ended { problems: true });
+        for exit in [
+            None,
+            Some(1),
+            Some(11),
+            Some(12),
+            Some(20),
+            Some(30),
+            Some(-1),
+        ] {
+            assert_eq!(end(exit), CopyEnd::Broke, "{exit:?}");
+        }
     }
 
     // ---- the boot counter ----

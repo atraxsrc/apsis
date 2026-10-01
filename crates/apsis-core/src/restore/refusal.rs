@@ -57,6 +57,9 @@ pub enum Refusal {
         needs: u64,
         free: u64,
     },
+    /// A dry run gave no size that could be read, so the space can't be checked
+    /// ([`super::space::dry_run_size`]).
+    SizeUnknown,
     /// On the live system, the ESP doesn't boot the kernel `/boot` links to
     /// ([`super::esp::check_before_arming`]).
     BootFiles(CheckFailure),
