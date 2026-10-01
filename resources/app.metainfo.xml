@@ -79,6 +79,17 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.4.1" date="2026-10-01">
+      <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.4.1</url>
+      <description>
+        <p>Snapshots now hold everything a full restore needs.</p>
+        <ul>
+          <li>Snapshots keep POSIX ACLs and extended attributes, including file capabilities</li>
+          <li>Older snapshots, and Timeshift's, keep working</li>
+          <li>The first snapshot after the upgrade copies a few files again; later ones link as before</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.4.0" date="2026-09-30">
       <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.4.0</url>
       <description>

@@ -22,7 +22,7 @@ Apsis takes snapshots of your system, the way Timeshift does, and lives in the C
 The panel shows when the last snapshot was taken and how full the backup disk is; the window
 creates, lists and deletes snapshots and holds the settings.
 
-> **Status:** 0.4.0. Apsis takes rsync snapshots itself and doesn't need Timeshift. It uses
+> **Status:** 0.4.1. Apsis takes rsync snapshots itself and doesn't need Timeshift. It uses
 > Timeshift's layout on the backup disk, so snapshots Timeshift made keep working in Apsis
 > (and the other way round). Manual only: there is no schedule, and a snapshot is only deleted
 > when you delete it. Restoring the whole system comes in 0.5.0.

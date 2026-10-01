@@ -4,7 +4,7 @@ All notable changes to Apsis are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [0.4.1] - Unreleased
+## [0.4.1] - 2026-10-01
 
 Snapshots now hold everything a full restore (0.5.0) needs.
 

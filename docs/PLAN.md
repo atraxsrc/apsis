@@ -364,8 +364,8 @@ original, and the journal shows each call.
 
 ## 0.4.1 - Snapshot format: ACLs and extended attributes (before 6b)
 
-**Status: core done 2026-10-01 (argv, `info.json` key, format detection, tests). Left: the
-owner's four checks on apsis-test, then the version. The row tooltip moved to 0.5.0 (see UI).**
+**Status: released 2026-10-01. Core done (argv, `info.json` key, format detection, tests); the
+owner's four checks on apsis-test passed. The row tooltip moved to 0.5.0 (see UI).**
 A small release of its own, so 0.5.0's restore starts from snapshots that hold everything a
 restore needs.
 

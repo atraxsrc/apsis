@@ -1731,3 +1731,10 @@ ends with `"apsis-rsync-flags" : "-aAX --numeric-ids"`. What the plan didn't say
 - **Building in Claude's sandbox, simpler:** a temporary `HOME` with the real `CARGO_HOME` and
   `RUSTUP_HOME` is enough. git needs `GIT_CONFIG_GLOBAL=/dev/null`. Claude can't commit there
   (no identity, and it must not set one), so the owner runs the commit commands.
+
+## 2026-10-01 - 0.4.1 released
+
+The owner ran the four apsis-test checks of PLAN's 0.4.1 section and reported all passed.
+Version 0.4.1 in `Cargo.toml`, CHANGELOG, metainfo and the deb changelog; tag `v0.4.1`. The
+version was set by hand, not with `just tag`: that recipe tags the bare version, and the
+repo's tags are `v`-prefixed.
