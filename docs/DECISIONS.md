@@ -2885,3 +2885,323 @@ says the same. Not changed here. Proposed: plain `kernelstub --verbose
   - The refusal "the snapshot has no `update-initramfs`" (PLAN 6b.7) would go, and PLAN
     6b.11's recovery steps keep their `update-initramfs` (a chroot from recovery is
     another case).
+
+## 2026-10-01 - 6b helper slice: design (owner's facts from apsis-test, and what was decided)
+
+Design only, written into PLAN 6b.6, 6b.7, 6b.9, 6b.12, 6b.13 step 3, 6b.14, and the new
+0.4.2 and 0.5.x sections. No code, no tests, no commit. Facts are the owner's, from apsis-test
+on 2026-10-01 (Apsis 0.4.1, kernel 7.1.5, kernelstub 3.1.4), unless marked as read from the
+code here.
+
+**1. The boot refresh (6b.6 step 5): settled by the owner.** The apply runs exactly what Pop's
+hooks run, `kernelstub --verbose --preserve-live-mode`, and nothing else. Both
+`/etc/kernel/postinst.d/zz-kernelstub` and `/etc/initramfs/post-update.d/zz-kernelstub` call
+it that way. The flag is hidden from `--help` and defined in `kernelstub/application.py`; the
+dry run with it exits 0 and shows: ESP folder `EFI/Pop_OS-<root FS UUID>`; newest
+`/boot/vmlinuz-*` -> `vmlinuz.efi` + `initrd.img`, the next -> `vmlinuz-previous.efi` +
+`initrd.img-previous`; `loader/entries/Pop_OS-current`; manage-only (NVRAM entry -1, no
+efibootmgr writes); `/proc/cmdline` copied into the ESP folder; management mode true, install
+loader true, config version 3. `update-initramfs -u -k all` is gone from the apply (the
+reasons are in the entry above and in PLAN). Consequences written: the backup's "before"
+reason is now "before kernelstub, the one command that writes the ESP"; `esp_needs` is exact;
+the `KernelIncomplete` refusal no longer needs `update-initramfs` in the snapshot and does
+need the snapshot's `zz-kernelstub` hook to carry the flag (the proof its kernelstub takes
+it); 6b.11's recovery steps keep `update-initramfs` (a chroot from recovery is another case).
+
+**1b. The initrd versus the live crypttab and fstab: designed, to be confirmed.** The initrd
+that boots is the snapshot's, while rule 4 keeps the live `/etc/crypttab` and `/etc/fstab`.
+From initramfs-tools' and cryptsetup-initramfs' behaviour (read from their sources' documented
+behaviour, not run here): the `cryptroot` hook embeds `cryptroot/crypttab` with the entries
+needed at boot (root, `/usr`, resume, `initramfs`-flagged ones); `conf/conf.d/resume` comes
+from `/etc/initramfs-tools/`, which the snapshot restores; `/etc/fstab` is never embedded.
+Decided: preparing compares the snapshot's `etc/crypttab` with the live one and refuses when
+they differ (`Refusal::CrypttabDiffers`, 0.5.0; the rebuild is 0.5.x item 2). "Same" means:
+comment lines (`#` after trimming) and blank lines dropped, each remaining line's fields
+joined by one space, compared in order; a snapshot without `etc/crypttab` compares as empty.
+A comment edit must not refuse; a changed field must. fstab isn't compared: on a system Apsis
+accepts (plain ext4 root partition, no separate `/usr` or `/boot`) it adds nothing to the
+initramfs, and fstab changes are common and are what rule 4 is for. On apsis-test (cryptswap
+with a random key, which the hook excludes) the embedded crypttab is expected empty. The
+owner's `lsinitramfs`/`unmkinitramfs` commands in PLAN 6b.13 step 3 settle it; if the
+initramfs holds a copy of fstab after all, fstab is compared the same way.
+
+**2. The unit.** `StandardOutput=journal` (plymouth is the only thing the person sees);
+`udevadm wait --timeout=60 /dev/disk/by-uuid/<uuid>` with a fixed argv, a timeout being
+"never started" (the disk was there at once in check 0.3; not relied on);
+`FailureAction=reboot` (already decided); **never `KillMode=none`**; no `Before=` or
+`Conflicts=` against the other offline-update units (5c below).
+
+**3. How the list carries a snapshot's format: recommended, for the owner.** `Helper3`, with
+each snapshot as `(ssss)`: name, tags, comment, and the raw `apsis-rsync-flags` string (`""`
+when missing). Why a new interface version: `(sss)` -> `(ssss)` is a breaking wire change and
+names.rs says a breaking change gets a new interface; a second list method would keep a
+stale 0.4.x panel process working until re-login but leaves a dead method for ever; an
+`a{sv}` per snapshot buys flexibility nothing planned needs. Why the string, not a bool: the
+0.5.x `-H` change alters the flags without a wire change, and core's `Info` rule already
+reads the string. The one mismatch the .deb allows (applet and helper ship together, `prerm`
+stops the helper) is a 0.4.x panel process still running after the upgrade; it gets
+`UnknownInterface` until re-added, as 0.3.x did at 0.4.0. After a restore, the snapshot's
+Apsis is installed whole, so panel and helper always match.
+
+**4. Carried-over helper notes**: all stay (PLAN 6b.13 step 3), plus: the runner reads rsync's
+standard output line by line as it runs (progress to the boot screen) and keeps all of it for
+`Copied::new`.
+
+**5. pop-upgrade-init collides with the offline boot: facts and the fix.**
+- Facts (owner): `pop-upgrade-init.service` has only `ConditionPathExists=/system-update` (no
+  check of the target) and `KillMode=none`. `/usr/lib/pop-upgrade/upgrade.sh`
+  unconditionally: `rm -rf /pop-upgrade /pop_preparing_release_upgrade`; `plymouth
+  change-mode --system-upgrade`; `touch /upgrade-attempted`; `systemctl mask acpid
+  pop-upgrade`; `apt-get install -f`; `apt-get full-upgrade --no-download`. On success: `rm
+  /system-update`, remove HWE kernels, autoremove, `update-initramfs -c -k all`, delete and
+  re-create the EFI boot entry (`efibootmgr -B` / `-c`), `systemctl reboot`. On failure:
+  `systemctl rescue`. It ran during check 0.3's spike boot next to the dummy unit; the reboot
+  cut it off, `KillMode=none` left `upgrade.sh` and `apt-get` running until the final kill.
+  Left behind: `acpid` and `pop-upgrade` masked, `/upgrade-attempted`. The owner cleaned up
+  (unmask, rm); `dpkg --audit` clean, no apt/dpkg activity, no cached debs. **Check 0.3's
+  plymouth and console observations were contaminated** and are redone as check 0.4 once
+  this is blocked. `packagekit-offline-update` is safe (logs "no trigger, exiting");
+  `fwupd-offline-update` is gated on `ConditionPathExists=/var/lib/fwupd/pending.db`.
+- **5a, chosen: a drop-in whose condition is a path through the link.**
+  `/etc/systemd/system/pop-upgrade-init.service.d/50-apsis.conf` with
+  `ConditionPathExists=!/system-update/apsis-helper`. `/system-update` is an absolute symlink
+  to `/var/lib/apsis/restore` and `ConditionPathExists=` follows it, so the path exists
+  exactly while the link points at Apsis's folder: no marker is made or removed, the link
+  stays the single commit point. **Written on arm, protected, not shipped** (the owner's
+  first thought was a packaged drop-in): a packaged file is deleted by pass 1 for every
+  snapshot made before 0.5.0, and in a retry boot pop-upgrade-init would then run on Apsis's
+  link. In `/etc` and on the protect list it survives the copy and is there in every armed
+  boot; the protect-list test still passes because it isn't packaged. Removed with the unit
+  (`remove_arm_files`, disarm, `postrm purge`); a leaked one is inert without the link. The
+  walk through every end (Finished, GaveUp, Retry, LinkStuck, NotArmed, panic, power cut,
+  a later boot) is in PLAN 6b.6: it can never start on Apsis's link and can never stay
+  blocked. Check 0.4 proves it on apsis-test with the drop-in placed by hand.
+- **5b, chosen: arming refuses while any other offline update is pending**: `/system-update`
+  and `/etc/system-update` as anything (already), `/pop-upgrade`,
+  `/pop_preparing_release_upgrade`, `/upgrade-attempted`, `/var/lib/fwupd/pending.db`, and
+  PackageKit's `/var/lib/PackageKit/prepared-update` and `prepared-upgrade` (the names
+  PackageKit's library uses; confirmed on apsis-test before building). `lstat`, anything at
+  the name counts. `Refusal::OtherUpdate { PopUpgrade | Firmware | Packages }`, pure in core
+  with tests; checked in the dialog, when preparing and with `check_arming`, **not at apply**
+  (the link is Apsis's own there, and the drop-in holds pop-upgrade off). Flagged for the
+  owner: PackageKit's prepared update is staged, not triggered (no link), so refusing on it
+  is stricter than "pending"; recommended anyway, as asked.
+- **5c, chosen: no `Before=`, no `Conflicts=`.** `Conflicts=` between two units wanted by the
+  same target makes systemd drop one job, and which one isn't Apsis's to choose. `Before=`
+  would move pop-upgrade-init's condition check from the start of the boot (nothing copied
+  yet, the drop-in certainly in place) to after Apsis's copy, gaining nothing while the
+  drop-in is protected, and ordering against units Apsis doesn't own risks a cycle that also
+  drops a job.
+- **5d**: a snapshot may hold `/upgrade-attempted` or a leaked drop-in; the restore brings
+  back the former (the snapshot's state, harmless) and keeps the live drop-in (protected).
+
+**6. The `-H` decision: the owner's block wasn't in the brief.** The brief said "paste
+decision 6 block here" and no text followed. Nothing is written for it here, so this log
+holds only real text. Its three consequences, as the brief named them, are in PLAN: README
+notes (6b.13 step 5), the Flatpak line in checks 1 and 3, and `-H` as the first 0.5.x item.
+**The owner appends the block verbatim.**
+
+**7. The helper lock versus `Finished`: cause found (from the code).** Bulk delete on
+apsis-test: after the first delete finished, the next was refused as busy; reopening the
+window fixed it. In the helper (`service.rs` `start`) the lock is released before `Finished`,
+as its comment says, but the job's end is announced on `JobChanged` (`state.end`) one line
+earlier, while the lock is still held. The window sends the next `Delete` on its own
+`Finished`. Every other listener, above all the panel popup (its own process, never the
+starter), lists on `JobChanged`'s end (`on_job`: "a create or delete changes the list"); that
+`List` holds the lock for about a second (mount, read, unmount); the next `Delete` lands in
+it and is refused `Busy` on purpose (refused, not queued); the applet shows the busy line,
+sets `helper_busy`, and drops the rest of the bulk delete without saying which were deleted.
+So the gap between the N jobs of one bulk delete is the cause, and the applet's N-jobs design
+multiplies it. **The rule, stated**: the lock is released before the end is announced and
+before `Finished` is sent (`Running::end`: take the job out, free the lock, then announce),
+with a `State` test. The one deliberate exception is `Finished("restore", true)`: the ready
+plan keeps refusing writes until the starter restarts or cancels (and refuses no reads).
+**The fix** is `DeleteMany(as names)` as one job under the lock, plus the lock rule, plus the
+applet calling it; **proposed as its own slice, 0.4.2**, before the helper slice is built (a
+released bug, a small independent fix, an addition to the interface), or folded into the
+helper slice unchanged if the owner prefers no 0.4.2. The journal command in PLAN 6b.13 step 3
+(item 7) shows the cause as a `list for :1.xx` between the deletes.
+
+**Also decided in this design, from the brief's constraints:**
+- A ready plan is a `ready` state beside the lock, not the lock: writes get `Busy`, reads
+  don't (the popup and other windows would otherwise show Busy for up to 30 minutes). It's a
+  job (`restore`, `running`, percent 100) so other windows disable Create and Delete; it ends
+  `stopped` on cancel, disarm, stale removal and "too old", `done` before the reboot.
+- The helper doesn't idle-exit while a plan is ready and watches the starter's bus name;
+  a stale plan is removed at once, not at the next call. A killed helper's leftover plan is
+  removed at start, and the window then gets "The preparation is gone".
+- The slice has no visual work. The wording it needs is listed under "for the UI slice" in
+  PLAN 6b.13 step 3; the row tooltip's format comes from the list's fourth field.
+
+## 2026-10-01: -H stays off in 0.5.0; Flatpak corrects the 0.4.1 premise
+
+The 0.4.1 decision called in-system hard links "few and harmless as copies". Flatpak's ostree
+stores are hard-link heavy, so without -H a snapshot holds each link as its own file. Measured:
+apsis-test user install 1.9G (du) vs 4.1G (du -l) vs 4.1G in the snapshot; owner's daily
+machine system 3.9G -> 8.6G, user 7G -> 18G. --link-dest makes it a one-time cost per object.
+
+Restore correctness without -H (second opinion, then verified on both machines): ostree content
+is content-addressed with mtime 0, so the quick check only skips files that are already
+correct. Every repo is mode=bare-user-only with no xattrs on objects, so old-format restores
+(no -X) are fine too. Unchanged live files keep their links; recreated ones come back as copies
+(more disk, drained by later updates and prunes); the dry run counts per path, so the space
+refusal sees it. A bare-user repo (Flatpak older than 0.9) restored from an old-format snapshot
+would need `flatpak repair`; not the case here.
+
+Decided:
+- 0.5.0: no -H, on create or restore. README: Flatpak data takes more room in snapshots and can
+  take more on the system disk after a restore.
+- Documented residuals, not fixed: two live paths sharing an inode whose snapshot copies differ
+  in mode, owner, ACL or xattr end with the last-visited path's metadata; the size+mtime hole is
+  slightly more likely for linked pairs. No real case known on Pop!_OS's layout.
+- README: restoring the system while keeping home can leave a user Flatpak app needing a system
+  runtime the snapshot doesn't have ("runtime not installed"); `flatpak install` or
+  `flatpak repair` fixes it. Not related to -H.
+- Checks 1 and 3 gain: `flatpak --user list`, launch one app, `du -sh ~/.local/share/flatpak`
+  before and after.
+- 0.5.x, first item: -H for create, as a third format via apsis-rsync-flags. Restore uses -H only
+  for snapshots recorded with it. Measure first on the daily machine: `/usr/bin/time -v rsync
+  -naH --stats` over a snapshot vs without -H. Restore is the expensive side: in a snapshot every
+  file has several links through --link-dest, so the link table covers the whole file list. Know
+  also: with -H, --link-dest can link paths that are separate live (man rsync, --hard-links);
+  rsync's behaviour on EMLINK is untested.
+
+## 2026-10-01 - 6b helper slice: the owner's answers and corrections from apsis-test
+
+Answers to the design entry above (same day), and new facts from the owner's read-only
+checks on apsis-test. Where this entry differs from the design entry, this one holds. PLAN
+6b.6, 6b.7, 6b.9, 6b.12, 6b.13 step 3, 6b.14 and 0.4.2 carry the changes.
+
+**Answers.**
+- `Helper3` with the raw flags string: **yes**. One interface bump beats two list methods,
+  since applet and helper ship together; the raw string carries a future `-H` format without
+  another wire change.
+- 0.4.2 as its own slice, **first**: it changes the lock order the restore depends on, so it's
+  proven in a small release before the restore is built on it. Note: the 2026-10-01 baseline
+  holds 0.4.1, so every restore from it reinstalls 0.4.1 (check 9's case); a fresh baseline is
+  taken once 0.5.0 is on apsis-test, for checks 1 to 8.
+- **No refusal on PackageKit's staged update**: staged means downloaded and prepared, not
+  triggered; `pk-offline-update` exits "no trigger" in that state (as in check 0.3); COSMIC
+  Store stages updates routinely, so refusing would block restores for no reason. A triggered
+  one makes the `/system-update` link, which `check_arming` already refuses.
+- Decision 6 (`-H`): appended above, verbatim.
+
+**Corrections and new facts (owner, apsis-test, 2026-10-01).**
+1. **fwupd's `/var/lib/fwupd/pending.db` is out of the arming refusals.** It's fwupd's history
+   database and exists on most machines (on apsis-test since Sep 30, nothing pending).
+   `fwupd-offline-update` ran in check 0.3's boot and finished at once ("Deactivated
+   successfully"); `fwupdoffline`'s strings show it checks the `/system-update` link and asks
+   the database for pending devices. A real fwupd update makes its own link, already refused.
+   **The name refusals are the three Pop ones**: `/pop-upgrade`, `/pop_preparing_release_upgrade`,
+   `/upgrade-attempted` (`Refusal::PopUpgradePending`). "Seven names" is wrong everywhere it
+   stood; PLAN says three.
+2. **The initramfs** (`initrd.img-7.1.5`) holds `main/cryptroot/crypttab`, 0 bytes, and
+   `main/etc/fstab`, empty. The live crypttab has only cryptswap (`/dev/urandom` key), which
+   the `cryptroot` hook doesn't carry. So "never embeds fstab" was wrong: it embeds an empty
+   one, never the live content. The rule stands: compare crypttab (comments and whitespace
+   ignored), not fstab; an encrypted-root install carries root's crypttab line, so the
+   comparison matters there (unverified, no such machine; PLAN's claims table has the
+   command). The baseline snapshot's two kernelstub hooks both contain `--preserve-live-mode`
+   (`grep -c` 1 each), so the hook-flag refusal passes for it.
+3. **Item 7 is bigger than "unlock before `Finished`".** The journal: at every job end
+   (17:00:42 after a create; 17:04:30, 17:08:30, 17:21:47 after deletes) **six `List` calls
+   arrive in the same second from six bus names** (`:1.1040` to `:1.1045`, `:1.1101` to
+   `:1.1106`, ...), about half refused "busy with another snapshot operation" by each other;
+   the second delete (`:1.1103`) was refused because `List :1.1101` held the lock. So `List`
+   takes the same exclusive lock as the writes, and reads exclude reads. **Found in the code
+   (Claude)**: six names are six calls, not six processes, because `HelperClient::connect()`
+   opens a new system-bus connection per call; a `List` is a job that takes the exclusive
+   lock and announces its end to everyone; and the applet's `on_job` lists on *any* job's
+   end while it was told Busy (`changed || self.helper_busy`), a `List`'s end included. Three
+   Apsis processes therefore make 3 + 2 + 1 = 6 lists with 3 refusals, which is the journal's
+   count. Which three (panel, window, a second window or a second panel/dock): `pgrep -a
+   apsis` on apsis-test. **0.4.2's design (PLAN)**: a refcounted read-only mount so reads
+   share and never refuse each other; writes wait (bounded, 15 s) for readers instead of
+   being refused, readers during a write or a waiting write are refused (writer priority);
+   reads aren't jobs (no `JobChanged`, not in `Job()`); release before announce;
+   `DeleteMany`; in the applet one connection per process, one refresh per process per
+   create or delete end, and `DeleteMany` for several.
+4. **`system-update-cleanup.service`** (systemd's): `After=system-update.target`; runs only
+   while `/system-update` or `/etc/system-update` exists (`ConditionPathExists=|` and
+   `ConditionPathIsSymbolicLink=|`); `ExecStart=rm -fv /system-update /etc/system-update`;
+   `SuccessAction=reboot`; no `FailureAction`. **Walked through every end in PLAN 6b.6**:
+   `Finished` and `GaveUp` remove the link and reboot themselves (cleanup skipped); `Retry`
+   keeps the link and must not have cleanup run before the reboot takes effect, which rests on
+   cleanup's `Conflicts=shutdown.target` dropping its pending start job when Apsis enqueues
+   the reboot before its unit exits (**unverified**; the command is in the claims table; if
+   absent, `restart` becomes a blocking `systemctl reboot` so the unit never exits);
+   **`LinkStuck` is the only end that relies on cleanup**: cleanup's `rm` and
+   `SuccessAction=reboot` get the machine out, and if that `rm` fails too, nothing reboots
+   and the machine sits in `system-update.target` with no desktop, the boot screen showing
+   Apsis's last line, until the user powers it off; the next boot comes back to the apply
+   (step `end`, counted against the boot cap) and gives up the same way. So `say` for
+   `LinkStuck` tells the user to turn it off and on, and to use the README's recovery steps
+   (which end with `rm /mnt/system-update`) if the screen comes back; wording for the UI
+   slice. `NotArmed` is the other tool's business. **New**: a reboot call that fails would
+   leave `Finished`/`GaveUp` sitting the same way with the link gone and cleanup skipped, so
+   the real runner's `restart` exits 1 when `systemctl reboot --no-block` fails, and
+   `FailureAction=reboot` reboots; in `Retry` that's the wanted retry with its attempt on disk,
+   the one bounded exception to "never exit non-zero with the link in place".
+5. **Unit facts**: `pop-upgrade-init`, `packagekit-offline-update` and
+   `fwupd-offline-update` are all wanted from
+   `/usr/lib/systemd/system/system-update.target.wants/`; none has ordering against ours.
+   `pop-upgrade-init`: `Before=... pop-upgrade.service`, `FailureAction=reboot`,
+   `KillMode=none`, output to `/var/log/upgrade.log`. `packagekit-offline-update` has no path
+   condition of its own (`pk-offline-update` decides, "no trigger, exiting"). No drop-in
+   folders exist today. `udevadm wait` exists (systemd 255.4). The design's "no `Before=`, no
+   `Conflicts=`" stands; the cycle worry is gone, the ownership one isn't.
+6. **Hard links, for the README**: `/var/lib/flatpak/repo/objects` with more than one link: 0
+   on apsis-test (the system Flatpak is empty there); `/usr`: 28 files. Flatpak in use there is
+   the user install (one VPN app plus runtimes). Decision 6 has the sizes.
+7. **Check 0.4 is written in full** in PLAN 6b.12: 0.3's unit, script and
+   `/var/lib/apsis-spike` were removed after 0.3, so 0.4 re-creates them (names
+   `apsis-spike.service`, `/var/lib/apsis-spike/spike.sh`, an empty `apsis-helper` marker in
+   the folder so the real condition `!/system-update/apsis-helper` is what's tested), places
+   the drop-in, arms, reboots, verifies, cleans up. The "start pop-upgrade-init by hand" line
+   is gone.
+8. **Every claim about Pop!_OS, systemd, initramfs-tools, fwupd or PackageKit behaviour** is
+   now in a table in PLAN 6b.13 step 3, marked verified (with the evidence) or unverified
+   (with a read-only command). Unverified at this point: cleanup's `Conflicts=shutdown.target`;
+   `ConditionPathExists=` following a symlink in the path; a drop-in's condition being added
+   to a `/usr/lib` unit's; the encrypted-root crypttab line in the initramfs; `/boot/vmlinuz`
+   pointing at the newest kernel.
+
+## 2026-10-01 - 6b helper slice: the read-only checks' results (owner); the three processes
+
+Results from apsis-test, same day, recorded in PLAN's claims table (6b.13 step 3). No design
+change: nothing contradicted it.
+
+**Verified:**
+1. `system-update-cleanup.service` has `Conflicts=shutdown.target` in `[Unit]` (`systemctl
+   cat`, systemd 255.4). A `Retry`'s reliance on it holds; `restart` stays `systemctl reboot
+   --no-block`.
+2. `ConditionPathExists=` follows a symlink in the path: `systemd-analyze condition
+   'ConditionPathExists=/lib/systemd/systemd'` succeeded (`/lib` -> `usr/lib`), and
+   `'ConditionPathExists=!/system-update/apsis-helper'` succeeded with no link present.
+4. The `cryptroot` hook (`/usr/share/initramfs-tools/hooks/cryptroot`) looks up crypttab
+   entries for the devices of `/` (`get_mnt_devno /`, line 180), the resume device
+   (`get_resume_devno`, line 188) and `/usr` (line 192). An encrypted root's line is carried,
+   so the crypttab comparison matters there.
+5. `/boot/vmlinuz` -> `vmlinuz-7.1.5-76070105-generic`, `/boot/vmlinuz.old` -> 7.0.11; the
+   same for `initrd.img` and `initrd.img.old`. The check and kernelstub agree.
+
+**Still open**: 3, a drop-in's condition being added to the `/usr/lib` unit's, proven by
+check 0.4c.
+
+**Item 7, the three processes: two panel applets plus the window.** Both applets (`apsis
+%F`) are children of the same cosmic-panel; Apsis is listed once in
+`com.system76.CosmicPanel.Panel`'s `plugins_wings`; the machine has two monitors.
+cosmic-panel runs one applet process per output, so N applet processes is normal and N
+follows the number of displays (the second started when a monitor came up). No reinstall
+involved (`dpkg.log` empty for that time). **0.4.2 assumes one applet per display plus the
+window; the applet-side dedupe alone is not enough, the shared reads are what fix it.**
+Written into 0.4.2's design and its tests (several readers at once; a write arriving right
+after a job end while they hold the mount).
+
+**Backlog** (owner; not 0.4.2 unless trivial): the applet entry
+`io.github.atraxsrc.Apsis.desktop` has `Exec=apsis %F`, and cosmic-panel passes `%F` to the
+applet literally. Checked in the code: `main.rs` `mode` and `StartView::from_args` match only
+`--window`, `--settings` and `--about` and ignore anything else, so the literal `%F` does
+nothing today. **Recommended: drop `%F`** from `resources/app.desktop` (the app takes no
+files, `MimeType=` is empty, the field code is the template's leftover), a one-line change
+that can ride with 0.4.2's packaging; no explicit handling in code.
