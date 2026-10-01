@@ -33,6 +33,10 @@ const DATE_WIDTH: f32 = 150.0;
 const SIGN_WIDTH: f32 = 12.0;
 /// Height of the disk and progress bars.
 const BAR_GIRTH: f32 = 8.0;
+/// What the restore dialog needs besides its scrolling body: its padding, title, the muted
+/// line, the gaps and the button row, plus a margin to the window's edges (PLAN 6b.8). The
+/// body scrolls within the window's height minus this, so the buttons always show.
+const DIALOG_CHROME: f32 = 216.0;
 
 impl AppModel {
     /// The panel button: the icon (in the warning or destructive colour when the reminder is
@@ -246,6 +250,11 @@ impl AppModel {
                 .leading_icon(icon::from_name("list-add-symbolic"))
                 .on_press_maybe(self.can_create().then_some(Message::CreateClicked))
                 .into(),
+            // Restore (PLAN 6b.8): no tooltip, no key.
+            widget::button::standard(fl!("restore"))
+                .leading_icon(icon::from_name("document-revert-symbolic"))
+                .on_press_maybe(self.can_restore().then_some(Message::RestoreClicked))
+                .into(),
             widget::button::standard(fl!("delete"))
                 .leading_icon(icon::from_name("edit-delete-symbolic"))
                 .on_press_maybe(self.can_delete().then_some(Message::DeleteClicked))
@@ -308,8 +317,21 @@ impl AppModel {
                 widget::container(comment).width(Length::Fill).into(),
             ])
             .align_y(Alignment::Center);
+            // An old-format snapshot (0.4.1): the row's tooltip says so; no glyph or column.
+            let old_format = matches!(row, RowItem::Snapshot(s)
+                if apsis_core::native::info::is_old_format(s.rsync_flags.as_deref().unwrap_or_default()));
+            let content: Element<'_, Message> = if old_format {
+                widget::tooltip(
+                    line,
+                    body(fl!("old-format-row")),
+                    widget::tooltip::Position::Bottom,
+                )
+                .into()
+            } else {
+                line.into()
+            };
             column = column.add(
-                widget::list::button(line)
+                widget::list::button(content)
                     .selected(self.selection.contains(row.name()))
                     .on_press(Message::RowClicked(index)),
             );
@@ -445,6 +467,7 @@ impl AppModel {
         } else {
             match kind {
                 JobKind::Create => self.create_progress(),
+                JobKind::Restore => self.restore_progress(),
                 _ => (self.delete_progress(), None),
             }
         };
@@ -459,7 +482,9 @@ impl AppModel {
                 .into(),
         };
         let mut row = vec![body(text).width(Length::Fill).into()];
-        if self.mode == super::Mode::Window && kind == JobKind::Create && !stopping {
+        // Stop for a create, and for a restore's preparation until it's ready.
+        let can_stop = matches!(kind, JobKind::Create | JobKind::Restore) && self.ready.is_none();
+        if self.mode == super::Mode::Window && can_stop && !stopping {
             row.push(
                 widget::button::destructive(fl!("stop"))
                     .on_press_maybe(self.stoppable().map(|_| Message::StopClicked))
@@ -556,6 +581,9 @@ impl AppModel {
     /// How the last job went: dimmed, or in the error colour with the helper's words in a
     /// tooltip.
     fn result_line(&self) -> Option<Element<'_, Message>> {
+        if self.status.is_none() {
+            return self.restore_result_line();
+        }
         match self.status.as_ref()? {
             Status::Info(text) => Some(dim(text.clone())),
             Status::Error(text, details) => {
@@ -667,7 +695,195 @@ impl AppModel {
                     widget::button::text(fl!("discard")).on_press(Message::DialogDiscard),
                 )
                 .into(),
+            Dialog::Restore {
+                snapshot,
+                check,
+                restore_home,
+                safety_snapshot,
+            } => self.restore_dialog(dialog, snapshot, check, *restore_home, *safety_snapshot),
+            // The reason in the error colour (as a bad pattern in Add Pattern), what to do in
+            // plain text, and for a dropped plan that a fresh Restore re-measures; Close.
+            Dialog::Refused { snapshot, .. } => {
+                let mut lines: Vec<Element<'_, Message>> = vec![self.muted_line(snapshot)];
+                for (index, line) in dialog.refusal_lines().into_iter().enumerate() {
+                    lines.push(if index == 0 {
+                        widget::text(line)
+                            .class(theme::Text::Custom(error_text))
+                            .into()
+                    } else {
+                        body(line).into()
+                    });
+                }
+                widget::dialog()
+                    .title(fl!("refused-title"))
+                    .control(widget::column::with_children(lines).spacing(12))
+                    .primary_action(
+                        widget::button::standard(fl!("close")).on_press(Message::DialogCancel),
+                    )
+                    .into()
+            }
+            // 0.4.0's Stop dialog, for the restore's preparation.
+            Dialog::StopRestore { .. } => widget::dialog()
+                .title(fl!("stop-restore-title"))
+                .body(fl!("stop-restore-body"))
+                .primary_action(
+                    widget::button::destructive(fl!("stop")).on_press(Message::DialogConfirm),
+                )
+                .secondary_action(
+                    widget::button::standard(fl!("keep-going")).on_press(Message::DialogCancel),
+                )
+                .into(),
+            // Two answers; nothing is armed until Restart now (PLAN 6b.5). Esc cancels.
+            Dialog::Ready { snapshot } => widget::dialog()
+                .title(fl!("ready-title"))
+                .body(format!(
+                    "{}\n\n{}",
+                    fl!("ready-lead"),
+                    fl!("ready-body", date = super::date_of(snapshot))
+                ))
+                .primary_action(
+                    widget::button::suggested(fl!("restart-now")).on_press(Message::RestartNow),
+                )
+                .secondary_action(
+                    widget::button::standard(fl!("cancel-restore"))
+                        .on_press(Message::CancelRestore),
+                )
+                .into(),
         })
+    }
+
+    /// The one restore dialog (PLAN 6b.8): the title, a muted line, and a body that scrolls
+    /// within the window so the buttons always show. The radios are the Location tab's
+    /// pattern, the checkbox the Include tab's.
+    fn restore_dialog(
+        &self,
+        dialog: &Dialog,
+        snapshot: &str,
+        check: &apsis_core::restore::dialog::Dialog,
+        restore_home: bool,
+        safety_snapshot: bool,
+    ) -> Element<'_, Message> {
+        let date = super::date_of(snapshot);
+        let mut body_lines: Vec<Element<'_, Message>> = vec![body(fl!("restore-body")).into()];
+        if check.has_home {
+            let restore_too = settings::item::builder(fl!("restore-restore-home"));
+            let restore_too = if dialog.lost_for_good() {
+                restore_too.description(fl!("restore-lost-for-good", date = date.as_str()))
+            } else {
+                restore_too
+            };
+            let selected = Some(usize::from(restore_home));
+            body_lines.push(
+                settings::section()
+                    .title(fl!("restore-home-section"))
+                    .add(settings::item::builder(fl!("restore-keep-home")).radio(
+                        0,
+                        selected,
+                        Message::RestoreHome,
+                    ))
+                    .add(restore_too.radio(1, selected, Message::RestoreHome))
+                    .into(),
+            );
+        }
+        body_lines.push(
+            settings::section()
+                .add(
+                    settings::item::builder(fl!("restore-safety"))
+                        .checkbox(safety_snapshot, Message::RestoreSafety),
+                )
+                .into(),
+        );
+        for line in dialog.extra_lines() {
+            body_lines.push(body(line).into());
+        }
+        body_lines.push(dim(fl!("restore-experimental")));
+        let body_height = (self.window_height - DIALOG_CHROME).max(80.0);
+        widget::dialog()
+            .title(fl!("restore-title"))
+            .control(
+                widget::column::with_children(vec![
+                    self.muted_line(snapshot),
+                    widget::container(widget::scrollable(
+                        widget::column::with_children(body_lines)
+                            .spacing(12)
+                            // Room for the scrollbar.
+                            .padding([0, 16, 0, 0]),
+                    ))
+                    .max_height(body_height)
+                    .into(),
+                ])
+                .spacing(12),
+            )
+            .primary_action(
+                widget::button::destructive(fl!("restore")).on_press(Message::DialogConfirm),
+            )
+            .secondary_action(
+                widget::button::standard(fl!("cancel")).on_press(Message::DialogCancel),
+            )
+            .into()
+    }
+
+    /// `2026-09-25 11:28 · before driver update`: the date as the list shows it, then the
+    /// comment if there is one; muted, one line.
+    fn muted_line(&self, snapshot: &str) -> Element<'_, Message> {
+        let date = super::date_of(snapshot);
+        let text = match self
+            .snapshots()
+            .iter()
+            .find(|s| s.name == snapshot)
+            .and_then(|s| s.comment.as_deref())
+        {
+            Some(comment) => fl!("restore-muted", date = date.as_str(), comment = comment),
+            None => date,
+        };
+        widget::text(text)
+            .class(theme::Text::Custom(dim_text))
+            .wrapping(iced_text::Wrapping::None)
+            .into()
+    }
+
+    /// The last restore's result (PLAN 6b.8, "After login"): plain for done, the role on the
+    /// phrase only for boot-kept and failed, the full text in a tooltip, and Restore again
+    /// after a failure.
+    fn restore_result_line(&self) -> Option<Element<'_, Message>> {
+        use apsis_core::restore::state::{Outcome, ResultState};
+        let (text, tooltip) = self.result_text()?;
+        let ResultState::Ended(outcome) = self.restore_result.as_ref()?.state else {
+            return None;
+        };
+        let line: Element<'_, Message> = match outcome {
+            Outcome::BootKept | Outcome::BootBroken => phrase_line(
+                fl!("result-boot-kept-before"),
+                fl!("result-boot-kept-phrase"),
+                warning_text,
+                fl!("result-boot-kept-after"),
+            ),
+            Outcome::Failed => {
+                let phrase = fl!("result-failed-phrase");
+                let after = text
+                    .split_once(phrase.as_str())
+                    .map(|(_, after)| after.trim().to_owned())
+                    .unwrap_or_default();
+                phrase_line(fl!("result-failed-before"), phrase, error_text, after)
+            }
+            _ => body(text).width(Length::Fill).into(),
+        };
+        let line: Element<'_, Message> =
+            widget::tooltip(line, body(tooltip), widget::tooltip::Position::Top).into();
+        if !self.restore_again_available() {
+            return Some(line);
+        }
+        Some(
+            widget::row::with_children(vec![
+                line,
+                widget::button::standard(fl!("restore-again"))
+                    .on_press(Message::RestoreAgain)
+                    .into(),
+            ])
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+        )
     }
 
     /// Settings: a back button, Cancel and Save, the tabs, and the active tab.
@@ -962,6 +1178,26 @@ fn notes(lines: &[String]) -> Element<'_, Message> {
 }
 
 /// Secondary text: the theme's text colour, faded.
+/// `before`, then `phrase` in `role`'s colour, then `after` in the normal text colour, the
+/// last part wrapping instead of being cut off (PLAN 6b.8's result lines).
+fn phrase_line<'a>(
+    before: String,
+    phrase: String,
+    role: fn(&Theme) -> iced_text::Style,
+    after: String,
+) -> Element<'a, Message> {
+    widget::row::with_children(vec![
+        body(before).into(),
+        widget::text(phrase).class(theme::Text::Custom(role)).into(),
+        body(after)
+            .width(Length::Fill)
+            .wrapping(iced_text::Wrapping::WordOrGlyph)
+            .into(),
+    ])
+    .spacing(4)
+    .into()
+}
+
 fn dim<'a>(text: String) -> Element<'a, Message> {
     widget::text(text)
         .class(theme::Text::Custom(dim_text))

@@ -2058,6 +2058,10 @@ Checks:
    tooltip), the dialog, refusals, preparing status, ready prompt, results in the status line,
    the row tooltip from the list's format field, the strings listed under "for the UI slice"
    in step 3. The preview branch stays unmerged.
+   **Status (2026-10-02): step A done** (the model, the flow, the four dialogs, the toolbar,
+   the row tooltip, the status and result lines, the strings; `app::tests::restore`, 13
+   tests). **Left**: the layout test at both window sizes (6b.12), UI.md. DECISIONS
+   2026-10-02 "UI slice, step A".
 5. Docs: README (experimental; "If a restore goes wrong"; how it differs from Timeshift, never
    "restores like Timeshift"; **known limitation: a file changed in place with the same size
    and modification time as in the snapshot isn't restored**, since rsync compares size and

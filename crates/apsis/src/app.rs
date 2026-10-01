@@ -19,6 +19,11 @@ use std::time::{Duration, Instant};
 use apsis_core::config::{Config as ApsisConfig, ConfigInfo};
 use apsis_core::helper::{HelperClient, JobEvent};
 use apsis_core::job::{Job, JobKind, JobState};
+use apsis_core::restore::apsis::InSnapshot;
+use apsis_core::restore::dialog::Dialog as Check;
+use apsis_core::restore::plan;
+use apsis_core::restore::refusal::{Refusal, Unreadable};
+use apsis_core::restore::state::{Outcome, RestoreResult, ResultState};
 use apsis_core::status::{BY_UUID, disk_connected};
 use apsis_core::{
     ApsisStatus, MAX_COMMENT_CHARS, Progress, Snapshot, SnapshotList, validate_comment,
@@ -244,6 +249,18 @@ pub struct AppModel {
     /// The helper announced the end of this window's running operation before its `Finished`
     /// came (the other order): nothing is left to wait for then.
     own_job_ended: bool,
+    /// `CheckRestore` is running for this snapshot (the dialog opens when it answers).
+    checking: Option<String>,
+    /// This window's restore plan waits at the ready prompt (PLAN 6b.5): the helper refuses
+    /// writes until "Restart now" or "Cancel restore".
+    ready: Option<String>,
+    /// `CancelRestore` / `RestartToRestore` is on its way to the helper.
+    cancelling: bool,
+    restarting: bool,
+    /// The last restore's outcome (`RestoreResult`), shown on the status line after login.
+    restore_result: Option<RestoreResult>,
+    /// The window's height, for the restore dialog's scrolling body (PLAN 6b.8).
+    window_height: f32,
 }
 
 /// The end announcement this window still expects for its own job, after its `Finished`.
@@ -346,12 +363,19 @@ pub enum CliError {
         left: Vec<String>,
         reason: Box<CliError>,
     },
+    /// The helper refused a full-system restore (PLAN 6b.7). Nothing ran, or (from "Restart
+    /// now") the plan was dropped.
+    RestoreRefused(Refusal),
     Other(String),
 }
 
 impl From<apsis_core::Error> for CliError {
     fn from(error: apsis_core::Error) -> Self {
         match error {
+            apsis_core::Error::RestoreRefused(word) => match Refusal::from_wire(&word) {
+                Some(refusal) => Self::RestoreRefused(refusal),
+                None => Self::Other(word),
+            },
             apsis_core::Error::NotAuthorized => Self::NotAuthorized,
             apsis_core::Error::DeviceNotFound { device } => Self::DeviceNotFound { device },
             apsis_core::Error::Busy => Self::Busy,
@@ -387,6 +411,12 @@ pub enum Operation {
     /// Several, as one job in the helper (`DeleteMany`), in list order; it stops at the first
     /// failure and says what was deleted.
     DeleteMany(Vec<String>),
+    /// A full-system restore's preparation (PLAN 6b.4): ends "ready" at the prompt.
+    Restore {
+        snapshot: String,
+        restore_home: bool,
+        safety_snapshot: bool,
+    },
 }
 
 impl Operation {
@@ -396,6 +426,7 @@ impl Operation {
             Self::Create(_) => JobKind::Create,
             Self::Delete(_) => JobKind::Delete,
             Self::DeleteMany(_) => JobKind::DeleteMany,
+            Self::Restore { .. } => JobKind::Restore,
         }
     }
 }
@@ -432,6 +463,165 @@ pub enum Dialog {
     AddPattern { text: String, error: Option<String> },
     /// Leaving the settings with unsaved changes.
     Unsaved,
+    /// Restore `snapshot` (PLAN 6b.8): what `CheckRestore` said, and the two choices.
+    Restore {
+        snapshot: String,
+        check: Check,
+        restore_home: bool,
+        safety_snapshot: bool,
+    },
+    /// "Can't restore this snapshot": the reason; `dropped` when a ready plan was dropped by
+    /// a refused "Restart now" (owner, 2026-10-02).
+    Refused {
+        snapshot: String,
+        refusal: Refusal,
+        dropped: bool,
+    },
+    /// Stop the restore's preparation (the safety snapshot being made goes).
+    StopRestore { snapshot: String },
+    /// "Ready to restore": Restart now, or Cancel restore (also Esc).
+    Ready { snapshot: String },
+}
+
+impl Dialog {
+    /// The "lost for good" line shows only with "Restore them too" and no safety snapshot.
+    fn lost_for_good(&self) -> bool {
+        matches!(
+            self,
+            Self::Restore {
+                restore_home: true,
+                safety_snapshot: false,
+                ..
+            }
+        )
+    }
+
+    /// The restore dialog's extra lines, in order: no home in the snapshot, the old format,
+    /// which Apsis the snapshot holds (PLAN 6b.8).
+    fn extra_lines(&self) -> Vec<String> {
+        let Self::Restore { check, .. } = self else {
+            return Vec::new();
+        };
+        let mut lines = Vec::new();
+        if !check.has_home {
+            lines.push(fl!("restore-no-home"));
+        }
+        if check.old_format {
+            lines.push(fl!("restore-old-format"));
+        }
+        match &check.apsis {
+            InSnapshot::Current => {}
+            InSnapshot::NotInstalled => lines.push(fl!("restore-no-apsis")),
+            InSnapshot::NoRestore { version } => {
+                lines.push(fl!("restore-apsis-no-restore", version = version.as_str()));
+            }
+            InSnapshot::OldSettings { version } => {
+                lines.push(fl!(
+                    "restore-apsis-old-settings",
+                    version = version.as_str()
+                ));
+            }
+        }
+        lines
+    }
+
+    /// The "Can't restore" dialog's lines: the reason, what to do, and (a dropped plan) that
+    /// a fresh Restore re-measures.
+    fn refusal_lines(&self) -> Vec<String> {
+        let Self::Refused {
+            refusal, dropped, ..
+        } = self
+        else {
+            return Vec::new();
+        };
+        let (why, what) = refusal_lines(refusal);
+        let mut lines = vec![why, what];
+        if *dropped {
+            lines.push(fl!("refused-dropped"));
+        }
+        lines
+    }
+}
+
+/// Each refusal's two lines (PLAN 6b.8's string table).
+fn refusal_lines(refusal: &Refusal) -> (String, String) {
+    let size = apsis_core::status::size;
+    match refusal {
+        Refusal::NotUefi => (fl!("refused-not-uefi"), fl!("refused-this-computer")),
+        Refusal::NotKernelstub => (
+            fl!("refused-not-kernelstub"),
+            fl!("refused-this-computer-yet"),
+        ),
+        Refusal::BootPartition => (fl!("refused-boot-partition"), fl!("refused-this-computer")),
+        Refusal::RootFilesystem { fstype } => (
+            fl!("refused-root-filesystem", fstype = fstype.as_str()),
+            fl!("refused-this-computer-yet"),
+        ),
+        Refusal::RootDevice => (fl!("refused-root-device"), fl!("refused-this-computer-yet")),
+        Refusal::SplitSystem => (
+            fl!("refused-split-system"),
+            fl!("refused-this-computer-yet"),
+        ),
+        Refusal::OtherInstallation => (
+            fl!("refused-other-installation"),
+            fl!("refused-other-installation-do"),
+        ),
+        Refusal::Unreadable(why) => {
+            let reason = match why {
+                Unreadable::NoInfo => fl!("refused-unreadable-no-info"),
+                Unreadable::NotRsync => fl!("refused-unreadable-not-rsync"),
+                Unreadable::NoLocalhost => fl!("refused-unreadable-no-localhost"),
+                Unreadable::NoExcludeList => fl!("refused-unreadable-no-exclude-list"),
+            };
+            (
+                fl!("refused-unreadable", reason = reason),
+                fl!("refused-pick-another"),
+            )
+        }
+        Refusal::KernelIncomplete => (
+            fl!("refused-kernel-incomplete"),
+            fl!("refused-pick-another"),
+        ),
+        Refusal::PendingUpdate => (
+            fl!("refused-pending-update"),
+            fl!("refused-pending-update-do"),
+        ),
+        Refusal::PopUpgradePending => (fl!("refused-pop-upgrade"), fl!("refused-pop-upgrade-do")),
+        Refusal::CrypttabDiffers => (fl!("refused-crypttab"), fl!("refused-crypttab-do")),
+        Refusal::BackupSpace { needs, free } => (
+            fl!(
+                "refused-backup-space",
+                needs = size(*needs),
+                free = size(*free)
+            ),
+            fl!("refused-backup-space-do"),
+        ),
+        Refusal::SystemSpace { needs, free } => (
+            fl!(
+                "refused-system-space",
+                needs = size(*needs),
+                free = size(*free)
+            ),
+            fl!("refused-system-space-do"),
+        ),
+        Refusal::BootSpace { needs, free } => (
+            fl!(
+                "refused-boot-space",
+                needs = size(*needs),
+                free = size(*free)
+            ),
+            fl!("refused-boot-space-do"),
+        ),
+        Refusal::SizeUnknown => (fl!("refused-size-unknown"), fl!("refused-size-unknown-do")),
+        Refusal::BootFiles(_) => (fl!("refused-boot-files"), fl!("refused-boot-files-do")),
+    }
+}
+
+/// `2026-09-25 11:28` for a snapshot name, or the name itself.
+fn date_of(name: &str) -> String {
+    apsis_core::parse_snapshot_name(name)
+        .map(fmt::when)
+        .unwrap_or_else(|| name.to_owned())
 }
 
 /// Keyboard shortcuts (the man page and README list them; the UI doesn't).
@@ -540,6 +730,24 @@ pub enum Message {
     Connected(Link),
     /// The connection to the system bus ended: the job subscription's stream closed.
     BusLost,
+    /// Toolbar: Restore (PLAN 6b.8). Asks the helper's `CheckRestore` first.
+    RestoreClicked,
+    /// `CheckRestore` answered for this snapshot.
+    Checked(String, Result<Check, CliError>),
+    /// The restore dialog's home radios (0 keep, 1 restore) and safety checkbox.
+    RestoreHome(usize),
+    RestoreSafety(bool),
+    /// The ready prompt's two answers.
+    RestartNow,
+    CancelRestore,
+    RestartAnswered(Result<(), CliError>),
+    CancelAnswered(Result<(), CliError>),
+    /// After a failed restore: the normal dialog for the same snapshot.
+    RestoreAgain,
+    /// `RestoreResult` answered (asked when the window opens).
+    RestoreResultRead(Result<RestoreResult, CliError>),
+    /// The window's height changed.
+    WindowResized(f32),
 }
 
 impl cosmic::Application for AppModel {
@@ -662,6 +870,7 @@ impl cosmic::Application for AppModel {
         }
         if self.mode == Mode::Window {
             subscriptions.push(event::listen_with(shortcut));
+            subscriptions.push(event::listen_with(window_resized));
         } else if self.popup.is_some() || self.menu.is_some() {
             subscriptions.push(event::listen_with(escape_only));
         }
@@ -774,6 +983,12 @@ impl AppModel {
             bus_generation: 0,
             own_end: None,
             own_job_ended: false,
+            checking: None,
+            ready: None,
+            cancelling: false,
+            restarting: false,
+            restore_result: None,
+            window_height: WINDOW_SIZE.height,
         }
     }
 
@@ -851,6 +1066,38 @@ impl AppModel {
             Message::RowClicked(index) => self.click_row(index),
             Message::CreateClicked => return self.open_create(),
             Message::DeleteClicked => self.open_delete(),
+            Message::RestoreClicked => return self.open_restore(),
+            Message::Checked(snapshot, result) => self.on_checked(&snapshot, result),
+            Message::RestoreHome(index) => {
+                if let Some(Dialog::Restore {
+                    check,
+                    restore_home,
+                    ..
+                }) = &mut self.dialog
+                {
+                    *restore_home = check.has_home && index == 1;
+                }
+            }
+            Message::RestoreSafety(on) => {
+                if let Some(Dialog::Restore {
+                    safety_snapshot, ..
+                }) = &mut self.dialog
+                {
+                    *safety_snapshot = on;
+                }
+            }
+            Message::RestartNow => return self.restart_now(),
+            Message::CancelRestore => return self.cancel_restore(),
+            Message::RestartAnswered(result) => self.on_restart_answered(result),
+            Message::CancelAnswered(result) => return self.on_cancel_answered(result),
+            Message::RestoreAgain => return self.restore_again(),
+            Message::RestoreResultRead(result) => {
+                if let Ok(result) = result {
+                    self.restore_result =
+                        matches!(result.state, ResultState::Ended(_)).then_some(result);
+                }
+            }
+            Message::WindowResized(height) => self.window_height = height,
             Message::SettingsClicked => return self.open_settings(),
             Message::AboutClicked => self.page = Page::About,
             Message::Back => return self.leave_page(),
@@ -867,7 +1114,15 @@ impl AppModel {
             }
             Message::StopClicked => {
                 if let Some(snapshot) = self.stoppable() {
-                    self.dialog = Some(Dialog::Stop { snapshot });
+                    let restore = self
+                        .job
+                        .as_ref()
+                        .is_some_and(|j| j.kind == JobKind::Restore);
+                    self.dialog = Some(if restore {
+                        Dialog::StopRestore { snapshot }
+                    } else {
+                        Dialog::Stop { snapshot }
+                    });
                 }
             }
             Message::DialogText(text) => match &mut self.dialog {
@@ -882,6 +1137,10 @@ impl AppModel {
                 _ => {}
             },
             Message::DialogConfirm => return self.confirm_dialog(),
+            // Closing the ready prompt is Cancel restore (PLAN 6b.5).
+            Message::DialogCancel if matches!(self.dialog, Some(Dialog::Ready { .. })) => {
+                return self.cancel_restore();
+            }
             Message::DialogCancel => self.dialog = None,
             Message::DialogDiscard => {
                 self.dialog = None;
@@ -991,7 +1250,11 @@ impl AppModel {
         };
         self.helper = Some(client.clone());
         match self.mode {
-            Mode::Window => Task::batch([self.start_list(), poll_job(Some(client))]),
+            Mode::Window => Task::batch([
+                self.start_list(),
+                poll_job(Some(client.clone())),
+                read_restore_result(Some(client)),
+            ]),
             Mode::Applet if self.popup.is_some() => {
                 Task::batch([self.start_list(), poll_job(Some(client))])
             }
@@ -1212,6 +1475,238 @@ impl AppModel {
             && self.running.is_none()
             && self.active_job().is_none()
             && !self.saving_settings
+            && self.checking.is_none()
+            && self.ready.is_none()
+            && !self.cancelling
+            && !self.restarting
+    }
+
+    /// Whether Restore can start (PLAN 6b.8): as for create, with exactly one snapshot (not a
+    /// leftover) selected.
+    fn can_restore(&self) -> bool {
+        let selected = self.selected_names();
+        self.can_create()
+            && selected.len() == 1
+            && self.snapshots().iter().any(|s| s.name == selected[0])
+    }
+
+    /// Restore: asks the helper what it would say about the snapshot, then opens the dialog.
+    fn open_restore(&mut self) -> Task<cosmic::Action<Message>> {
+        if !self.can_restore() {
+            return Task::none();
+        }
+        let snapshot = self.selected_names().remove(0);
+        self.checking = Some(snapshot.clone());
+        self.status = None;
+        let link = self.helper.clone();
+        cosmic::task::future(async move {
+            let result = check_restore(link, &snapshot).await;
+            Message::Checked(snapshot, result)
+        })
+    }
+
+    /// `CheckRestore` answered: the restore dialog with its defaults (home kept, the safety
+    /// snapshot on), the "Can't restore" dialog, or why the helper couldn't be asked.
+    fn on_checked(&mut self, snapshot: &str, result: Result<Check, CliError>) {
+        if self.checking.as_deref() != Some(snapshot) {
+            return;
+        }
+        self.checking = None;
+        match result {
+            Ok(check) => {
+                self.dialog = Some(match check.refusal.clone() {
+                    Some(refusal) => Dialog::Refused {
+                        snapshot: snapshot.to_owned(),
+                        refusal,
+                        dropped: false,
+                    },
+                    None => Dialog::Restore {
+                        snapshot: snapshot.to_owned(),
+                        check,
+                        restore_home: false,
+                        safety_snapshot: true,
+                    },
+                });
+            }
+            Err(error) => {
+                let reason = self.error_text(&error);
+                self.status = Some(Status::Error(fl!("restore-failed", reason = reason), None));
+            }
+        }
+    }
+
+    /// "Restart now": the helper re-checks, arms and restarts (PLAN 6b.5).
+    fn restart_now(&mut self) -> Task<cosmic::Action<Message>> {
+        let Some(Dialog::Ready { snapshot }) = self.dialog.take() else {
+            return Task::none();
+        };
+        self.restarting = true;
+        let link = self.helper.clone();
+        cosmic::task::future(async move {
+            Message::RestartAnswered(restart_to_restore(link, &snapshot).await)
+        })
+    }
+
+    fn on_restart_answered(&mut self, result: Result<(), CliError>) {
+        self.restarting = false;
+        let snapshot = self.ready.take().unwrap_or_default();
+        self.status = Some(match result {
+            Ok(()) => Status::Info(fl!("restarting")),
+            Err(CliError::RestoreRefused(refusal)) => {
+                // The plan was dropped with the refusal (owner, 2026-10-02).
+                self.dialog = Some(Dialog::Refused {
+                    snapshot,
+                    refusal,
+                    dropped: true,
+                });
+                return;
+            }
+            Err(error) => {
+                let fallback = self.error_text(&error);
+                Status::Error(plan_error_text(&error, &fallback), None)
+            }
+        });
+    }
+
+    /// "Cancel restore", Esc or closing the prompt: the plan goes (a finished safety snapshot
+    /// stays).
+    fn cancel_restore(&mut self) -> Task<cosmic::Action<Message>> {
+        if self.ready.is_none() || self.cancelling {
+            self.dialog = None;
+            return Task::none();
+        }
+        self.dialog = None;
+        self.cancelling = true;
+        let link = self.helper.clone();
+        cosmic::task::future(async move { Message::CancelAnswered(cancel_restore(link).await) })
+    }
+
+    fn on_cancel_answered(
+        &mut self,
+        result: Result<(), CliError>,
+    ) -> Task<cosmic::Action<Message>> {
+        self.cancelling = false;
+        self.ready = None;
+        self.status = Some(match result {
+            Ok(()) => Status::Info(fl!("restore-cancelled")),
+            Err(error) => {
+                let fallback = self.error_text(&error);
+                Status::Error(plan_error_text(&error, &fallback), None)
+            }
+        });
+        // The safety snapshot stays and is in the list.
+        self.start_list()
+    }
+
+    /// After a failed restore: the normal dialog for the same snapshot (PLAN 6b.10).
+    fn restore_again(&mut self) -> Task<cosmic::Action<Message>> {
+        let Some(name) = self
+            .restore_result
+            .as_ref()
+            .and_then(|r| r.snapshot.clone())
+        else {
+            return Task::none();
+        };
+        if !self.snapshots().iter().any(|s| s.name == name) {
+            return Task::none();
+        }
+        self.selection.clear();
+        self.selection.insert(name);
+        self.open_restore()
+    }
+
+    /// Whether the status line offers "Restore again" (a failed restore whose snapshot is
+    /// still listed).
+    fn restore_again_available(&self) -> bool {
+        self.restore_result
+            .as_ref()
+            .filter(|r| r.state == ResultState::Ended(Outcome::Failed))
+            .and_then(|r| r.snapshot.as_deref())
+            .is_some_and(|name| self.snapshots().iter().any(|s| s.name == name))
+    }
+
+    /// The last restore's line for the status area (PLAN 6b.8, "After login") and its tooltip.
+    fn result_text(&self) -> Option<(String, String)> {
+        let result = self.restore_result.as_ref()?;
+        let ResultState::Ended(outcome) = result.state else {
+            return None;
+        };
+        let date = result.snapshot.as_deref().map(date_of).unwrap_or_default();
+        let what = if result.message.contains("backup disk") {
+            fl!("result-what-disk")
+        } else if result.message.contains("space") {
+            fl!("result-what-space")
+        } else {
+            fl!("result-what-readme")
+        };
+        let name = result.snapshot.clone().unwrap_or_default();
+        Some(match outcome {
+            Outcome::Done | Outcome::Problems => (
+                fl!("result-done", date = date.as_str()),
+                fl!(
+                    "result-done-tip",
+                    name = name,
+                    home = fl!("result-home-kept"),
+                    safety = fl!("result-safety-none")
+                ),
+            ),
+            Outcome::BootKept | Outcome::BootBroken => (
+                format!(
+                    "{} {} {}",
+                    fl!("result-boot-kept-before"),
+                    fl!("result-boot-kept-phrase"),
+                    fl!("result-boot-kept-after")
+                ),
+                fl!("result-boot-kept-tip", date = date.as_str()),
+            ),
+            Outcome::Failed => (
+                format!(
+                    "{} {} {}",
+                    fl!("result-failed-before"),
+                    fl!("result-failed-phrase"),
+                    fl!("result-failed-after", what = what)
+                ),
+                fl!("result-failed-tip", reason = result.message.as_str()),
+            ),
+            Outcome::NotStarted => (
+                fl!("result-not-started", what = what),
+                result.message.clone(),
+            ),
+        })
+    }
+
+    /// `Preparing restore · …` and how far (PLAN 6b.8): this window's preparation, its ready
+    /// plan, or another window's restore job.
+    fn restore_progress(&self) -> (String, Option<f32>) {
+        if self.ready.is_some() {
+            return (fl!("preparing-ready"), Some(1.0));
+        }
+        if self.running.is_none() {
+            // Another window's: at 100% it waits at its prompt.
+            let at_prompt = self
+                .job
+                .as_ref()
+                .is_some_and(|j| j.percent.is_some_and(|p| p >= 100.0));
+            if at_prompt {
+                return (fl!("restore-ready-elsewhere"), Some(1.0));
+            }
+        }
+        match &self.progress {
+            Some(progress) if progress.has_estimate() => {
+                let percent = progress.percent.unwrap_or(0.0);
+                let text = match progress.eta_seconds {
+                    Some(eta) => fl!(
+                        "preparing-safety",
+                        percent = fmt::percent(percent),
+                        time = fmt::duration(eta)
+                    ),
+                    None => fl!("preparing-safety-percent", percent = fmt::percent(percent)),
+                };
+                #[allow(clippy::cast_possible_truncation, reason = "0 to 1")]
+                (text, Some((percent / 100.0) as f32))
+            }
+            _ => (fl!("preparing-checking"), None),
+        }
     }
 
     /// Whether Delete can start: as for create, plus something is selected.
@@ -1336,6 +1831,9 @@ impl AppModel {
 
     fn on_shortcut(&mut self, shortcut: Shortcut) -> Task<cosmic::Action<Message>> {
         match shortcut {
+            Shortcut::Escape if matches!(self.dialog, Some(Dialog::Ready { .. })) => {
+                self.cancel_restore()
+            }
             Shortcut::Escape => {
                 if self.dialog.take().is_some() {
                     return Task::none();
@@ -1395,16 +1893,20 @@ impl AppModel {
         self.job
             .as_ref()
             .filter(|j| {
-                j.kind == JobKind::Create && j.state == JobState::Running && !j.snapshot.is_empty()
+                matches!(j.kind, JobKind::Create | JobKind::Restore)
+                    && j.state == JobState::Running
+                    && !j.snapshot.is_empty()
+                    && self.ready.is_none()
             })
             .map(|j| j.snapshot.clone())
     }
 
-    /// The job to show in the status area: this window's, or another's create or delete.
+    /// The job to show in the status area: this window's, or another's create, delete or
+    /// restore (a ready plan elsewhere holds the toolbar too, PLAN 6b.9).
     fn active_job(&self) -> Option<&Job> {
         self.job
             .as_ref()
-            .filter(|j| j.kind.changes_the_list() && !j.state.is_end())
+            .filter(|j| j.kind != JobKind::Configure && !j.state.is_end())
     }
 
     /// OK in the dialog.
@@ -1453,6 +1955,28 @@ impl AppModel {
                 }
                 save
             }
+            Some(Dialog::Restore {
+                snapshot,
+                restore_home,
+                safety_snapshot,
+                ..
+            }) => self.run(Operation::Restore {
+                snapshot,
+                restore_home,
+                safety_snapshot,
+            }),
+            Some(Dialog::Refused { .. }) => Task::none(),
+            Some(Dialog::StopRestore { snapshot }) => {
+                self.status = Some(Status::Info(fl!("stopping")));
+                let link = self.helper.clone();
+                cosmic::task::future(async move {
+                    Message::StopAnswered(stop(link, &snapshot).await.err())
+                })
+            }
+            Some(dialog @ Dialog::Ready { .. }) => {
+                self.dialog = Some(dialog);
+                self.restart_now()
+            }
             None => Task::none(),
         }
     }
@@ -1491,6 +2015,9 @@ impl AppModel {
             self.status = Some(Status::Info(fl!("busy-background")));
             return Task::none();
         }
+        if let Operation::Restore { snapshot, .. } = operation {
+            return self.on_restore_finished(snapshot, result);
+        }
         let ran = match &result {
             // A failed create or delete may have left something (a staging folder, a partly
             // deleted snapshot); a stopped one leaves nothing, but the disk has changed.
@@ -1505,7 +2032,8 @@ impl AppModel {
                 | CliError::NotAuthorized
                 | CliError::DeviceNotFound { .. }
                 | CliError::DiskRemoved { .. }
-                | CliError::Busy,
+                | CliError::Busy
+                | CliError::RestoreRefused(_),
             ) => false,
         };
         self.status = Some(match (operation, result) {
@@ -1529,6 +2057,7 @@ impl AppModel {
                     Operation::Delete(_) | Operation::DeleteMany(_) => {
                         fl!("delete-failed-disk-removed")
                     }
+                    Operation::Restore { .. } => unreachable!("handled above"),
                 };
                 Status::Error(line, Some(reason))
             }
@@ -1572,11 +2101,57 @@ impl AppModel {
             (Operation::Delete(_) | Operation::DeleteMany(_), Err(error)) => {
                 Status::Error(fl!("delete-failed", reason = self.error_text(&error)), None)
             }
+            (Operation::Restore { .. }, _) => unreachable!("handled above"),
         });
         if ran {
             return self.start_list();
         }
         Task::none()
+    }
+
+    /// This window's restore preparation ended: ready at the prompt, refused, stopped or
+    /// failed (PLAN 6b.5, 6b.8). The list is refreshed for the safety snapshot, which a
+    /// ready plan doesn't block (reads go through).
+    fn on_restore_finished(
+        &mut self,
+        snapshot: &str,
+        result: Result<(), CliError>,
+    ) -> Task<cosmic::Action<Message>> {
+        match result {
+            Ok(()) => {
+                self.ready = Some(snapshot.to_owned());
+                self.dialog = Some(Dialog::Ready {
+                    snapshot: snapshot.to_owned(),
+                });
+                self.status = Some(Status::Info(fl!("preparing-ready")));
+            }
+            Err(CliError::RestoreRefused(refusal)) => {
+                self.dialog = Some(Dialog::Refused {
+                    snapshot: snapshot.to_owned(),
+                    refusal,
+                    dropped: false,
+                });
+                return Task::none();
+            }
+            Err(CliError::Stopped) => {
+                self.status = Some(Status::Info(fl!("restore-stopped")));
+            }
+            Err(CliError::Busy) => {
+                self.helper_busy = true;
+                self.status = Some(Status::Info(fl!("busy-background")));
+                return Task::none();
+            }
+            Err(error @ (CliError::NoHelper | CliError::NotAuthorized)) => {
+                let reason = self.error_text(&error);
+                self.status = Some(Status::Error(fl!("restore-failed", reason = reason), None));
+                return Task::none();
+            }
+            Err(error) => {
+                let reason = self.error_text(&error);
+                self.status = Some(Status::Error(fl!("restore-failed", reason = reason), None));
+            }
+        }
+        self.start_list()
     }
 
     /// What this window's finished `operation` still has coming from the helper: the end
@@ -1644,8 +2219,12 @@ impl AppModel {
             self.own_end = None;
         }
         if !job.state.is_end() {
-            // Progress of another window's create; this window's comes with its own call too.
-            if self.running.is_none() && job.kind == JobKind::Create && job.percent.is_some() {
+            // Progress of another window's create or restore; this window's comes with its
+            // own call too.
+            if self.running.is_none()
+                && matches!(job.kind, JobKind::Create | JobKind::Restore)
+                && job.percent.is_some()
+            {
                 self.progress = Some(Progress {
                     percent: job.percent,
                     eta_seconds: job.eta_seconds,
@@ -1667,6 +2246,14 @@ impl AppModel {
             return Task::none();
         }
         self.progress = None;
+        // Another window's restore ended (cancelled, restarted, or failed): its safety
+        // snapshot may be in the list; that window says how it went.
+        if job.kind == JobKind::Restore {
+            if self.ready.is_none() {
+                return self.start_list();
+            }
+            return Task::none();
+        }
         if changed {
             self.status = Some(match (job.kind, job.state) {
                 (JobKind::Create, JobState::Done) => Status::Info(fl!("created")),
@@ -1957,8 +2544,65 @@ async fn operate(
         Operation::Create(comment) => helper.create_with_progress(comment, progress).await,
         Operation::Delete(name) => helper.delete(name).await,
         Operation::DeleteMany(names) => helper.delete_many(names, progress).await,
+        Operation::Restore {
+            snapshot,
+            restore_home,
+            safety_snapshot,
+        } => {
+            helper
+                .restore(snapshot, *restore_home, *safety_snapshot, progress)
+                .await
+        }
     };
     done.map_err(CliError::from)
+}
+
+/// `CheckRestore` through `apsis-helper` (no password).
+async fn check_restore(link: Link, snapshot: &str) -> Result<Check, CliError> {
+    helper(link)
+        .await?
+        .check_restore(snapshot)
+        .await
+        .map_err(CliError::from)
+}
+
+/// "Restart now" through `apsis-helper`.
+async fn restart_to_restore(link: Link, snapshot: &str) -> Result<(), CliError> {
+    helper(link)
+        .await?
+        .restart_to_restore(snapshot)
+        .await
+        .map_err(CliError::from)
+}
+
+/// "Cancel restore" through `apsis-helper`.
+async fn cancel_restore(link: Link) -> Result<(), CliError> {
+    helper(link)
+        .await?
+        .cancel_restore()
+        .await
+        .map_err(CliError::from)
+}
+
+/// The last restore's result, when the window opens.
+fn read_restore_result(link: Link) -> Task<cosmic::Action<Message>> {
+    cosmic::task::future(async move {
+        let result = match helper(link).await {
+            Ok(helper) => helper.restore_result().await.map_err(CliError::from),
+            Err(error) => Err(error),
+        };
+        Message::RestoreResultRead(result)
+    })
+}
+
+/// The lines for a plan the helper no longer has, or has had too long (PLAN 6b.5, 6b.9);
+/// anything else is `fallback`.
+fn plan_error_text(error: &CliError, fallback: &str) -> String {
+    match error {
+        CliError::Other(text) if text == plan::TOO_OLD => fl!("restore-too-old"),
+        CliError::Other(text) if text == plan::GONE => fl!("restore-gone"),
+        _ => fallback.to_owned(),
+    }
 }
 
 /// Runs the operation `start` builds, as a task that also yields a [`Message::Progress`] for
@@ -2036,6 +2680,7 @@ fn error_summary(error: &CliError, known_uuid: Option<&str>) -> String {
             name = failed.clone(),
             reason = error_summary(reason, known_uuid)
         ),
+        CliError::RestoreRefused(refusal) => refusal_lines(refusal).0,
         CliError::Other(message) => message.clone(),
     }
 }
@@ -2163,6 +2808,20 @@ fn shortcut_for(key: &Key, modifiers: Modifiers, captured: bool) -> Option<Short
             "a" => Some(Shortcut::SelectAll),
             _ => None,
         },
+        _ => None,
+    }
+}
+
+/// The window's height, for the restore dialog's scrolling body.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the signature event::listen_with takes"
+)]
+fn window_resized(event: event::Event, _status: event::Status, _window: Id) -> Option<Message> {
+    match event {
+        event::Event::Window(window::Event::Resized(size)) => {
+            Some(Message::WindowResized(size.height))
+        }
         _ => None,
     }
 }

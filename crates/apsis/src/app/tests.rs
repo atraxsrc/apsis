@@ -447,6 +447,7 @@ fn own_job_in_both_orders(
         Operation::Create(_) => NEWEST,
         Operation::Delete(name) => name.as_str(),
         Operation::DeleteMany(names) => names.last().unwrap().as_str(),
+        Operation::Restore { snapshot, .. } => snapshot.as_str(),
     };
     let mut started = job(kind, JobState::Running, name);
     started.started = 1_790_000_000;
@@ -1428,6 +1429,562 @@ fn screenshots() {
             dark,
             popup.popup_view(),
             Size::new(POPUP_WIDTH, 460.0),
+        );
+    }
+}
+
+// ---- Restore (0.5.0, PLAN 6b.8 and 6b.12) ----
+
+mod restore {
+    use apsis_core::restore::apsis::InSnapshot;
+    use apsis_core::restore::dialog::Dialog as Check;
+    use apsis_core::restore::esp::CheckFailure;
+    use apsis_core::restore::refusal::Refusal;
+    use apsis_core::restore::state::{Outcome, RestoreResult};
+
+    use super::*;
+
+    fn check() -> Check {
+        Check {
+            refusal: None,
+            has_home: true,
+            has_root: true,
+            old_format: false,
+            apsis: InSnapshot::Current,
+        }
+    }
+
+    /// A window with the newest snapshot selected and its restore dialog open.
+    fn with_dialog() -> AppModel {
+        let mut app = window();
+        click(&mut app, 0, Modifiers::empty());
+        send(&mut app, Message::RestoreClicked);
+        assert_eq!(app.checking.as_deref(), Some(NEWEST));
+        send(&mut app, Message::Checked(NEWEST.to_owned(), Ok(check())));
+        app
+    }
+
+    fn restore_op() -> Operation {
+        Operation::Restore {
+            snapshot: NEWEST.to_owned(),
+            restore_home: false,
+            safety_snapshot: true,
+        }
+    }
+
+    /// A window whose restore is ready at the prompt.
+    fn ready() -> AppModel {
+        let mut app = with_dialog();
+        send(&mut app, Message::DialogConfirm);
+        send(&mut app, Message::Finished(restore_op(), Ok(())));
+        app
+    }
+
+    #[test]
+    fn restore_is_enabled_only_with_one_real_snapshot_and_no_job() {
+        let mut app = window();
+        assert!(!app.can_restore(), "nothing selected");
+        click(&mut app, 0, Modifiers::empty());
+        assert!(app.can_restore());
+        click(&mut app, 1, Modifiers::CTRL);
+        assert!(!app.can_restore(), "two selected");
+        click(&mut app, 5, Modifiers::empty());
+        assert!(!app.can_restore(), "a leftover");
+        click(&mut app, 0, Modifiers::empty());
+        app.job = Some(job(JobKind::Create, JobState::Running, NEWEST));
+        assert!(!app.can_restore(), "a job runs");
+        app.job = None;
+        app.disk_seen = Some(false);
+        assert!(!app.can_restore(), "the disk is gone");
+    }
+
+    /// No key opens the dialog (owner, 2026-09-30); Enter isn't a shortcut at all.
+    #[test]
+    fn no_key_opens_restore() {
+        let mut app = window();
+        click(&mut app, 0, Modifiers::empty());
+        for shortcut in [
+            Shortcut::Create,
+            Shortcut::Delete,
+            Shortcut::Refresh,
+            Shortcut::Settings,
+            Shortcut::SelectAll,
+            Shortcut::Up,
+            Shortcut::Down,
+            Shortcut::Escape,
+        ] {
+            send(&mut app, Message::Shortcut(shortcut));
+            assert!(
+                !matches!(app.dialog, Some(Dialog::Restore { .. })),
+                "{shortcut:?} opened the restore dialog"
+            );
+            app.dialog = None;
+        }
+        use cosmic::iced::keyboard::Key;
+        use cosmic::iced::keyboard::key::Named;
+        assert_eq!(
+            shortcut_for(&Key::Named(Named::Enter), Modifiers::empty(), false),
+            None
+        );
+    }
+
+    #[test]
+    fn restore_asks_the_helper_first_and_opens_with_the_defaults() {
+        let app = with_dialog();
+        assert_eq!(
+            app.dialog,
+            Some(Dialog::Restore {
+                snapshot: NEWEST.to_owned(),
+                check: check(),
+                restore_home: false,
+                safety_snapshot: true,
+            })
+        );
+        assert!(app.checking.is_none());
+        // While the check runs the toolbar waits.
+        let mut app = window();
+        click(&mut app, 0, Modifiers::empty());
+        send(&mut app, Message::RestoreClicked);
+        assert!(!app.can_restore() && !app.can_create());
+        // A refusal opens the other dialog, not dropped.
+        send(
+            &mut app,
+            Message::Checked(
+                NEWEST.to_owned(),
+                Ok(Check {
+                    refusal: Some(Refusal::OtherInstallation),
+                    ..check()
+                }),
+            ),
+        );
+        assert_eq!(
+            app.dialog,
+            Some(Dialog::Refused {
+                snapshot: NEWEST.to_owned(),
+                refusal: Refusal::OtherInstallation,
+                dropped: false,
+            })
+        );
+        // The helper couldn't be asked: the status line says why, no dialog.
+        let mut app = window();
+        click(&mut app, 0, Modifiers::empty());
+        send(&mut app, Message::RestoreClicked);
+        send(
+            &mut app,
+            Message::Checked(NEWEST.to_owned(), Err(CliError::NotAuthorized)),
+        );
+        assert!(app.dialog.is_none());
+        assert!(matches!(app.status, Some(Status::Error(..))));
+    }
+
+    #[test]
+    fn home_radios_and_the_lost_for_good_line_follow_the_choices() {
+        let mut app = with_dialog();
+        let Some(Dialog::Restore { check: found, .. }) = &app.dialog else {
+            panic!()
+        };
+        assert!(found.has_home, "the radios show");
+        assert!(!app.dialog.as_ref().unwrap().lost_for_good());
+        send(&mut app, Message::RestoreHome(1));
+        assert!(
+            !app.dialog.as_ref().unwrap().lost_for_good(),
+            "safety is on"
+        );
+        send(&mut app, Message::RestoreSafety(false));
+        assert!(app.dialog.as_ref().unwrap().lost_for_good());
+        send(&mut app, Message::RestoreHome(0));
+        assert!(!app.dialog.as_ref().unwrap().lost_for_good());
+        // Without home in the snapshot the choice is hidden and stays "keep".
+        let mut app = window();
+        click(&mut app, 0, Modifiers::empty());
+        send(&mut app, Message::RestoreClicked);
+        send(
+            &mut app,
+            Message::Checked(
+                NEWEST.to_owned(),
+                Ok(Check {
+                    has_home: false,
+                    ..check()
+                }),
+            ),
+        );
+        send(&mut app, Message::RestoreHome(1));
+        assert!(matches!(
+            app.dialog,
+            Some(Dialog::Restore {
+                restore_home: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn the_dialogs_extra_line_names_the_format_or_the_apsis_in_the_snapshot() {
+        let line = |check: Check| {
+            Dialog::Restore {
+                snapshot: NEWEST.to_owned(),
+                check,
+                restore_home: false,
+                safety_snapshot: true,
+            }
+            .extra_lines()
+        };
+        assert!(line(check()).is_empty());
+        let old = line(Check {
+            old_format: true,
+            ..check()
+        });
+        assert_eq!(old, [fl!("restore-old-format")]);
+        assert_eq!(
+            line(Check {
+                apsis: InSnapshot::NotInstalled,
+                ..check()
+            }),
+            [fl!("restore-no-apsis")]
+        );
+        assert_eq!(
+            line(Check {
+                apsis: InSnapshot::NoRestore {
+                    version: "0.4.2".to_owned()
+                },
+                ..check()
+            }),
+            [fl!("restore-apsis-no-restore", version = "0.4.2")]
+        );
+        assert_eq!(
+            line(Check {
+                apsis: InSnapshot::OldSettings {
+                    version: "0.3.1".to_owned()
+                },
+                ..check()
+            }),
+            [fl!("restore-apsis-old-settings", version = "0.3.1")]
+        );
+        // Both at once: both lines, the format first.
+        let both = line(Check {
+            old_format: true,
+            apsis: InSnapshot::NotInstalled,
+            has_home: false,
+            ..check()
+        });
+        assert_eq!(both.len(), 3, "{both:?}");
+        assert_eq!(both[0], fl!("restore-no-home"));
+    }
+
+    #[test]
+    fn confirming_runs_the_restore_and_ready_opens_the_prompt() {
+        let mut app = with_dialog();
+        send(&mut app, Message::DialogConfirm);
+        assert_eq!(app.running, Some(restore_op()));
+        assert!(app.dialog.is_none());
+        // Preparing: the status line before any progress, then with the safety snapshot's.
+        assert_eq!(app.restore_progress().0, fl!("preparing-checking"));
+        send(
+            &mut app,
+            Message::Progress(Progress {
+                percent: Some(42.0),
+                eta_seconds: Some(180),
+                text: String::new(),
+            }),
+        );
+        let (text, fraction) = app.restore_progress();
+        assert!(
+            text.starts_with("Preparing restore · safety snapshot · 42%"),
+            "{text}"
+        );
+        assert!((fraction.unwrap() - 0.42).abs() < 1e-6);
+        send(&mut app, Message::Finished(restore_op(), Ok(())));
+        assert!(app.running.is_none());
+        assert_eq!(app.ready.as_deref(), Some(NEWEST));
+        assert_eq!(
+            app.dialog,
+            Some(Dialog::Ready {
+                snapshot: NEWEST.to_owned()
+            })
+        );
+        assert_eq!(app.restore_progress(), (fl!("preparing-ready"), Some(1.0)));
+        assert!(app.loading, "lists again: the safety snapshot is new");
+        assert!(
+            !app.can_create() && !app.can_restore(),
+            "the plan holds writes off"
+        );
+    }
+
+    #[test]
+    fn a_refused_or_failed_or_stopped_preparation_says_so() {
+        let mut app = with_dialog();
+        send(&mut app, Message::DialogConfirm);
+        send(
+            &mut app,
+            Message::Finished(
+                restore_op(),
+                Err(CliError::RestoreRefused(Refusal::SystemSpace {
+                    needs: 6_000_000_000,
+                    free: 3_000_000_000,
+                })),
+            ),
+        );
+        assert!(matches!(
+            app.dialog,
+            Some(Dialog::Refused { dropped: false, .. })
+        ));
+        assert!(app.ready.is_none());
+        let mut app = with_dialog();
+        send(&mut app, Message::DialogConfirm);
+        send(
+            &mut app,
+            Message::Finished(restore_op(), Err(CliError::Stopped)),
+        );
+        assert_eq!(app.status, Some(Status::Info(fl!("restore-stopped"))));
+        assert!(app.loading, "a finished safety snapshot may be there");
+        let mut app = with_dialog();
+        send(&mut app, Message::DialogConfirm);
+        send(
+            &mut app,
+            Message::Finished(restore_op(), Err(CliError::Other("rsync died".to_owned()))),
+        );
+        assert_eq!(
+            app.status,
+            Some(Status::Error(
+                fl!("restore-failed", reason = "rsync died"),
+                None
+            ))
+        );
+    }
+
+    #[test]
+    fn the_ready_prompt_has_two_answers_and_esc_cancels() {
+        let mut app = ready();
+        send(&mut app, Message::Shortcut(Shortcut::Escape));
+        assert!(app.dialog.is_none());
+        assert!(app.cancelling, "Esc is Cancel restore");
+        send(&mut app, Message::CancelAnswered(Ok(())));
+        assert!(app.ready.is_none() && !app.cancelling);
+        assert_eq!(app.status, Some(Status::Info(fl!("restore-cancelled"))));
+        assert!(app.loading, "lists again: the safety snapshot stays");
+        app.on_listed(Ok(fixture()));
+        assert!(app.can_create(), "writes are free again");
+        // Restart now: the helper arms and restarts; nothing more to show but the line.
+        let mut app = ready();
+        send(&mut app, Message::RestartNow);
+        assert!(app.dialog.is_none() && app.restarting);
+        send(&mut app, Message::RestartAnswered(Ok(())));
+        assert_eq!(app.status, Some(Status::Info(fl!("restarting"))));
+        assert!(app.ready.is_none());
+        // Too old, or gone: one line, the plan is over.
+        let mut app = ready();
+        send(&mut app, Message::RestartNow);
+        send(
+            &mut app,
+            Message::RestartAnswered(Err(CliError::Other(
+                apsis_core::restore::plan::TOO_OLD.to_owned(),
+            ))),
+        );
+        assert_eq!(
+            app.status,
+            Some(Status::Error(fl!("restore-too-old"), None))
+        );
+        assert!(app.ready.is_none());
+        let mut app = ready();
+        send(&mut app, Message::CancelRestore);
+        send(
+            &mut app,
+            Message::CancelAnswered(Err(CliError::Other(
+                apsis_core::restore::plan::GONE.to_owned(),
+            ))),
+        );
+        assert_eq!(app.status, Some(Status::Error(fl!("restore-gone"), None)));
+        assert!(app.ready.is_none());
+    }
+
+    /// A refused "Restart now" drops the plan (owner, 2026-10-02): the dialog says so.
+    #[test]
+    fn a_refused_restart_now_says_the_plan_was_dropped() {
+        let mut app = ready();
+        send(&mut app, Message::RestartNow);
+        send(
+            &mut app,
+            Message::RestartAnswered(Err(CliError::RestoreRefused(Refusal::BootFiles(
+                CheckFailure::NoEntry,
+            )))),
+        );
+        assert_eq!(
+            app.dialog,
+            Some(Dialog::Refused {
+                snapshot: NEWEST.to_owned(),
+                refusal: Refusal::BootFiles(CheckFailure::NoEntry),
+                dropped: true,
+            })
+        );
+        assert!(app.ready.is_none());
+        let lines = app.dialog.as_ref().unwrap().refusal_lines();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines[2], fl!("refused-dropped"));
+        send(&mut app, Message::DialogCancel);
+        assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn every_refusal_has_its_two_lines() {
+        let all = [
+            Refusal::NotUefi,
+            Refusal::NotKernelstub,
+            Refusal::BootPartition,
+            Refusal::RootFilesystem {
+                fstype: "btrfs".to_owned(),
+            },
+            Refusal::RootDevice,
+            Refusal::SplitSystem,
+            Refusal::OtherInstallation,
+            Refusal::Unreadable(apsis_core::restore::refusal::Unreadable::NoInfo),
+            Refusal::KernelIncomplete,
+            Refusal::PendingUpdate,
+            Refusal::PopUpgradePending,
+            Refusal::CrypttabDiffers,
+            Refusal::BackupSpace {
+                needs: 14_000_000_000,
+                free: 9_000_000_000,
+            },
+            Refusal::SystemSpace { needs: 6, free: 3 },
+            Refusal::BootSpace { needs: 6, free: 3 },
+            Refusal::SizeUnknown,
+            Refusal::BootFiles(CheckFailure::NoEntry),
+        ];
+        for refusal in all {
+            let dialog = Dialog::Refused {
+                snapshot: NEWEST.to_owned(),
+                refusal: refusal.clone(),
+                dropped: false,
+            };
+            let lines = dialog.refusal_lines();
+            assert_eq!(lines.len(), 2, "{refusal:?}: {lines:?}");
+            assert!(
+                lines.iter().all(|l| !l.is_empty() && !l.contains('{')),
+                "{lines:?}"
+            );
+        }
+        let space = Dialog::Refused {
+            snapshot: NEWEST.to_owned(),
+            refusal: Refusal::SystemSpace {
+                needs: 6_000_000_000,
+                free: 3_000_000_000,
+            },
+            dropped: false,
+        }
+        .refusal_lines();
+        let (needs, free) = (
+            apsis_core::status::size(6_000_000_000),
+            apsis_core::status::size(3_000_000_000),
+        );
+        assert!(
+            space[0].contains(&needs) && space[0].contains(&free),
+            "{space:?}"
+        );
+    }
+
+    #[test]
+    fn stop_during_the_preparation_asks_and_the_stopped_restore_says_so() {
+        let mut app = with_dialog();
+        send(&mut app, Message::DialogConfirm);
+        send(
+            &mut app,
+            Message::Job(JobEvent::Changed(job(
+                JobKind::Restore,
+                JobState::Running,
+                NEWEST,
+            ))),
+        );
+        assert_eq!(app.stoppable().as_deref(), Some(NEWEST));
+        send(&mut app, Message::StopClicked);
+        assert_eq!(
+            app.dialog,
+            Some(Dialog::StopRestore {
+                snapshot: NEWEST.to_owned()
+            })
+        );
+        send(&mut app, Message::DialogConfirm);
+        assert_eq!(app.status, Some(Status::Info(fl!("stopping"))));
+        send(
+            &mut app,
+            Message::Finished(restore_op(), Err(CliError::Stopped)),
+        );
+        assert_eq!(app.status, Some(Status::Info(fl!("restore-stopped"))));
+    }
+
+    #[test]
+    fn another_windows_restore_holds_the_toolbar_and_its_end_lists() {
+        let mut app = window();
+        let mut running = job(JobKind::Restore, JobState::Running, NEWEST);
+        running.percent = Some(100.0);
+        send(&mut app, Message::Job(JobEvent::Changed(running)));
+        assert!(app.active_job().is_some());
+        assert!(!app.can_create() && !app.can_restore());
+        assert_eq!(app.restore_progress().0, fl!("restore-ready-elsewhere"));
+        send(
+            &mut app,
+            Message::Job(JobEvent::Changed(job(
+                JobKind::Restore,
+                JobState::Stopped,
+                NEWEST,
+            ))),
+        );
+        assert!(app.active_job().is_none());
+        assert!(app.loading, "a safety snapshot may have appeared");
+        assert_eq!(app.status, None, "the other window says what happened");
+    }
+
+    #[test]
+    fn restore_results_show_on_the_status_line_and_restore_again_reopens() {
+        let mut app = window();
+        let done = RestoreResult {
+            state: apsis_core::restore::state::ResultState::Ended(Outcome::Done),
+            snapshot: Some(NEWEST.to_owned()),
+            message: String::new(),
+            when: Some(1_790_000_000),
+        };
+        send(&mut app, Message::RestoreResultRead(Ok(done)));
+        let shown = app.result_text().expect("a result line");
+        assert_eq!(shown.0, fl!("result-done", date = "2026-09-25 11:28"));
+        assert!(!app.restore_again_available());
+        let failed = RestoreResult {
+            state: apsis_core::restore::state::ResultState::Ended(Outcome::Failed),
+            snapshot: Some(NEWEST.to_owned()),
+            message: "the backup disk was disconnected".to_owned(),
+            when: None,
+        };
+        send(&mut app, Message::RestoreResultRead(Ok(failed)));
+        let (line, tooltip) = app.result_text().unwrap();
+        assert!(line.starts_with("Restore incomplete"), "{line}");
+        assert!(line.ends_with(fl!("result-what-disk").as_str()), "{line}");
+        assert!(tooltip.contains("disconnected"));
+        assert!(app.restore_again_available());
+        send(&mut app, Message::RestoreAgain);
+        assert_eq!(selected(&app), [NEWEST]);
+        assert_eq!(app.checking.as_deref(), Some(NEWEST));
+        // Nothing to show: no line. A ready plan elsewhere: no result line either.
+        let mut app = window();
+        send(
+            &mut app,
+            Message::RestoreResultRead(Ok(RestoreResult::none())),
+        );
+        assert!(app.result_text().is_none());
+        send(
+            &mut app,
+            Message::RestoreResultRead(Ok(RestoreResult::ready(NEWEST))),
+        );
+        assert!(app.result_text().is_none());
+        // Not started: what to do from the message.
+        let not_started = RestoreResult {
+            state: apsis_core::restore::state::ResultState::Ended(Outcome::NotStarted),
+            snapshot: Some(NEWEST.to_owned()),
+            message: "the backup disk 0000 wasn't found within 60 seconds".to_owned(),
+            when: Some(1_790_000_000),
+        };
+        send(&mut app, Message::RestoreResultRead(Ok(not_started)));
+        let (line, _) = app.result_text().unwrap();
+        assert_eq!(
+            line,
+            fl!("result-not-started", what = fl!("result-what-disk"))
         );
     }
 }

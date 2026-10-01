@@ -3886,3 +3886,65 @@ Each accepted, with an addition, and built the same day (tests first).
    `C.UTF-8` exists on the HP and in the offline boot. Read-only check:
    `ssh apsis-test 'LC_ALL=C.UTF-8 locale charmap'` (expect `UTF-8`). Added to the claims
    table.
+
+## 2026-10-02 - 6b UI slice, step A: the restore flow in the applet (PLAN 6b.13 step 4)
+
+Built tests first (`app::tests::restore`, 13 tests on the model: the 6b.12 applet list).
+The preview branch's layouts were rebuilt in the real code; the branch stays unmerged.
+
+**Model and flow (`app.rs`):**
+- `Operation::Restore { snapshot, restore_home, safety_snapshot }` (kind `restore`), run
+  through `HelperClient::restore` with the safety snapshot's progress.
+- `Dialog::Restore { snapshot, check, restore_home, safety_snapshot }` (defaults: home kept,
+  safety on; the radios only when `check.has_home`, and `RestoreHome(1)` is ignored without
+  it), `Dialog::Refused { snapshot, refusal, dropped }`, `Dialog::StopRestore`,
+  `Dialog::Ready`. `Dialog::lost_for_good()` (restore home and no safety), `extra_lines()`
+  (no home, old format, which Apsis; in that order), `refusal_lines()` (the pair per
+  refusal from 6b.8's table, and the dropped line).
+- **Restore is a click only**: `can_restore()` is `can_create()` with exactly one snapshot
+  selected (not a leftover). No `Shortcut`; `shortcut_for(Enter)` is `None` (tested). The
+  button asks `CheckRestore` first (`checking` holds the toolbar meanwhile), then opens the
+  dialog or the "Can't restore" one; a helper error goes to the status line.
+- **Ready**: `Finished(Restore, Ok)` sets `ready`, opens `Dialog::Ready`, says `Preparing
+  restore · ready` and lists (the safety snapshot is new; reads aren't blocked). While
+  `ready`, `can_create()` is false. **Esc, Cancel and closing the prompt are Cancel restore**
+  (`cancel_restore` → `CancelAnswered`: "Restore cancelled", list). **Restart now** →
+  `RestartAnswered`: "Restarting…"; a refusal opens `Dialog::Refused { dropped: true }`
+  (owner, 2026-10-02); `plan::TOO_OLD` / `plan::GONE` (as `CliError::Other` text) map to
+  their lines (`plan_error_text`). Closing the window needs nothing: the helper removes the
+  plan when the connection leaves the bus.
+- **Preparing**: `restore_progress()`: `checking the snapshot…` before any progress, the
+  safety snapshot's percent and time with it, `ready` at the prompt, and `Restore ready in
+  another window` for another window's job at 100%. `stoppable()` includes a running
+  `restore` job until ready; Stop opens `Dialog::StopRestore` (its own words).
+- **Another window's restore**: `active_job()` now excludes only `configure`, so a restore
+  (and a ready plan) elsewhere holds Create, Restore and Delete off (6b.9). Its end lists
+  (the safety snapshot) and sets no status: that window says how it went.
+- **`CliError::RestoreRefused(Refusal)`** from `Error::RestoreRefused(word)`; an unknown
+  word stays `Other`. `error_summary` gives the refusal's first line.
+- **After login**: the window asks `RestoreResult` when it connects
+  (`read_restore_result`); an ended result is kept in `restore_result` and shown by
+  `result_text()` when no status line is up: done (also `problems`), boot-kept (also
+  boot-broken: the warning role on the phrase), failed (the error role on `incomplete`,
+  what to do from the message: "backup disk" → reconnect, "space" → free space, else see
+  README; `Restore again` when the snapshot is still listed), not started. The tooltips are
+  6b.8's. `RestoreAgain` selects the snapshot and runs the normal flow with the defaults.
+- `WindowResized(height)` from a window event listener, for the dialog's scrolling body.
+
+**Views (`view.rs`):** the toolbar's Restore between Create and Delete
+(`document-revert-symbolic`, no tooltip); the row tooltip "Older format: made without ACLs
+and extended attributes" from the list's `rsync_flags` through `is_old_format` (on the row's
+content: a `ListButton` can't be wrapped in a tooltip); the job line uses
+`restore_progress()` and offers Stop for a restore until ready; the result line shows the
+last restore when no status is up, with `phrase_line` for the role on the phrase only; the
+four dialogs, the restore one with the preview's scrolling body (`DIALOG_CHROME` = 216 px,
+the window's height tracked).
+
+**Strings**: 6b.8's table, in `i18n/en/apsis.ftl` under "Restore (0.5.0)", with three
+refusal pairs the table had no words for yet (boot space, size unknown, boot files) and the
+"Restore ready in another window" line.
+
+**Left for step B**: the layout test (`APSIS_LAYOUT_TEST=1`, both window sizes, screenshots
+with `APSIS_SCREENSHOTS`), `docs/UI.md`, the man page and README lines of step 5.
+
+Gate: workspace tests (applet 90), clippy `-D warnings` on all targets, fmt check: all clean.
