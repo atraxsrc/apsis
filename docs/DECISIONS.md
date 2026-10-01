@@ -2961,7 +2961,8 @@ standard output line by line as it runs (progress to the boot screen) and keeps 
   (unmask, rm); `dpkg --audit` clean, no apt/dpkg activity, no cached debs. **Check 0.3's
   plymouth and console observations were contaminated** and are redone as check 0.4 once
   this is blocked. `packagekit-offline-update` is safe (logs "no trigger, exiting");
-  `fwupd-offline-update` is gated on `ConditionPathExists=/var/lib/fwupd/pending.db`.
+  `fwupd-offline-update` is gated on `ConditionPathExists=/var/lib/fwupd/pending.db` (corrected
+  below, item 1 of the owner's answers, and by check 0.4: it starts and finishes at once).
 - **5a, chosen: a drop-in whose condition is a path through the link.**
   `/etc/systemd/system/pop-upgrade-init.service.d/50-apsis.conf` with
   `ConditionPathExists=!/system-update/apsis-helper`. `/system-update` is an absolute symlink
@@ -3339,3 +3340,72 @@ calls); it was masked by the cascade of lists.
   status line, the selection for the stopped delete, one list, and that the next end of the
   same kind is another window's again; refusals before the lock wait for nothing; the helper
   leaving or another kind's end clears the wait. Helper: `finished_follows_the_end_on_the_bus`.
+
+## 2026-10-01 - 6b: check 0.4 passed (owner, apsis-test); the drop-in claim is verified
+
+The spike of PLAN 6b.12 check 0.4, run from the corrected runbook (the spike unit ordered
+`After=pop-upgrade-init.service`, so the drop-in is evaluated with the link in place). All
+steps were the owner's over `ssh apsis-test`; everything was cleaned up and verified clean.
+
+**Verified** (systemd 255.4, Pop!_OS 24.04, kernel 7.1.5):
+
+1. **A drop-in's `ConditionPathExists=` is added to a `/usr/lib` unit's conditions, not
+   replacing them.** `systemctl cat pop-upgrade-init.service` showed the unit's own
+   `ConditionPathExists=/system-update` and the drop-in's `!/system-update/apsis-helper` both
+   loaded (`DropInPaths=/etc/systemd/system/pop-upgrade-init.service.d/50-apsis.conf`). In the
+   offline boot, with `/system-update -> /var/lib/apsis-spike` present and the marker reachable
+   through it (`systemd-analyze condition` gave rc=1 before the reboot), the journal has, under
+   the unit: `pop-upgrade-init.service - Execute system updates early in the boot process was
+   skipped because of an unmet condition check (ConditionPathExists=!/system-update/apsis-helper)`,
+   at priority 6 (info). So the unit's own condition was true and the drop-in's alone skipped it.
+   The last open row of the claims table (PLAN 6b.13) is closed.
+2. **`ConditionPathExists` is not a `systemctl show` property**: `show -p ConditionPathExists
+   -p DropInPaths` printed only `DropInPaths=`. The runbook's caveat applied; `systemctl cat` is
+   the check. (PLAN 6b.12 and the claims row now say so.)
+3. **Ordering**: `pop-upgrade-init`'s `Before=` gained `apsis-spike.service` from the spike's
+   `After=`; `WantedBy=system-update.target`; no cycle. `system-update.target`'s dependencies on
+   apsis-test: `apsis-spike`, `fwupd-offline-update`, `packagekit-offline-update`,
+   `pop-upgrade-init`, `system-update-cleanup`, `sysinit.target`.
+4. **The spike** (`StandardOutput=journal`, `udevadm wait --timeout=60`, the USB by UUID): the
+   offline boot lasted 2 s (21:59:57 to 21:59:59); the spike started at :58 and logged: the link
+   was its own; `removed '/system-update'`; packagekit and fwupd `inactive`/`success`; the
+   display manager inactive; `/` ext4 rw, `/boot/efi` vfat rw; the backup disk present at once;
+   `mounted read-only: 2 snapshots`; no `/upgrade-attempted`, no `/pop-upgrade`; `done,
+   restarting`; `Deactivated successfully`. No "no plymouth" line, so both plymouth calls
+   returned 0. `plymouth-start` and `plymouth-reboot` ran; plymouth doesn't journal the
+   display-message and system-update calls.
+5. **Nothing of `upgrade.sh` ran**: the boot's journal has no `upgrade.sh`, `apt-get` or
+   `system-upgrade` line; `/var/log/upgrade.log` ends as the baseline did (the 0.3 incident's
+   lines); `acpid` and `pop-upgrade` are `disabled` before and after (not masked; "disabled" is
+   their normal state on this install, which is why the pass rule compares with a baseline
+   rather than expecting "enabled"); no `/upgrade-attempted`.
+6. **`system-update-cleanup.service` did not run** (the spike had removed the link).
+7. **`packagekit-offline-update` and `fwupd-offline-update` both started and finished at once**:
+   packagekit logged `another framework set up the trigger`; fwupd logged nothing and
+   deactivated successfully. fwupd is **not** skipped on a `pending.db` condition (the older
+   wording in the 6b.6 entry above is wrong; the owner's answer 1 and check 0.3 already had it
+   running). Neither did anything. The runbook's expectation for fwupd was corrected.
+8. **The next boot was normal**: 0 failed units, `cosmic-greeter` active, uptime 1 min.
+   `/run/apsis-spike` was gone (`/run` is tmpfs, confirmed `findmnt -no FSTYPE /run`); the USB
+   not mounted.
+9. **Cleanup**: all six paths gone; `/etc/systemd/system/system-update.target.wants` was left
+   as an empty folder (it hadn't existed before 0.4b) and the owner removed it; `DropInPaths=`
+   empty; no `apsis-spike*` unit or file; `apsis-helper` inactive; `dpkg --audit` clean.
+10. **Housekeeping**: the owner ran the incident cleanup line (`unmask acpid pop-upgrade`, `rm -f
+    /upgrade-attempted`) right after `systemctl reboot` although the incident didn't happen; it
+    printed only `dpkg-clean` and changed nothing (nothing was masked, nothing to remove).
+    The wait loop on a changed `boot_id` worked (`378e6551...` to `f32bc05e...`); the offline
+    boot answered no ssh.
+
+**Still open from this check**: what the screen showed during the 2 s offline boot: the
+plymouth text "Apsis check 0.4: offline boot" and the progress at 42 %, and whether any unit
+text appeared over the splash. The owner hasn't stated it. If 2 s was too short to see,
+that's a result too: the apply itself takes minutes, so the splash will be visible then; the
+"no unit text" observation then comes from the first real apply (6b.12 check 1) with
+`StandardOutput=journal` already in the unit text.
+
+**What changes in the design**: nothing. The drop-in (`restore::unit::drop_in_text`, its path,
+its place in `filter::PROTECTED`) is built as designed. The helper slice build can start
+(PLAN 6b.13 step 3 item 2). For the runbook of the first real apply: use `systemctl cat` for
+the drop-in, expect fwupd and packagekit to run and finish at once, and compare `is-enabled`
+answers with a baseline.

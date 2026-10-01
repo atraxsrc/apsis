@@ -859,8 +859,9 @@ kernels, autoremoves, runs `update-initramfs -c -k all`, deletes and re-creates 
 entry (`efibootmgr -B` / `-c`) and reboots; on failure, `systemctl rescue`. It ran next to the
 dummy unit in check 0.3, on Apsis's link. **It must never start in a boot whose
 `/system-update` is Apsis's.** `packagekit-offline-update` checks the link's target itself
-("no trigger, exiting") and `fwupd-offline-update` is gated on
-`/var/lib/fwupd/pending.db`; neither needs anything from Apsis.
+("no trigger, exiting", or "another framework set up the trigger" in check 0.4) and
+`fwupd-offline-update` starts, finds nothing of its own and finishes at once (checks 0.3 and
+0.4; it is not skipped on a condition); neither needs anything from Apsis.
 
 The fix, three parts:
 
@@ -1638,7 +1639,13 @@ Checks:
   **Passed, but contaminated** (2026-10-01): `pop-upgrade-init` ran next to the dummy unit
   (6b.6), so the plymouth and console observations are redone in 0.4.
 - **0.4** (added 2026-10-01; corrected after review the same day) The spike once more, **with
-  the drop-in in place by hand**, before the helper slice is built. 0.3's unit, script and
+  the drop-in in place by hand**, before the helper slice is built.
+  **Passed (apsis-test, 2026-10-01, 21:59 AEST; DECISIONS "check 0.4").** The offline boot
+  lasted 2 s; every spike line is there (the USB mounted read-only, 2 snapshots);
+  `pop-upgrade-init` was skipped on the drop-in's condition, logged at info; nothing of
+  `upgrade.sh` ran; `system-update-cleanup` didn't run; the next boot was normal with 0 failed
+  units; the cleanup verified clean. Still to be stated by the owner: what the screen showed
+  (the plymouth text and progress, no unit text over the splash). 0.3's unit, script and
   `/var/lib/apsis-spike` were removed after 0.3, so 0.4 re-creates them. The names below are
   0.4's (`apsis-spike.service`, `/var/lib/apsis-spike/spike.sh`); if 0.3's were different,
   either works. The drop-in's condition is the real one, `!/system-update/apsis-helper`, so the
@@ -1716,8 +1723,8 @@ Checks:
   ConditionPathExists=!/system-update/apsis-helper
   EOF
   sudo systemctl daemon-reload
-  systemctl show pop-upgrade-init.service -p ConditionPathExists -p DropInPaths
-  systemctl cat pop-upgrade-init.service
+  systemctl show pop-upgrade-init.service -p DropInPaths                 # the drop-in (ConditionPathExists isn't a show property)
+  systemctl cat pop-upgrade-init.service                                   # both conditions loaded: this is the check
   systemctl show pop-upgrade-init.service -p After -p Before -p WantedBy   # no cycle with the spike; system-update.target pulls it in
   systemctl is-enabled acpid pop-upgrade; sudo tail -3 /var/log/upgrade.log 2>&1   # the baseline 0.4e compares with
   # 0.4d: arm and reboot (record the boot id first; the wait is on a changed boot id, not on ssh alone)
@@ -1733,7 +1740,7 @@ Checks:
   journalctl -b -1 --no-pager -u pop-upgrade-init.service   # MUST show the skip naming ConditionPathExists=!/system-update/apsis-helper; no lines is not a pass
   journalctl -b -1 --no-pager -g 'pop-upgrade-init'          # the same line, found without -u
   journalctl -b -1 --no-pager | grep -Ei 'upgrade\.sh|apt-get|system-upgrade|system-update-cleanup'
-  journalctl -b -1 --no-pager -u packagekit-offline-update.service -u fwupd-offline-update.service
+  journalctl -b -1 --no-pager -u packagekit-offline-update.service -u fwupd-offline-update.service   # both start and finish at once: packagekit "another framework set up the trigger"
   systemctl is-enabled acpid pop-upgrade; ls -la /upgrade-attempted /system-update 2>&1   # as the 0.4c baseline; neither file
   tail -5 /var/log/upgrade.log 2>&1                               # nothing new from this boot
   ls -la /run/apsis-spike 2>&1; findmnt -S UUID=<the test USB's UUID> || echo usb-not-mounted   # /run is tmpfs: No such file; not mounted
@@ -1750,11 +1757,10 @@ Checks:
   systemctl show pop-upgrade-init.service -p ConditionPathExists -p DropInPaths   # the unit's own condition only
   systemctl is-enabled acpid pop-upgrade                       # as the 0.4c baseline
   ```
-  **0.4c settles the drop-in claim** (6b.13's table) before any reboot: `ConditionPathExists`
-  must list both the unit's own condition and the drop-in's, and `DropInPaths` the drop-in. The
-  output format of `systemctl show -p ConditionPathExists` with two conditions is **unverified**:
-  if it prints only one line, don't read that as "replaced"; `systemctl cat` shows whether the
-  drop-in is loaded; stop before 0.4d and bring both outputs back.
+  **0.4c settles the drop-in claim** (6b.13's table) before any reboot: `systemctl cat` must
+  show the unit's own condition and the drop-in's both loaded, and `DropInPaths` the drop-in.
+  (`ConditionPathExists` is not a `systemctl show` property on systemd 255.4: `show` prints
+  nothing for it, which is not "replaced"; found in 0.4.)
   **Passes when**: the spike ran in the offline boot (its journal lines, the backup disk
   mounted read-only); `pop-upgrade-init.service`'s journal for that boot has the skip line
   naming `ConditionPathExists=!/system-update/apsis-helper` (its own
@@ -1764,8 +1770,7 @@ Checks:
   the plymouth text and progress were shown and **no unit text appeared over the splash**
   (that's the `StandardOutput=journal` observation 0.3 couldn't make cleanly). Also noted for
   the record: whether `system-update-cleanup.service` ran (it shouldn't: the spike removed the
-  link), and the skip line's journal priority (unverified: systemd is expected to log an unmet
-  condition at info; `journalctl -b -1 -o json -u pop-upgrade-init.service | jq -r .PRIORITY`).
+  link), and the skip line's journal priority (0.4: 6, info; found with `-u`).
 - 1. Keep home, safety on: after the snapshot, add `/etc/apsis-test-marker`, a file in `~`, and
   `sudo apt install cowsay`. Restore: the marker and cowsay are gone, the `~` file is kept and
   `/home`'s mode is unchanged, `dpkg --audit` is clean, `swapon --show` shows cryptswap, `getcap
@@ -1942,7 +1947,7 @@ Checks:
    | **`system-update-cleanup.service` has `Conflicts=shutdown.target`**, so a reboot Apsis enqueues before its unit exits drops cleanup's pending start job and a `Retry`'s link survives | verified | owner, `systemctl cat`, systemd 255.4, 2026-10-01: `Conflicts=shutdown.target` in `[Unit]`. `restart` stays `systemctl reboot --no-block` |
    | `systemctl reboot --no-block` works from inside a unit in `system-update.target` | verified | check 0.3 |
    | `ConditionPathExists=` follows a symlink in the path (`access(2)`), so `!/system-update/apsis-helper` is true exactly while the link points at Apsis's folder | verified | owner, 2026-10-01: `systemd-analyze condition 'ConditionPathExists=/lib/systemd/systemd'` succeeded (`/lib` -> `usr/lib`), and `'ConditionPathExists=!/system-update/apsis-helper'` succeeded with no link present. Check 0.4 shows it on the real unit |
-   | A drop-in in `/etc/systemd/system/<unit>.d/` applies to a unit in `/usr/lib`, and a `ConditionPathExists=` line in it is added to the unit's conditions, not replacing them | **unverified** on this systemd (the one claim still open) | check 0.4c, before the reboot: `systemctl show pop-upgrade-init.service -p ConditionPathExists -p DropInPaths` lists both conditions and the drop-in, and `systemctl cat pop-upgrade-init.service` shows the drop-in loaded (the `show` output's format with two conditions is itself unverified: one line isn't "replaced", bring it back); then 0.4e's skip line naming the drop-in's condition, with the spike ordered after `pop-upgrade-init` so its own condition was true |
+   | A drop-in in `/etc/systemd/system/<unit>.d/` applies to a unit in `/usr/lib`, and a `ConditionPathExists=` line in it is added to the unit's conditions, not replacing them | **verified** (check 0.4, apsis-test, 2026-10-01, systemd 255.4) | `systemctl cat pop-upgrade-init.service` showed the `/usr/lib` unit's `ConditionPathExists=/system-update` and the drop-in's `!/system-update/apsis-helper` both loaded (`DropInPaths=` named the drop-in); in the offline boot, with the link present (the spike was ordered after it, so its own condition was true), the journal has `pop-upgrade-init.service ... was skipped because of an unmet condition check (ConditionPathExists=!/system-update/apsis-helper)` at priority 6. `ConditionPathExists` is not a `systemctl show` property (nothing printed for it); `cat` is the check |
    | The initramfs holds an empty `main/etc/fstab` and a 0-byte `main/cryptroot/crypttab`; cryptswap with a random key isn't carried | verified | owner, `unmkinitramfs` of `initrd.img-7.1.5`, 2026-10-01 |
    | An encrypted-root install's initramfs carries root's crypttab line (so the crypttab comparison matters there) | verified in the hook's source | owner, 2026-10-01: `/usr/share/initramfs-tools/hooks/cryptroot` looks up crypttab entries for the devices of `/` (`get_mnt_devno /`, line 180), the resume device (`get_resume_devno`, line 188) and `/usr` (line 192) |
    | initramfs-tools never embeds the live fstab's content | verified for 7.1.5 | the empty `main/etc/fstab` above |
