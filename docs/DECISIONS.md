@@ -2238,3 +2238,64 @@ For the owner:
   workspace. The new tests were first seen failing as compile errors; three deliberate
   breakages then failed on assertions and were undone: a verification that compares sizes
   only, a check that ignores the modules, and a put-back that doesn't rename.
+
+## 2026-10-01 - 6b: the ESP file set, the previous pair, which tree is checked (owner; follow-up)
+
+The owner listed a real ESP (Pop!_OS 24.04, kernelstub; apsis-test to confirm). It settles the
+open point of the entry above ("the previous kernel isn't in the plan's four files") and
+changes `restore::esp`.
+
+- **Seven files, one list.** `esp::SET` is the only table of ESP files: file, folder, name,
+  required. `BootFile::ALL`, `name`, `esp_path`, `is_required`, the manifest's keys and the
+  backup all read it. Added: `cmdline`, `vmlinuz-previous.efi`, `initrd.img-previous` (the
+  names differ in where "previous" sits; taken as listed). PLAN 6b.6 step 4 has the table.
+- **Optional together.** The previous pair and `Pop_OS-oldkern.conf` are all there or all
+  missing (one kernel installed). The rest is required, `cmdline` included.
+  - **Picked here, not said by the owner: only part of the three fails the backup**
+    (`EspError::PreviousIncomplete`), and a manifest with part of them is refused. So the
+    apply ends `boot-kept` with nothing put back, as for a missing required file. The other
+    reading (back up what's there) would let a put-back write an oldkern entry whose kernel
+    isn't there. In the check, the same state is only reported (below).
+- **The manifest** has seven file keys now, in the list's order. Still version 1: no
+  released Apsis wrote the four-key one, and an old one is refused whole (unknown or missing
+  fields), which counts as no backup.
+- **The check gives more than a version.** `check` returns `Checked { version, previous }`.
+  `previous` is `Absent`, `Good { version }` or `Wrong(CheckFailure)`: the previous pair
+  against `/boot/vmlinuz.old` and `/boot/initrd.img.old`, and that version's modules folder.
+  `Wrong` never fails the check (the current pair still boots): no refusal, no put-back. It's
+  for the journal and the result. The oldkern entry's text isn't read, only that it's there.
+- **Which tree.** `check(esp, root, root_uuid)` always took the root as a path; PLAN 6b.6
+  step 6 now says which: the live system before arming, the restored tree after the boot
+  refresh. PLAN didn't say the first before. **New with it: `Refusal::BootFiles(CheckFailure)`**
+  from `esp::check_before_arming`, for a live ESP whose current pair isn't what `/boot` links
+  to. Rule 10 protects "the kernel the ESP boots" by the running version, which only holds
+  if they agree. PLAN 6b.7 has the row; its dialog lines are the UI slice's. It isn't in
+  `refusal::check` (it reads files, and that one works on text already read).
+- **Never touched:** `loader/entries/Recovery-*`, `EFI/Recovery-*`, `loader/loader.conf`,
+  `loader/random-seed`, `loader/entries.srel`, `EFI/BOOT/`, `EFI/systemd/`. Nothing in the
+  code names them: the list is closed, and the tests hold it (every path of the list is under
+  `EFI/Pop_OS-<root-uuid>/` or is a `loader/entries/Pop_OS-*`; the backup folder holds the
+  seven and the manifest; after a put-back those files have the same inode, mtime and bytes,
+  and the whole ESP tree is what it was).
+- **Space counts both pairs.** `esp_needs(on_esp, restored)` takes `EspSizes { current,
+  previous }`: the growth of each of the four files by itself (a pair that shrinks makes no
+  room for the other), the largest file on the ESP (the put-back's temporary copy), 16 MiB.
+  A missing previous pair is zero bytes on either side. `cmdline` and the entries are in the
+  margin. With the owner's sizes (17,273,344 / 214,307,600 and 17,056,256 / 212,169,876;
+  361M free of 1020M): 231,084,816 bytes needed for a restore to the same kernels or to a
+  rollback of the same sizes, so 147,451,120 bytes of growth fit, and one more refuses.
+  With one kernel on that ESP and two in the snapshot: 460,310,948 needed, which fits in
+  what's free then (the previous pair's bytes are free too).
+- **Re-checked at "Restart now", not stored** (owner; settles "to decide with the helper
+  slice" above): no ESP field in `request.json`. The helper works the needs out again and
+  reads `statvfs` of `/boot/efi`. The core has the two pure functions; reading the sizes is
+  the helper slice's.
+- **Still assumed:** kernelstub writes over the files in place (else the growth term is too
+  small), and it rewrites the previous pair from the `.old` links on a refresh. The
+  kernel-rollback check on apsis-test (check 2) shows both.
+
+- **Verified** with apsis-core's tests (256 unit, all green) and clippy `-D warnings`
+  through the scratch workspace; the workspace run is the owner's. The new tests were first
+  seen failing as compile errors on the missing API. The put-back test for the untouched
+  files was then broken on purpose (a put-back that rewrites `loader/random-seed` with the
+  same bytes) and failed on the assertion; undone.

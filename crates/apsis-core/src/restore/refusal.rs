@@ -11,6 +11,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use super::esp::CheckFailure;
 use super::filter::is_kernel_version;
 use crate::native::Info;
 use crate::settings::Device;
@@ -55,6 +56,9 @@ pub enum Refusal {
         needs: u64,
         free: u64,
     },
+    /// On the live system, the ESP doesn't boot the kernel `/boot` links to
+    /// ([`super::esp::check_before_arming`]).
+    BootFiles(CheckFailure),
 }
 
 /// Why a snapshot can't be read as something to restore.

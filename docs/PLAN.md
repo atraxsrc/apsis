@@ -433,7 +433,8 @@ space parsing and the two space refusals (`apsis_core::restore::space`), the pla
 files: `request.json` (`apsis_core::restore::plan`), `state.json` and `result.json`
 (`apsis_core::restore::state`), with their shared format, version rule and atomic write
 (`apsis_core::restore::file`), the ESP backup with its manifest, the check after the boot
-refresh, the put-back and the ESP space refusal (`apsis_core::restore::esp`). Format detection
+refresh, the put-back and the ESP space refusal (`apsis_core::restore::esp`; follow-up the
+same day: the seven-file set, the previous pair, the check before arming). Format detection
 is 0.4.1's `Info::is_old_format`, unchanged.
 Still to come in the core slice: the apply state machine, the real-rsync temp-tree tests.
 
@@ -450,7 +451,10 @@ so, and never "restores like Timeshift". Marked **experimental** in the README a
   at `/boot/efi`.
 - kernelstub boots the kernel and initrd from **copies** on the ESP
   (`\EFI\Pop_OS-<root-uuid>\vmlinuz.efi`, `initrd.img`; entries `loader/entries/Pop_OS-current.conf`
-  and `Pop_OS-oldkern.conf`). Restoring `/` rolls back `/boot` and `/usr/lib/modules` but not
+  and `Pop_OS-oldkern.conf`). The owner's machine (2026-10-01; apsis-test to confirm) also has
+  `cmdline` there, and the oldkern entry's own pair, `vmlinuz-previous.efi` and
+  `initrd.img-previous`, which are the files `/boot/vmlinuz.old` and `/boot/initrd.img.old`
+  link to (the full set: 6b.6 step 4). Restoring `/` rolls back `/boot` and `/usr/lib/modules` but not
   the ESP, so the ESP kernel can end up with no matching modules. **This is the central risk.**
 - **What snapshots hold under `boot/efi` and `recovery`** (from the code; confirmed on
   apsis-test by check 0.1): the exclude builder gives each non-standard fstab mount point a
@@ -576,7 +580,14 @@ is kept.
 - **Checked again at "Restart now"** (the free space can change while the prompt waits): a
   `statvfs` of `/` (and of a separate `/home` being restored) against the needs recorded in
   `request.json`. Everything is checked **before the
-  restart**. Short: refused with **one line**, and nothing is armed:
+  restart**. **The ESP's space is checked again there too** (owner, 2026-10-01), like the
+  other refusals of 6b.7 and unlike the two lines below: **nothing of it is stored in
+  `request.json`**. What it needs (`esp::esp_needs`: what each of the two kernels and two
+  initrds grows by, a put-back's temporary copy of the largest, 16 MiB) is worked out again
+  from the ESP's files and the snapshot's `/boot`, and the free space is a live `statvfs` of
+  `/boot/efi`. Tested with the owner's real sizes (kernels 17,273,344 and 17,056,256 bytes,
+  initrds 214,307,600 and 212,169,876, a 1020M ESP with 361M free: 220 MiB needed).
+  Short: refused with **one line**, and nothing is armed:
   - "Not enough space on the backup disk for a safety snapshot (needs 14 GB, 9 GB free)."
   - "Not enough space on the system disk to restore (needs 6 GB, 3 GB free)."
 - Order: refusals (6b.7), both dry runs and space, the safety snapshot, write the plan. The
@@ -654,15 +665,35 @@ written by this restore), both fsynced before the step that depends on them.
    Never `--delete-excluded`, `-L` or `--link-dest`. Exit 0 or 24: go on. 23 (some files
    couldn't be written or deleted): go on; the result is "restored with problems" and names
    the log. Anything else: **copy broke** (6b.10).
-4. **ESP backup.** Copy the ESP's `EFI/Pop_OS-<root-uuid>/{vmlinuz.efi,initrd.img}` and
-   `loader/entries/Pop_OS-{current,oldkern}.conf` to `/var/lib/apsis/restore/esp-backup/`
-   (on `/`, protected), fsync, and byte-compare each copy with the original. A copy that
-   doesn't match: stop before touching the boot files, and go to the **boot files failed**
-   path below with nothing to put back. Each file's size and SHA-256 go into
-   `esp-backup/manifest.json`, written last: a backup without a manifest isn't one, and a
-   put-back verifies the backup against it before it writes anything to the ESP. The oldkern
-   entry may be missing (one kernel installed); the other three must be there. This happens before `update-initramfs`, because Pop's
-   post-update hook runs kernelstub itself.
+4. **ESP backup.** Copy the ESP file set to `/var/lib/apsis/restore/esp-backup/` (on `/`,
+   protected), fsync, and byte-compare each copy with the original. **The file set** is one
+   list in one place (`apsis_core::restore::esp`, `SET`): the only files Apsis reads, backs
+   up or writes on the ESP. Names as on the owner's machine (Pop!_OS 24.04, kernelstub;
+   2026-10-01):
+
+   | file | where | |
+   |---|---|---|
+   | `vmlinuz.efi` | `EFI/Pop_OS-<root-uuid>/` | required |
+   | `initrd.img` | `EFI/Pop_OS-<root-uuid>/` | required |
+   | `cmdline` | `EFI/Pop_OS-<root-uuid>/` | required |
+   | `Pop_OS-current.conf` | `loader/entries/` | required |
+   | `vmlinuz-previous.efi` | `EFI/Pop_OS-<root-uuid>/` | optional |
+   | `initrd.img-previous` | `EFI/Pop_OS-<root-uuid>/` | optional |
+   | `Pop_OS-oldkern.conf` | `loader/entries/` | optional |
+
+   (`vmlinuz-previous.efi`, but `initrd.img-previous`.) The three optional files are
+   **optional together**: all there, or none (one kernel installed). A required file that's
+   missing, or only part of the optional three, fails the backup.
+   **Never backed up and never written:** `loader/entries/Recovery-*` (and the recovery's own
+   `EFI/Recovery-*` folder), `loader/loader.conf`, `loader/random-seed`,
+   `loader/entries.srel`, `EFI/BOOT/`, `EFI/systemd/`. A test checks that a put-back leaves
+   them as they were (same files, not rewritten ones).
+   A copy that doesn't match, or a backup that fails: stop before touching the boot files,
+   and go to the **boot files failed** path below with nothing to put back. Each file's size
+   and SHA-256 go into `esp-backup/manifest.json`, written last: a backup without a manifest
+   isn't one, and a put-back verifies the backup against it before it writes anything to the
+   ESP. This happens before `update-initramfs`, because Pop's post-update hook runs
+   kernelstub itself.
 5. **Boot files**, on the restored `/`. No chroot is needed: the running system *is* the target,
    and the tools are the restored system's own:
    ```
@@ -674,8 +705,18 @@ written by this restore), both fsynced before the step that depends on them.
 6. **Check, byte for byte**: the ESP's `vmlinuz.efi` and `initrd.img` equal the files
    `/boot/vmlinuz` and `/boot/initrd.img` point to; `/usr/lib/modules/<that version>/` exists;
    `Pop_OS-current.conf` exists. Both commands exited 0.
+   - **Which tree** (owner, 2026-10-01): the check (`esp::check(esp, root, root_uuid)`) runs
+     twice, against two trees. **Before arming, against the live system** (`/` and its
+     `/boot/efi`): a current pair that fails refuses the restore (6b.7), since rule 10 only
+     protects the kernel the ESP boots if that's the one `/boot` links to. **Here, in the
+     apply, against the restored tree** (`/` after pass 1 and the boot refresh of step 5).
+   - **The previous pair**: if `vmlinuz-previous.efi` and `initrd.img-previous` are on the
+     ESP, they must equal the files `/boot/vmlinuz.old` and `/boot/initrd.img.old` point to,
+     and that version's modules folder must exist. A mismatch there (or only part of the
+     optional three) is **reported, never a failure**: not a refusal before arming, and no
+     put-back here. The current pair still boots. It goes to the journal and the result.
    - **Passes:** go on.
-   - **Fails** (or a command failed): **boot files failed**. Put the four backed-up files back
+   - **Fails** (or a command failed): **boot files failed**. Put the backed-up files back
      on the ESP (each written to a temporary name in the same folder, fsynced, renamed), then
      byte-compare them with the backup. The protected kernel stays (step 7 is skipped), so the
      ESP boots the kernel it booted before, whose modules and `/boot` files rule 10 kept. Then
@@ -732,7 +773,8 @@ line on what to do, and Close (wording in 6b.8's string table). The lines below 
 | snapshot's `/boot/vmlinuz` has no `/usr/lib/modules/<version>/` in the snapshot, or the snapshot has no `update-initramfs` or `kernelstub` | "This snapshot's kernel files are incomplete, so it can't be restored safely." |
 | `/system-update` already exists (a pending system update) | "A system update is waiting for a restart. Restart first, then restore." |
 | not enough space (6b.4) | the space line |
-| the ESP is short for the boot refresh and a put-back (`esp::esp_needs`; added 2026-10-01, core) | wording in the UI slice |
+| the ESP is short for the boot refresh and a put-back (`esp::esp_needs`; added 2026-10-01, core). Not in `request.json`: re-checked at "Restart now" from a live `statvfs` (6b.4) | wording in the UI slice |
+| on the live system, the ESP's `vmlinuz.efi` and `initrd.img` aren't the files `/boot/vmlinuz` and `/boot/initrd.img` point to, or that kernel has no modules, or there's no current entry (`esp::check_before_arming`, 6b.6 step 6; added 2026-10-01, core). The previous pair never refuses | wording in the UI slice |
 | Timeshift's lock is held; another Apsis job runs | the existing Busy wording |
 
 The checks are pure functions on text that has already been read (mountinfo, lsblk JSON,
@@ -1146,7 +1188,12 @@ No root (run by Claude):
 - **Home detection** from `exclude.list` (Apsis v2 with and without `+ /home/**`, Timeshift
   per-user lines, `/root` only).
 - **Space**: parsing `--stats`; both thresholds; the re-check at restart; a separate `/home`
-  being restored is checked on its own filesystem.
+  being restored is checked on its own filesystem; the ESP's needs with the owner's real
+  sizes and free space.
+- **ESP**: the file set is the seven of 6b.6 step 4 and nothing else; the optional three
+  together or not at all; the check against a live and a restored tree, with a previous
+  pair that's reported and never fails it; a put-back leaves the recovery entry,
+  `loader.conf`, the random seed, `entries.srel`, `EFI/BOOT` and `EFI/systemd` alone.
 - **Apply state machine** (fake runner and fake ESP, temp root): never started does not count
   and removes the link (also for a separate `/home` that's missing or has another UUID, with
   rsync never run); copy broke counts and keeps it; the third break gives up with `failed`;

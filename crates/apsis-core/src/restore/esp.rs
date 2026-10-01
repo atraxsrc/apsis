@@ -5,8 +5,8 @@
 //!
 //! kernelstub boots the kernel and initrd from copies on the ESP. After the copy, the boot
 //! refresh (`update-initramfs`, `kernelstub`) rewrites them for the restored kernel. Before
-//! that the four files are copied to `esp-backup/` in the state folder, on `/` and protected
-//! from the restore. If the refreshed ESP doesn't check out, they're put back, and the ESP
+//! that the files of [`SET`] are copied to `esp-backup/` in the state folder, on `/` and
+//! protected from the restore. If the refreshed ESP doesn't check out, they're put back, and the ESP
 //! boots the kernel it booted before, whose `/boot` files and modules the filter's rule 10
 //! kept. Everything here takes the ESP and the root as paths, so it's tested on temp trees.
 
@@ -37,52 +37,138 @@ const TEMP_SUFFIX: &str = ".apsis-tmp";
 /// FAT rounds each file up to its clusters.
 const ESP_MARGIN: u64 = 16 << 20;
 
-/// The files of the ESP that the boot refresh rewrites (PLAN 6b.6 step 4).
+/// The files of the ESP that the boot refresh rewrites (PLAN 6b.6 step 4), in [`SET`]'s
+/// order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootFile {
-    /// `EFI/Pop_OS-<root-uuid>/vmlinuz.efi`: the kernel the firmware starts.
+    /// The kernel the firmware starts.
     Kernel,
-    /// `EFI/Pop_OS-<root-uuid>/initrd.img`.
     Initrd,
-    /// `loader/entries/Pop_OS-current.conf`.
+    /// The kernel's command line, as kernelstub last wrote it.
+    Cmdline,
     CurrentEntry,
-    /// `loader/entries/Pop_OS-oldkern.conf`. Not there on a machine with one kernel.
+    /// The kernel the oldkern entry starts.
+    PreviousKernel,
+    PreviousInitrd,
     OldkernEntry,
 }
 
+/// A folder of the ESP that holds boot files.
+#[derive(Clone, Copy)]
+enum Folder {
+    /// `EFI/Pop_OS-<root-uuid>/`.
+    Kernels,
+    /// `loader/entries/`.
+    Entries,
+}
+
+/// One row of [`SET`].
+struct Row {
+    file: BootFile,
+    folder: Folder,
+    /// On the ESP, in the backup, and its key in the manifest.
+    name: &'static str,
+    /// Whether a backup needs it. The others are there together or not at all.
+    required: bool,
+}
+
+const fn row(file: BootFile, folder: Folder, name: &'static str, required: bool) -> Row {
+    Row {
+        file,
+        folder,
+        name,
+        required,
+    }
+}
+
+/// **The ESP's file set: the only files Apsis reads, backs up or writes there.** Names as
+/// kernelstub writes them on Pop!_OS 24.04 (`vmlinuz-previous.efi`, but
+/// `initrd.img-previous`). The previous pair and the oldkern entry aren't there on a machine
+/// with one kernel installed.
+///
+/// Never here (PLAN 6b.6 step 4): `loader/entries/Recovery-*`, `loader/loader.conf`,
+/// `loader/random-seed`, `loader/entries.srel`, `EFI/BOOT/`, `EFI/systemd/`.
+const SET: [Row; BootFile::COUNT] = [
+    row(BootFile::Kernel, Folder::Kernels, "vmlinuz.efi", true),
+    row(BootFile::Initrd, Folder::Kernels, "initrd.img", true),
+    row(BootFile::Cmdline, Folder::Kernels, "cmdline", true),
+    row(
+        BootFile::CurrentEntry,
+        Folder::Entries,
+        "Pop_OS-current.conf",
+        true,
+    ),
+    row(
+        BootFile::PreviousKernel,
+        Folder::Kernels,
+        "vmlinuz-previous.efi",
+        false,
+    ),
+    row(
+        BootFile::PreviousInitrd,
+        Folder::Kernels,
+        "initrd.img-previous",
+        false,
+    ),
+    row(
+        BootFile::OldkernEntry,
+        Folder::Entries,
+        "Pop_OS-oldkern.conf",
+        false,
+    ),
+];
+
 impl BootFile {
-    pub const ALL: [Self; 4] = [
-        Self::Kernel,
-        Self::Initrd,
-        Self::CurrentEntry,
-        Self::OldkernEntry,
-    ];
+    pub const COUNT: usize = 7;
+
+    /// Every file of [`SET`], in its order.
+    pub const ALL: [Self; Self::COUNT] = {
+        let mut all = [Self::Kernel; Self::COUNT];
+        let mut index = 0;
+        while index < Self::COUNT {
+            all[index] = SET[index].file;
+            index += 1;
+        }
+        all
+    };
+
+    fn row(self) -> &'static Row {
+        &SET[self as usize]
+    }
 
     /// Its file name: on the ESP, in the backup, and its key in the manifest.
     #[must_use]
     pub fn name(self) -> &'static str {
-        match self {
-            Self::Kernel => "vmlinuz.efi",
-            Self::Initrd => "initrd.img",
-            Self::CurrentEntry => "Pop_OS-current.conf",
-            Self::OldkernEntry => "Pop_OS-oldkern.conf",
-        }
+        self.row().name
     }
 
     /// Where it is, from the ESP's top folder.
     #[must_use]
     pub fn esp_path(self, root_uuid: &str) -> PathBuf {
-        let folder = match self {
-            Self::Kernel | Self::Initrd => format!("EFI/Pop_OS-{root_uuid}"),
-            Self::CurrentEntry | Self::OldkernEntry => "loader/entries".to_owned(),
+        let folder = match self.row().folder {
+            Folder::Kernels => format!("EFI/Pop_OS-{root_uuid}"),
+            Folder::Entries => "loader/entries".to_owned(),
         };
         Path::new(&folder).join(self.name())
     }
 
-    /// Whether a backup needs it. Only the oldkern entry may be missing.
+    /// Whether a backup needs it. The previous pair and the oldkern entry may be missing,
+    /// all three together.
     fn is_required(self) -> bool {
-        self != Self::OldkernEntry
+        self.row().required
     }
+}
+
+/// Whether the optional files are there together or not at all: `found` is in
+/// [`BootFile::ALL`]'s order.
+fn previous_is_whole(found: [bool; BootFile::COUNT]) -> bool {
+    let mut optional = BootFile::ALL
+        .into_iter()
+        .zip(found)
+        .filter(|(file, _)| !file.is_required())
+        .map(|(_, found)| found);
+    let first = optional.next();
+    optional.all(|found| Some(found) == first)
 }
 
 /// Why the backup, its verification or the put-back failed.
@@ -93,6 +179,9 @@ pub enum EspError {
     /// A boot file the backup needs isn't on the ESP.
     #[error("the ESP has no {0}")]
     Missing(&'static str),
+    /// Only some of the previous pair and the oldkern entry are on the ESP.
+    #[error("the ESP has only part of the previous kernel's files")]
+    PreviousIncomplete,
     /// A copy isn't what it was copied from, or a backup file isn't what the manifest says.
     #[error("{0} doesn't match")]
     Mismatch(&'static str),
@@ -126,36 +215,31 @@ pub struct Manifest {
     /// The root filesystem the ESP folder is named after.
     pub root_uuid: String,
     /// In [`BootFile::ALL`]'s order. `None`: it wasn't on the ESP.
-    pub files: [Option<Entry>; 4],
+    pub files: [Option<Entry>; BootFile::COUNT],
 }
 
 impl Manifest {
     #[must_use]
     pub fn entry(&self, file: BootFile) -> Option<&Entry> {
-        let index = BootFile::ALL.iter().position(|&other| other == file)?;
-        self.files[index].as_ref()
+        self.files[file as usize].as_ref()
     }
 
     /// # Errors
     ///
     /// [`FileError::Invalid`] if `text` isn't a manifest this Apsis wrote, whole and in range.
     pub fn parse(text: &str) -> Result<Self, FileError> {
-        let keys = [
-            "root_uuid",
-            BootFile::Kernel.name(),
-            BootFile::Initrd.name(),
-            BootFile::CurrentEntry.name(),
-            BootFile::OldkernEntry.name(),
-        ];
+        let keys: Vec<_> = ["root_uuid"]
+            .into_iter()
+            .chain(BootFile::ALL.map(BootFile::name))
+            .collect();
         let map = file::object(text, &keys)?;
+        let mut files = [const { None }; BootFile::COUNT];
+        for (file, slot) in BootFile::ALL.into_iter().zip(&mut files) {
+            *slot = entry(&map, file)?;
+        }
         let manifest = Self {
             root_uuid: file::text(&map, "root_uuid")?.to_owned(),
-            files: [
-                entry(&map, BootFile::Kernel)?,
-                entry(&map, BootFile::Initrd)?,
-                entry(&map, BootFile::CurrentEntry)?,
-                entry(&map, BootFile::OldkernEntry)?,
-            ],
+            files,
         };
         manifest.validate()?;
         Ok(manifest)
@@ -216,6 +300,17 @@ impl Manifest {
                 _ => {}
             }
         }
+        if !previous_is_whole(self.files.each_ref().map(Option::is_some)) {
+            let names: Vec<_> = BootFile::ALL
+                .into_iter()
+                .filter(|file| !file.is_required())
+                .map(|file| format!("{:?}", file.name()))
+                .collect();
+            return Err(FileError::Invalid(format!(
+                "{} aren't all there or all null",
+                names.join(", ")
+            )));
+        }
         Ok(())
     }
 }
@@ -266,7 +361,7 @@ pub fn back_up(esp: &Path, state_dir: &Path, root_uuid: &str) -> Result<Manifest
     let dir = state_dir.join(BACKUP_DIR);
     DirBuilder::new().mode(0o700).create(&dir)?;
     let made = (|| {
-        let mut files = [None, None, None, None];
+        let mut files = [const { None }; BootFile::COUNT];
         for (file, slot) in BootFile::ALL.into_iter().zip(&mut files) {
             let name = file.name();
             let original = esp.join(file.esp_path(root_uuid));
@@ -287,6 +382,9 @@ pub fn back_up(esp: &Path, state_dir: &Path, root_uuid: &str) -> Result<Manifest
                 return Err(EspError::Mismatch(name));
             }
             *slot = Some(entry);
+        }
+        if !previous_is_whole(files.each_ref().map(Option::is_some)) {
+            return Err(EspError::PreviousIncomplete);
         }
         File::open(&dir)?.sync_all()?;
         let manifest = Manifest {
@@ -397,34 +495,113 @@ pub fn remove(state_dir: &Path) -> io::Result<()> {
     }
 }
 
-/// What the check after the boot refresh found wrong (PLAN 6b.6 step 6).
+/// What the check found wrong with a kernel pair on the ESP (PLAN 6b.6 step 6): the current
+/// pair against `/boot/vmlinuz` and `/boot/initrd.img`, or the previous pair against
+/// `/boot/vmlinuz.old` and `/boot/initrd.img.old`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckFailure {
-    /// `/boot/vmlinuz` isn't a link to a `vmlinuz-<version>`.
+    /// The pair's kernel link in `/boot` isn't a link to a `vmlinuz-<version>`.
     NoKernelLink,
-    /// The ESP's `vmlinuz.efi` isn't the file `/boot/vmlinuz` points to.
+    /// The ESP's kernel isn't the file the kernel link points to.
     KernelDiffers,
-    /// The ESP's `initrd.img` isn't the file `/boot/initrd.img` points to.
+    /// The ESP's initrd isn't the file the initrd link points to.
     InitrdDiffers,
-    /// There's no `/usr/lib/modules/<version>/` for the kernel the ESP now boots.
+    /// There's no `/usr/lib/modules/<version>/` for the pair's kernel.
     NoModules { version: String },
     /// There's no `loader/entries/Pop_OS-current.conf`.
     NoEntry,
+    /// Only some of the previous pair and the oldkern entry are on the ESP.
+    PreviousIncomplete,
 }
 
-/// The check after the boot refresh: the ESP's kernel and initrd are, byte for byte, the
-/// files `root`'s `/boot/vmlinuz` and `/boot/initrd.img` point to, that kernel's modules are
-/// in `root`, and the current entry exists. Gives the kernel's version. That both commands
-/// exited 0 is the caller's to check.
+/// The previous pair on the ESP, as [`check`] found it. Never a failure of the check: the
+/// current pair is what boots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Previous {
+    /// One kernel installed: no previous pair, no oldkern entry.
+    Absent,
+    /// It's what the `.old` links point to, and its modules are there.
+    Good { version: String },
+    /// To report (the journal, `result.json`'s message), not to refuse or put back for.
+    Wrong(CheckFailure),
+}
+
+/// What a passed [`check`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checked {
+    /// The kernel the ESP boots.
+    pub version: String,
+    pub previous: Previous,
+}
+
+/// The ESP check: the ESP's kernel and initrd are, byte for byte, the files `root`'s
+/// `/boot/vmlinuz` and `/boot/initrd.img` point to, that kernel's modules are in `root`, and
+/// the current entry exists. If the previous pair is on the ESP, it's checked the same way
+/// against `/boot/vmlinuz.old` and `/boot/initrd.img.old`, and what's wrong with it is
+/// reported in [`Checked::previous`].
+///
+/// `root` is the tree the ESP is checked against (PLAN 6b.6): the live system before arming
+/// ([`check_before_arming`]), and the restored tree after the boot refresh in the apply. In
+/// the apply, that both commands exited 0 is the caller's to check.
 ///
 /// # Errors
 ///
-/// The first thing that's wrong. A file that can't be read counts as one that differs.
-pub fn check(esp: &Path, root: &Path, root_uuid: &str) -> Result<String, CheckFailure> {
+/// The first thing that's wrong with the current pair. A file that can't be read counts as
+/// one that differs.
+pub fn check(esp: &Path, root: &Path, root_uuid: &str) -> Result<Checked, CheckFailure> {
+    let version = check_pair(esp, root, root_uuid, "", BootFile::Kernel, BootFile::Initrd)?;
+    let on_esp = |file: BootFile| {
+        fs::symlink_metadata(esp.join(file.esp_path(root_uuid))).is_ok_and(|meta| meta.is_file())
+    };
+    if !on_esp(BootFile::CurrentEntry) {
+        return Err(CheckFailure::NoEntry);
+    }
+    let found = BootFile::ALL.map(on_esp);
+    let previous = if !previous_is_whole(found) {
+        Previous::Wrong(CheckFailure::PreviousIncomplete)
+    } else if !found[BootFile::PreviousKernel as usize] {
+        Previous::Absent
+    } else {
+        match check_pair(
+            esp,
+            root,
+            root_uuid,
+            ".old",
+            BootFile::PreviousKernel,
+            BootFile::PreviousInitrd,
+        ) {
+            Ok(version) => Previous::Good { version },
+            Err(failure) => Previous::Wrong(failure),
+        }
+    };
+    Ok(Checked { version, previous })
+}
+
+/// [`check`] against the live system, before arming (PLAN 6b.7): rule 10 keeps the kernel
+/// the ESP boots, so the ESP must boot what `/boot` links to.
+///
+/// # Errors
+///
+/// [`Refusal::BootFiles`] for a current pair that fails the check. The previous pair never
+/// refuses.
+pub fn check_before_arming(esp: &Path, root: &Path, root_uuid: &str) -> Result<Checked, Refusal> {
+    check(esp, root, root_uuid).map_err(Refusal::BootFiles)
+}
+
+/// One kernel pair of the ESP against `root`'s `/boot/vmlinuz<link_suffix>` and
+/// `/boot/initrd.img<link_suffix>`, and its modules. Gives the kernel's version.
+fn check_pair(
+    esp: &Path,
+    root: &Path,
+    root_uuid: &str,
+    link_suffix: &str,
+    kernel: BootFile,
+    initrd: BootFile,
+) -> Result<String, CheckFailure> {
     let boot = root.join("boot");
     // Only the link's last part is used, so the file is looked up in `root`'s own `boot`.
     let linked = |name: &str| {
-        let target = fs::read_link(boot.join(name)).ok()?;
+        let target = fs::read_link(boot.join(format!("{name}{link_suffix}"))).ok()?;
         let file = target.file_name()?.to_str()?.to_owned();
         let version = file.strip_prefix(name)?.strip_prefix('-')?;
         is_kernel_version(version).then(|| (boot.join(&file), version.to_owned()))
@@ -433,20 +610,16 @@ pub fn check(esp: &Path, root: &Path, root_uuid: &str) -> Result<String, CheckFa
         same_bytes(&esp.join(file.esp_path(root_uuid)), with).unwrap_or(false)
     };
 
-    let (kernel, version) = linked("vmlinuz").ok_or(CheckFailure::NoKernelLink)?;
-    if !same(BootFile::Kernel, &kernel) {
+    let (kernel_file, version) = linked("vmlinuz").ok_or(CheckFailure::NoKernelLink)?;
+    if !same(kernel, &kernel_file) {
         return Err(CheckFailure::KernelDiffers);
     }
-    if !linked("initrd.img").is_some_and(|(initrd, _)| same(BootFile::Initrd, &initrd)) {
+    if !linked("initrd.img").is_some_and(|(initrd_file, _)| same(initrd, &initrd_file)) {
         return Err(CheckFailure::InitrdDiffers);
     }
     let modules = root.join("usr/lib/modules").join(&version);
     if !fs::symlink_metadata(modules).is_ok_and(|meta| meta.is_dir()) {
         return Err(CheckFailure::NoModules { version });
-    }
-    let entry = esp.join(BootFile::CurrentEntry.esp_path(root_uuid));
-    if !fs::symlink_metadata(entry).is_ok_and(|meta| meta.is_file()) {
-        return Err(CheckFailure::NoEntry);
     }
     Ok(version)
 }
@@ -458,18 +631,45 @@ pub struct BootSizes {
     pub initrd: u64,
 }
 
-/// What the ESP must have free before a restore: `on_esp` is what it boots now, `restored`
-/// the snapshot's `/boot/vmlinuz` and `/boot/initrd.img`. That's what each file grows by
-/// when the boot refresh writes the restored one over it, room for a put-back's temporary
-/// copy of the largest file, and a margin.
+/// The sizes of the kernel pairs: on the ESP, or the ones a boot refresh would write there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EspSizes {
+    pub current: BootSizes,
+    /// `None`: one kernel installed.
+    pub previous: Option<BootSizes>,
+}
+
+/// What the ESP must have free before a restore: `on_esp` is what's there now, `restored`
+/// the snapshot's `/boot/vmlinuz` and `/boot/initrd.img` (current) and its `.old` links
+/// (previous). That's what each of the four files grows by when the boot refresh writes the
+/// restored one over it, room for a put-back's temporary copy of the largest file, and a
+/// margin.
+///
+/// Nothing of this is kept in `request.json`: the needs and the free space (a `statvfs` of
+/// the ESP) are both read live, when preparing and again at "Restart now" (PLAN 6b.4).
 #[must_use]
-pub fn esp_needs(on_esp: BootSizes, restored: BootSizes) -> u64 {
-    restored
-        .kernel
-        .saturating_sub(on_esp.kernel)
-        .saturating_add(restored.initrd.saturating_sub(on_esp.initrd))
-        .saturating_add(on_esp.kernel.max(on_esp.initrd))
-        .saturating_add(ESP_MARGIN)
+pub fn esp_needs(on_esp: EspSizes, restored: EspSizes) -> u64 {
+    let none = BootSizes {
+        kernel: 0,
+        initrd: 0,
+    };
+    let pairs = [
+        (on_esp.current, restored.current),
+        (
+            on_esp.previous.unwrap_or(none),
+            restored.previous.unwrap_or(none),
+        ),
+    ];
+    let growth = pairs.iter().fold(0_u64, |sum, (old, new)| {
+        sum.saturating_add(new.kernel.saturating_sub(old.kernel))
+            .saturating_add(new.initrd.saturating_sub(old.initrd))
+    });
+    let largest = pairs
+        .iter()
+        .map(|(old, _)| old.kernel.max(old.initrd))
+        .max()
+        .unwrap_or(0);
+    growth.saturating_add(largest).saturating_add(ESP_MARGIN)
 }
 
 /// # Errors
@@ -560,7 +760,7 @@ fn read_full(file: &mut File, buffer: &mut [u8]) -> io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::super::file::tests::temp_dir;
     use super::*;
@@ -568,6 +768,25 @@ mod tests {
     const UUID: &str = "11111111-2222-3333-4444-555555555555";
     const NEW: &str = "6.9.3-76060903-generic";
     const OLD: &str = "6.8.0-76060800-generic";
+    const OLDER: &str = "6.6.10-76060610-generic";
+
+    /// The previous kernel's two files and its entry: there together or not at all.
+    const PREVIOUS: [BootFile; 3] = [
+        BootFile::PreviousKernel,
+        BootFile::PreviousInitrd,
+        BootFile::OldkernEntry,
+    ];
+
+    /// What else a Pop!_OS ESP holds. Never backed up, never written.
+    const BYSTANDERS: [&str; 7] = [
+        "EFI/BOOT/BOOTX64.EFI",
+        "EFI/systemd/systemd-bootx64.efi",
+        "EFI/Recovery-ABCD-1234/vmlinuz.efi",
+        "loader/entries/Recovery-ABCD-1234.conf",
+        "loader/loader.conf",
+        "loader/random-seed",
+        "loader/entries.srel",
+    ];
 
     /// A machine as apsis-test: the ESP boots copies of the kernel and initrd, and `/boot`
     /// links to the files they were copied from.
@@ -594,21 +813,70 @@ mod tests {
             fs::create_dir_all(self.root.join("usr/lib/modules").join(version)).unwrap();
         }
 
-        /// `/boot/vmlinuz` and `/boot/initrd.img` point to `version`.
-        fn link_kernel(&self, version: &str) {
+        /// `/boot/vmlinuz<suffix>` and `/boot/initrd.img<suffix>` point to `version`.
+        fn link(&self, suffix: &str, version: &str) {
             let boot = self.root.join("boot");
             for name in ["vmlinuz", "initrd.img"] {
-                let _ = fs::remove_file(boot.join(name));
-                std::os::unix::fs::symlink(format!("{name}-{version}"), boot.join(name)).unwrap();
+                let link = boot.join(format!("{name}{suffix}"));
+                let _ = fs::remove_file(&link);
+                std::os::unix::fs::symlink(format!("{name}-{version}"), link).unwrap();
             }
+        }
+
+        /// `/boot/vmlinuz` and `/boot/initrd.img` point to `version`.
+        fn link_kernel(&self, version: &str) {
+            self.link("", version);
+        }
+
+        /// `/boot/vmlinuz.old` and `/boot/initrd.img.old` point to `version`.
+        fn link_previous(&self, version: &str) {
+            self.link(".old", version);
         }
 
         /// What kernelstub does: the linked kernel and initrd copied to the ESP.
         fn kernelstub(&self, version: &str) {
             fs::write(self.esp_file(BootFile::Kernel), kernel(version)).unwrap();
             fs::write(self.esp_file(BootFile::Initrd), initrd(version)).unwrap();
+            fs::write(self.esp_file(BootFile::Cmdline), cmdline(version)).unwrap();
             fs::write(self.esp_file(BootFile::CurrentEntry), entry(version)).unwrap();
         }
+
+        /// And for the `.old` links: the previous pair and the oldkern entry.
+        fn kernelstub_previous(&self, version: &str) {
+            fs::write(self.esp_file(BootFile::PreviousKernel), kernel(version)).unwrap();
+            fs::write(self.esp_file(BootFile::PreviousInitrd), initrd(version)).unwrap();
+            fs::write(self.esp_file(BootFile::OldkernEntry), entry(version)).unwrap();
+        }
+
+        /// A machine with one kernel installed: no previous pair, no oldkern entry.
+        fn one_kernel(&self) {
+            for file in PREVIOUS {
+                fs::remove_file(self.esp_file(file)).unwrap();
+            }
+        }
+
+        /// Every file on the ESP, from its top folder, with what it holds.
+        fn esp_tree(&self) -> Vec<(String, String)> {
+            fn walk(top: &Path, dir: &Path, found: &mut Vec<(String, String)>) {
+                for entry in fs::read_dir(dir).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        walk(top, &path, found);
+                    } else {
+                        let name = path.strip_prefix(top).unwrap().to_str().unwrap();
+                        found.push((name.to_owned(), fs::read_to_string(&path).unwrap()));
+                    }
+                }
+            }
+            let mut found = Vec::new();
+            walk(&self.esp, &self.esp, &mut found);
+            found.sort();
+            found
+        }
+    }
+
+    fn cmdline(version: &str) -> String {
+        format!("root=UUID={UUID} ro quiet splash # {version}\n")
     }
 
     fn kernel(version: &str) -> String {
@@ -623,7 +891,7 @@ mod tests {
         format!("title Pop!_OS\nlinux /EFI/Pop_OS-{UUID}/vmlinuz.efi\n# {version}\n")
     }
 
-    /// Running `NEW`, booted from the ESP, with an oldkern entry.
+    /// Running `NEW`, booted from the ESP, with `OLD` as the previous kernel.
     fn lab(name: &str) -> Lab {
         let dir = temp_dir(name);
         let lab = Lab {
@@ -636,10 +904,30 @@ mod tests {
         fs::create_dir_all(lab.root.join("boot")).unwrap();
         fs::create_dir_all(&lab.state).unwrap();
         lab.install_kernel(NEW);
+        lab.install_kernel(OLD);
         lab.link_kernel(NEW);
+        lab.link_previous(OLD);
         lab.kernelstub(NEW);
-        fs::write(lab.esp_file(BootFile::OldkernEntry), entry("oldkern")).unwrap();
+        lab.kernelstub_previous(OLD);
+        for path in BYSTANDERS {
+            let path = lab.esp.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, format!("not ours: {}\n", path.display())).unwrap();
+        }
         lab
+    }
+
+    fn checked(version: &str, previous: Previous) -> Result<Checked, CheckFailure> {
+        Ok(Checked {
+            version: version.to_owned(),
+            previous,
+        })
+    }
+
+    fn good(version: &str) -> Previous {
+        Previous::Good {
+            version: version.to_owned(),
+        }
     }
 
     fn read(path: PathBuf) -> String {
@@ -647,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn the_boot_files_are_the_four_of_the_plan() {
+    fn the_boot_files_are_the_seven_of_the_plan() {
         let paths: Vec<_> = BootFile::ALL
             .iter()
             .map(|file| file.esp_path(UUID).to_str().unwrap().to_owned())
@@ -657,15 +945,49 @@ mod tests {
             [
                 "EFI/Pop_OS-11111111-2222-3333-4444-555555555555/vmlinuz.efi",
                 "EFI/Pop_OS-11111111-2222-3333-4444-555555555555/initrd.img",
+                "EFI/Pop_OS-11111111-2222-3333-4444-555555555555/cmdline",
                 "loader/entries/Pop_OS-current.conf",
+                "EFI/Pop_OS-11111111-2222-3333-4444-555555555555/vmlinuz-previous.efi",
+                "EFI/Pop_OS-11111111-2222-3333-4444-555555555555/initrd.img-previous",
                 "loader/entries/Pop_OS-oldkern.conf",
             ]
         );
     }
 
+    /// The list is one table, looked up by the file: each row is its own file's.
     #[test]
-    fn a_backup_copies_the_four_files_into_the_state_folder() {
+    fn each_boot_file_is_its_own_row_of_the_list() {
+        assert_eq!(BootFile::ALL.len(), BootFile::COUNT);
+        for (index, file) in BootFile::ALL.into_iter().enumerate() {
+            assert_eq!(file as usize, index, "{file:?}");
+        }
+        let optional: Vec<_> = BootFile::ALL
+            .into_iter()
+            .filter(|file| !file.is_required())
+            .collect();
+        assert_eq!(optional, PREVIOUS);
+    }
+
+    /// PLAN 6b.6 step 4: the recovery entry and its folder, the loader's own files and the
+    /// other loaders are never in the list.
+    #[test]
+    fn nothing_else_on_the_esp_is_in_the_list() {
+        for file in BootFile::ALL {
+            let path = file.esp_path(UUID);
+            let path = path.to_str().unwrap();
+            assert!(
+                path.starts_with(&format!("EFI/Pop_OS-{UUID}/"))
+                    || path.starts_with("loader/entries/Pop_OS-"),
+                "{path}"
+            );
+            assert!(!BYSTANDERS.contains(&path), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_backup_copies_the_seven_files_into_the_state_folder() {
         let lab = lab("esp-backup");
+        let before = lab.esp_tree();
         back_up(&lab.esp, &lab.state, UUID).unwrap();
         for file in BootFile::ALL {
             assert_eq!(
@@ -674,7 +996,25 @@ mod tests {
                 "{file:?}"
             );
         }
-        assert!(lab.state.join("esp-backup/manifest.json").is_file());
+        let mut names: Vec<_> = fs::read_dir(lab.state.join(BACKUP_DIR))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "Pop_OS-current.conf",
+                "Pop_OS-oldkern.conf",
+                "cmdline",
+                "initrd.img",
+                "initrd.img-previous",
+                "manifest.json",
+                "vmlinuz-previous.efi",
+                "vmlinuz.efi",
+            ]
+        );
+        assert_eq!(lab.esp_tree(), before);
     }
 
     #[test]
@@ -708,7 +1048,7 @@ mod tests {
         };
         let manifest = Manifest {
             root_uuid: UUID.to_owned(),
-            files: [entry(1), entry(2), entry(3), None],
+            files: [entry(1), entry(2), entry(3), entry(4), None, None, None],
         };
         let hash = "ab".repeat(32);
         assert_eq!(
@@ -725,10 +1065,16 @@ mod tests {
     "size": 2,
     "sha256": "{hash}"
   }},
-  "Pop_OS-current.conf": {{
+  "cmdline": {{
     "size": 3,
     "sha256": "{hash}"
   }},
+  "Pop_OS-current.conf": {{
+    "size": 4,
+    "sha256": "{hash}"
+  }},
+  "vmlinuz-previous.efi": null,
+  "initrd.img-previous": null,
   "Pop_OS-oldkern.conf": null
 }}
 "#
@@ -738,6 +1084,43 @@ mod tests {
             Manifest::parse(&manifest.to_text().unwrap()).unwrap(),
             manifest
         );
+        let two_kernels = Manifest {
+            files: [1, 2, 3, 4, 5, 6, 7].map(entry),
+            ..manifest
+        };
+        assert_eq!(
+            Manifest::parse(&two_kernels.to_text().unwrap()).unwrap(),
+            two_kernels
+        );
+    }
+
+    /// The previous pair and the oldkern entry come and go together.
+    #[test]
+    fn a_manifest_with_part_of_the_previous_kernel_is_refused() {
+        let entry = Some(Entry {
+            size: 1,
+            sha256: "ab".repeat(32),
+        });
+        let some = || entry.clone();
+        for previous in [
+            [some(), None, None],
+            [some(), some(), None],
+            [None, None, some()],
+        ] {
+            let [kernel, initrd, oldkern] = previous;
+            let manifest = Manifest {
+                root_uuid: UUID.to_owned(),
+                files: [some(), some(), some(), some(), kernel, initrd, oldkern],
+            };
+            match manifest.to_text() {
+                Err(FileError::Invalid(reason)) => assert_eq!(
+                    reason,
+                    "\"vmlinuz-previous.efi\", \"initrd.img-previous\", \
+                     \"Pop_OS-oldkern.conf\" aren't all there or all null"
+                ),
+                other => panic!("{other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -746,9 +1129,10 @@ mod tests {
             size: 1,
             sha256: "ab".repeat(32),
         });
+        let some = || entry.clone();
         let good = Manifest {
             root_uuid: UUID.to_owned(),
-            files: [entry.clone(), entry.clone(), entry.clone(), None],
+            files: [some(), some(), some(), some(), None, None, None],
         };
         let text = good.to_text().unwrap();
         for (from, to, reason) in [
@@ -779,46 +1163,74 @@ mod tests {
                 other => panic!("{to}: {other:?}"),
             }
         }
-        let no_kernel = Manifest {
-            files: [None, entry.clone(), entry.clone(), None],
-            ..good.clone()
-        };
-        assert!(matches!(no_kernel.to_text(), Err(FileError::Invalid(_))));
-        let bad_hash = Manifest {
-            files: [
-                Some(Entry {
-                    size: 1,
-                    sha256: "AB".repeat(32),
-                }),
-                entry.clone(),
-                entry,
-                None,
-            ],
-            ..good
-        };
+        for missing in [0, 2] {
+            let mut files = good.files.clone();
+            files[missing] = None;
+            let manifest = Manifest {
+                files,
+                ..good.clone()
+            };
+            assert!(matches!(manifest.to_text(), Err(FileError::Invalid(_))));
+        }
+        let mut files = good.files.clone();
+        files[0] = Some(Entry {
+            size: 1,
+            sha256: "AB".repeat(32),
+        });
+        let bad_hash = Manifest { files, ..good };
         assert!(matches!(bad_hash.to_text(), Err(FileError::Invalid(_))));
     }
 
-    /// A machine with one kernel has no oldkern entry.
+    /// A machine with one kernel has no previous pair and no oldkern entry.
     #[test]
-    fn a_missing_oldkern_entry_is_recorded_as_none() {
-        let lab = lab("esp-no-oldkern");
-        fs::remove_file(lab.esp_file(BootFile::OldkernEntry)).unwrap();
+    fn a_machine_with_one_kernel_is_backed_up_without_the_previous_files() {
+        let lab = lab("esp-one-kernel");
+        lab.one_kernel();
         let manifest = back_up(&lab.esp, &lab.state, UUID).unwrap();
-        assert_eq!(manifest.entry(BootFile::OldkernEntry), None);
-        assert!(!lab.backup_file(BootFile::OldkernEntry).exists());
+        for file in PREVIOUS {
+            assert_eq!(manifest.entry(file), None, "{file:?}");
+            assert!(!lab.backup_file(file).exists(), "{file:?}");
+        }
         verify(&lab.state).unwrap();
     }
 
+    /// The three are optional together: an ESP with only some of them isn't one kernelstub
+    /// left, and a put-back couldn't make the oldkern entry whole.
     #[test]
-    fn a_missing_kernel_fails_the_backup_and_leaves_none_behind() {
-        let lab = lab("esp-no-kernel");
-        fs::remove_file(lab.esp_file(BootFile::Initrd)).unwrap();
-        match back_up(&lab.esp, &lab.state, UUID) {
-            Err(EspError::Missing(name)) => assert_eq!(name, "initrd.img"),
-            other => panic!("{other:?}"),
+    fn part_of_the_previous_kernel_fails_the_backup_and_leaves_none_behind() {
+        for (index, gone) in PREVIOUS.into_iter().enumerate() {
+            let lab = lab(&format!("esp-part-previous-{index}"));
+            fs::remove_file(lab.esp_file(gone)).unwrap();
+            assert!(
+                matches!(
+                    back_up(&lab.esp, &lab.state, UUID),
+                    Err(EspError::PreviousIncomplete)
+                ),
+                "{gone:?}"
+            );
+            assert!(!lab.state.join(BACKUP_DIR).exists());
         }
-        assert!(!lab.state.join(BACKUP_DIR).exists());
+    }
+
+    #[test]
+    fn a_missing_required_file_fails_the_backup_and_leaves_none_behind() {
+        for (index, gone) in [
+            BootFile::Kernel,
+            BootFile::Initrd,
+            BootFile::Cmdline,
+            BootFile::CurrentEntry,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let lab = lab(&format!("esp-no-required-{index}"));
+            fs::remove_file(lab.esp_file(gone)).unwrap();
+            match back_up(&lab.esp, &lab.state, UUID) {
+                Err(EspError::Missing(name)) => assert_eq!(name, gone.name()),
+                other => panic!("{other:?}"),
+            }
+            assert!(!lab.state.join(BACKUP_DIR).exists());
+        }
     }
 
     /// Whether an earlier backup is kept or taken again is the caller's (PLAN 6b.10): a
@@ -938,7 +1350,88 @@ mod tests {
     #[test]
     fn the_check_passes_when_the_esp_boots_what_boot_links_to() {
         let lab = lab("esp-check");
-        assert_eq!(check(&lab.esp, &lab.root, UUID), Ok(NEW.to_owned()));
+        assert_eq!(check(&lab.esp, &lab.root, UUID), checked(NEW, good(OLD)));
+    }
+
+    #[test]
+    fn the_check_passes_on_a_machine_with_one_kernel() {
+        let lab = lab("esp-check-one-kernel");
+        lab.one_kernel();
+        assert_eq!(
+            check(&lab.esp, &lab.root, UUID),
+            checked(NEW, Previous::Absent)
+        );
+    }
+
+    /// The previous pair is checked like the current one, against the `.old` links. What's
+    /// wrong with it is reported, and the check still passes: the current pair boots.
+    #[test]
+    fn a_previous_pair_that_isnt_the_old_links_is_reported_not_failed() {
+        let lab = lab("esp-check-previous");
+        let wrong = |failure| checked(NEW, Previous::Wrong(failure));
+
+        fs::write(lab.esp_file(BootFile::PreviousKernel), kernel(OLDER)).unwrap();
+        assert_eq!(
+            check(&lab.esp, &lab.root, UUID),
+            wrong(CheckFailure::KernelDiffers)
+        );
+        lab.kernelstub_previous(OLD);
+        fs::write(lab.esp_file(BootFile::PreviousInitrd), initrd(OLDER)).unwrap();
+        assert_eq!(
+            check(&lab.esp, &lab.root, UUID),
+            wrong(CheckFailure::InitrdDiffers)
+        );
+        lab.kernelstub_previous(OLD);
+
+        fs::remove_dir(lab.root.join("usr/lib/modules").join(OLD)).unwrap();
+        assert_eq!(
+            check(&lab.esp, &lab.root, UUID),
+            wrong(CheckFailure::NoModules {
+                version: OLD.to_owned()
+            })
+        );
+        lab.install_kernel(OLD);
+
+        fs::remove_file(lab.root.join("boot/vmlinuz.old")).unwrap();
+        assert_eq!(
+            check(&lab.esp, &lab.root, UUID),
+            wrong(CheckFailure::NoKernelLink)
+        );
+        lab.link_previous(OLD);
+        assert_eq!(check(&lab.esp, &lab.root, UUID), checked(NEW, good(OLD)));
+    }
+
+    #[test]
+    fn part_of_the_previous_kernel_is_reported_not_failed() {
+        for (index, gone) in PREVIOUS.into_iter().enumerate() {
+            let lab = lab(&format!("esp-check-part-previous-{index}"));
+            fs::remove_file(lab.esp_file(gone)).unwrap();
+            assert_eq!(
+                check(&lab.esp, &lab.root, UUID),
+                checked(NEW, Previous::Wrong(CheckFailure::PreviousIncomplete)),
+                "{gone:?}"
+            );
+        }
+    }
+
+    /// PLAN 6b.7: before arming, the same check runs against the live system. A current pair
+    /// that isn't `/boot`'s refuses; a previous pair that isn't doesn't.
+    #[test]
+    fn before_arming_only_the_current_pair_refuses() {
+        let lab = lab("esp-check-live");
+        fs::write(lab.esp_file(BootFile::PreviousKernel), kernel(OLDER)).unwrap();
+        assert_eq!(
+            check_before_arming(&lab.esp, &lab.root, UUID),
+            Ok(Checked {
+                version: NEW.to_owned(),
+                previous: Previous::Wrong(CheckFailure::KernelDiffers)
+            })
+        );
+        fs::write(lab.esp_file(BootFile::Initrd), initrd(OLD)).unwrap();
+        assert_eq!(
+            check_before_arming(&lab.esp, &lab.root, UUID),
+            Err(Refusal::BootFiles(CheckFailure::InitrdDiffers))
+        );
     }
 
     #[test]
@@ -1014,7 +1507,7 @@ mod tests {
         let link = lab.root.join("boot/vmlinuz");
         fs::remove_file(&link).unwrap();
         std::os::unix::fs::symlink(format!("/boot/vmlinuz-{NEW}"), &link).unwrap();
-        assert_eq!(check(&lab.esp, &lab.root, UUID), Ok(NEW.to_owned()));
+        assert_eq!(check(&lab.esp, &lab.root, UUID), checked(NEW, good(OLD)));
     }
 
     /// PLAN 6b.6 steps 4 to 6 for a snapshot from before a kernel update, with a boot
@@ -1023,13 +1516,18 @@ mod tests {
     #[test]
     fn a_failed_boot_refresh_is_put_back_to_the_kernel_that_was_running() {
         let lab = lab("esp-put-back");
+        let before = lab.esp_tree();
         back_up(&lab.esp, &lab.state, UUID).unwrap();
-        // The copy: the snapshot's older kernel arrives, the running one's files stay.
-        lab.install_kernel(OLD);
+        // The copy: the snapshot's older kernels arrive, the running one's files stay.
+        lab.install_kernel(OLDER);
         lab.link_kernel(OLD);
-        // kernelstub wrote the entry and a broken kernel, then failed.
+        lab.link_previous(OLDER);
+        // kernelstub moved the previous pair on, wrote the entry and a broken kernel, then
+        // failed.
+        lab.kernelstub_previous(OLDER);
         fs::write(lab.esp_file(BootFile::Kernel), "half a kernel").unwrap();
         fs::write(lab.esp_file(BootFile::Initrd), initrd(OLD)).unwrap();
+        fs::write(lab.esp_file(BootFile::Cmdline), cmdline(OLD)).unwrap();
         fs::write(lab.esp_file(BootFile::CurrentEntry), entry(OLD)).unwrap();
         fs::remove_file(lab.esp_file(BootFile::OldkernEntry)).unwrap();
         assert_eq!(
@@ -1041,8 +1539,12 @@ mod tests {
 
         assert_eq!(read(lab.esp_file(BootFile::Kernel)), kernel(NEW));
         assert_eq!(read(lab.esp_file(BootFile::Initrd)), initrd(NEW));
+        assert_eq!(read(lab.esp_file(BootFile::Cmdline)), cmdline(NEW));
         assert_eq!(read(lab.esp_file(BootFile::CurrentEntry)), entry(NEW));
-        assert_eq!(read(lab.esp_file(BootFile::OldkernEntry)), entry("oldkern"));
+        assert_eq!(read(lab.esp_file(BootFile::PreviousKernel)), kernel(OLD));
+        assert_eq!(read(lab.esp_file(BootFile::PreviousInitrd)), initrd(OLD));
+        assert_eq!(read(lab.esp_file(BootFile::OldkernEntry)), entry(OLD));
+        assert_eq!(lab.esp_tree(), before);
         // What the ESP boots again is in `/boot` with its modules.
         assert!(
             same_bytes(
@@ -1059,10 +1561,44 @@ mod tests {
     fn a_boot_refresh_to_the_snapshots_older_kernel_passes_the_check() {
         let lab = lab("esp-rollback");
         back_up(&lab.esp, &lab.state, UUID).unwrap();
-        lab.install_kernel(OLD);
+        lab.install_kernel(OLDER);
         lab.link_kernel(OLD);
+        lab.link_previous(OLDER);
         lab.kernelstub(OLD);
-        assert_eq!(check(&lab.esp, &lab.root, UUID), Ok(OLD.to_owned()));
+        lab.kernelstub_previous(OLDER);
+        assert_eq!(check(&lab.esp, &lab.root, UUID), checked(OLD, good(OLDER)));
+    }
+
+    /// PLAN 6b.6 step 4: the recovery entry and folder, `loader.conf`, the random seed,
+    /// `entries.srel`, `EFI/BOOT` and `EFI/systemd` are the same files after a put-back, not
+    /// rewritten ones.
+    #[test]
+    fn putting_back_leaves_the_rest_of_the_esp_alone() {
+        use std::os::unix::fs::MetadataExt;
+
+        let lab = lab("esp-put-back-bystanders");
+        let stat = |path: &str| {
+            let meta = fs::symlink_metadata(lab.esp.join(path)).unwrap();
+            (meta.ino(), meta.mtime(), meta.mtime_nsec(), meta.len())
+        };
+        let before: Vec<_> = BYSTANDERS
+            .iter()
+            .map(|path| (stat(path), read(lab.esp.join(path))))
+            .collect();
+        let folders = ["EFI", "EFI/BOOT", "EFI/systemd", "EFI/Recovery-ABCD-1234"];
+        let folders_before: Vec<_> = folders.iter().map(|path| stat(path)).collect();
+
+        back_up(&lab.esp, &lab.state, UUID).unwrap();
+        lab.kernelstub(OLD);
+        lab.kernelstub_previous(OLDER);
+        put_back(&lab.esp, &lab.state, UUID).unwrap();
+
+        for (path, was) in BYSTANDERS.iter().zip(before) {
+            assert_eq!((stat(path), read(lab.esp.join(path))), was, "{path}");
+        }
+        for (path, was) in folders.iter().zip(folders_before) {
+            assert_eq!(stat(path), was, "{path}");
+        }
     }
 
     #[test]
@@ -1081,21 +1617,29 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect();
         names.sort();
-        assert_eq!(names, ["initrd.img", "vmlinuz.efi"]);
+        assert_eq!(
+            names,
+            [
+                "cmdline",
+                "initrd.img",
+                "initrd.img-previous",
+                "vmlinuz-previous.efi",
+                "vmlinuz.efi"
+            ]
+        );
     }
 
-    /// An oldkern entry that wasn't there at the backup isn't Apsis's to remove.
+    /// A previous kernel that wasn't there at the backup isn't Apsis's to remove.
     #[test]
     fn putting_back_leaves_alone_what_wasnt_backed_up() {
         let lab = lab("esp-put-back-extra");
-        fs::remove_file(lab.esp_file(BootFile::OldkernEntry)).unwrap();
+        lab.one_kernel();
         back_up(&lab.esp, &lab.state, UUID).unwrap();
-        fs::write(lab.esp_file(BootFile::OldkernEntry), entry("new oldkern")).unwrap();
+        lab.kernelstub_previous(OLDER);
         put_back(&lab.esp, &lab.state, UUID).unwrap();
-        assert_eq!(
-            read(lab.esp_file(BootFile::OldkernEntry)),
-            entry("new oldkern")
-        );
+        assert_eq!(read(lab.esp_file(BootFile::PreviousKernel)), kernel(OLDER));
+        assert_eq!(read(lab.esp_file(BootFile::PreviousInitrd)), initrd(OLDER));
+        assert_eq!(read(lab.esp_file(BootFile::OldkernEntry)), entry(OLDER));
     }
 
     /// A damaged kernel is never written to the ESP: the backup is verified first, and
@@ -1137,24 +1681,134 @@ mod tests {
         BootSizes { kernel, initrd }
     }
 
+    fn one(current: BootSizes) -> EspSizes {
+        EspSizes {
+            current,
+            previous: None,
+        }
+    }
+
+    fn two(current: BootSizes, previous: BootSizes) -> EspSizes {
+        EspSizes {
+            current,
+            previous: Some(previous),
+        }
+    }
+
     /// Growth of each file, room for the put-back's temporary copy of the largest one, and
     /// the margin.
     #[test]
     fn the_esp_needs_the_growth_a_put_back_copy_and_a_margin() {
-        let on_esp = sizes(14 * MIB, 150 * MIB);
+        let on_esp = one(sizes(14 * MIB, 150 * MIB));
         // The same sizes: only the put-back copy and the margin.
         assert_eq!(esp_needs(on_esp, on_esp), (150 + 16) * MIB);
         // A larger kernel and initrd.
         assert_eq!(
-            esp_needs(on_esp, sizes(15 * MIB, 170 * MIB)),
+            esp_needs(on_esp, one(sizes(15 * MIB, 170 * MIB))),
             (1 + 20 + 150 + 16) * MIB
         );
         // Smaller ones free nothing in advance.
         assert_eq!(
-            esp_needs(on_esp, sizes(10 * MIB, 100 * MIB)),
+            esp_needs(on_esp, one(sizes(10 * MIB, 100 * MIB))),
             (150 + 16) * MIB
         );
-        assert_eq!(esp_needs(sizes(u64::MAX, 0), sizes(0, u64::MAX)), u64::MAX);
+        assert_eq!(
+            esp_needs(one(sizes(u64::MAX, 0)), one(sizes(0, u64::MAX))),
+            u64::MAX
+        );
+    }
+
+    /// The boot refresh writes the previous pair too.
+    #[test]
+    fn the_previous_pair_counts_like_the_current_one() {
+        let on_esp = two(sizes(14 * MIB, 150 * MIB), sizes(13 * MIB, 160 * MIB));
+        // The put-back copy is of the largest file on the ESP, here the previous initrd.
+        assert_eq!(esp_needs(on_esp, on_esp), (160 + 16) * MIB);
+        // Each of the four grows by itself: a pair that shrinks makes no room for the other.
+        assert_eq!(
+            esp_needs(
+                on_esp,
+                two(sizes(10 * MIB, 100 * MIB), sizes(15 * MIB, 165 * MIB))
+            ),
+            (2 + 5 + 160 + 16) * MIB
+        );
+        // The snapshot has one kernel: nothing more to write.
+        assert_eq!(
+            esp_needs(on_esp, one(sizes(14 * MIB, 150 * MIB))),
+            (160 + 16) * MIB
+        );
+        // The ESP has one kernel, the snapshot two: the previous pair is all growth.
+        assert_eq!(
+            esp_needs(one(sizes(14 * MIB, 150 * MIB)), on_esp),
+            (13 + 160 + 150 + 16) * MIB
+        );
+    }
+
+    /// The owner's machine on 2026-10-01 (Pop!_OS 24.04, kernels 7.1.5 and 7.0.11): the
+    /// sizes in `EFI/Pop_OS-<root uuid>/`, and a 1020M ESP with 361M free.
+    const REAL: EspSizes = EspSizes {
+        current: BootSizes {
+            kernel: 17_273_344,
+            initrd: 214_307_600,
+        },
+        previous: Some(BootSizes {
+            kernel: 17_056_256,
+            initrd: 212_169_876,
+        }),
+    };
+    const REAL_FREE: u64 = 361 * MIB;
+
+    #[test]
+    fn the_real_esp_has_room_for_a_restore_to_the_same_kernels() {
+        let needs = esp_needs(REAL, REAL);
+        assert_eq!(needs, 214_307_600 + 16 * MIB);
+        assert_eq!(needs, 231_084_816);
+        assert_eq!(check_esp_space(needs, REAL_FREE), Ok(()));
+    }
+
+    /// The snapshot from before the kernel update: 7.0.11 is the current pair again, and the
+    /// kernel before it (taken as the same size) the previous one.
+    #[test]
+    fn the_real_esp_has_room_for_a_kernel_rollback() {
+        let old = REAL.previous.unwrap();
+        let needs = esp_needs(REAL, two(old, old));
+        assert_eq!(needs, 231_084_816);
+        assert_eq!(check_esp_space(needs, REAL_FREE), Ok(()));
+        // And for a snapshot that has 7.0.11 alone.
+        assert_eq!(esp_needs(REAL, one(old)), 231_084_816);
+    }
+
+    /// 361M free leaves 147_451_120 bytes for the files to grow by. One byte more refuses.
+    #[test]
+    fn the_real_esp_is_refused_one_byte_past_its_free_space() {
+        let room = REAL_FREE - 231_084_816;
+        assert_eq!(room, 147_451_120);
+        let grown = |by: u64| {
+            let mut restored = REAL;
+            restored.current.initrd += by;
+            esp_needs(REAL, restored)
+        };
+        assert_eq!(check_esp_space(grown(room), REAL_FREE), Ok(()));
+        assert_eq!(
+            check_esp_space(grown(room + 1), REAL_FREE),
+            Err(Refusal::BootSpace {
+                needs: REAL_FREE + 1,
+                free: REAL_FREE
+            })
+        );
+    }
+
+    /// The same machine with one kernel on the ESP (the previous pair's bytes free too),
+    /// restored to a snapshot with both: the previous pair is written new, and it fits.
+    #[test]
+    fn the_real_esp_with_one_kernel_has_room_for_a_second() {
+        let previous = REAL.previous.unwrap();
+        let free = REAL_FREE + previous.kernel + previous.initrd;
+        let needs = esp_needs(one(REAL.current), REAL);
+        assert_eq!(needs, 17_056_256 + 212_169_876 + 214_307_600 + 16 * MIB);
+        assert_eq!(check_esp_space(needs, free), Ok(()));
+        // Not in what's free today: the refresh has to fit before anything is removed.
+        assert!(check_esp_space(needs, REAL_FREE).is_err());
     }
 
     #[test]
