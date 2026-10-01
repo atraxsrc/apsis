@@ -1930,3 +1930,217 @@ What the plan left open:
 - **Verified** with apsis-core's tests and clippy only, run through a scratch workspace that
   holds only apsis-core (the workspace commands can't run in the sandbox); the workspace
   test and clippy run is the owner's.
+
+## 2026-10-01 - 6b: the plan and state files (core)
+
+Three files in `/var/lib/apsis/restore/` (`restore::file::DIR`), each with a type that
+writes it, reads it back and validates it:
+
+- `request.json`: `restore::plan::Plan` (PLAN 6b.9's list, field for field).
+- `state.json`: `restore::state::State` (`attempts`, `written`; PLAN 6b.6).
+- `result.json`: `restore::state::Report` with an `Outcome` (PLAN 6b.6 step 8, 6b.9, 6b.10).
+
+Each has `parse`, `to_text`, `load(dir)` and `save(dir)`. `restore.filter` is the filter
+module's text, `rsync-log` is rsync's, `esp-backup/` comes with the ESP step.
+
+- **Core writes them.** The plan doesn't say who does. The apply state machine is core's
+  (6b.13 step 1) and must save `state.json` before the step that depends on it, so the
+  writer is core's too, and the helper has no second one. `save` is atomic: a temporary
+  file (`<name>.apsis-tmp`, mode 0600) in the same folder, fsync, rename, fsync of the
+  folder. A reader sees the old file or the new one. A temporary file left by a crash is
+  removed by the next save. The folder isn't made here: it's the helper's (root, 0700), and
+  a save into a missing folder fails. Tested in temp dirs.
+- **A file that fails validation is refused whole** (`FileError::Invalid` with the reason,
+  the file's name in front when it was loaded). No field of it is used. A missing or
+  unreadable file is `FileError::Io`, so the caller can tell "not there" from "not
+  trusted". `FileError` is the module's own type: `apsis_core::Error` is unchanged, so
+  nothing in the helper or the applet has a new case to match.
+- **Nothing is written that wouldn't be read back.** `to_text` and `save` run the same
+  validation as `parse`, and fail with nothing written.
+- **Versioning.** Every file starts with `"version": 1`. A reader takes only the versions it
+  knows, which is 1 alone for now. Anything else is refused whole: older, newer, missing, or
+  not a whole number (`"1"`, `1.0`), with "version 2 (this Apsis reads 1)", the config's
+  wording. The version is looked at before the fields. What that means per file:
+  - `request.json` and `state.json` live from "ready" to the end of the apply. The apply runs
+    the helper copy made on arm, so it always reads its own version. A plan that isn't armed
+    and was left by another Apsis version (an upgrade while the prompt was up) is refused,
+    and is removed like any stale plan (6b.5).
+  - `result.json` stays, and the Apsis reading it can be the snapshot's (6b.2). Another
+    version's result isn't shown: there's no result line until an Apsis that reads it is
+    installed. An Apsis that changes the format bumps the version and decides then whether
+    it also reads 1, as the config does with 1 and 2.
+- **Strict fields.** Every field must be there, and an unknown one refuses the file, also
+  inside `separate_home`. "No value" is `null`, never a missing key. A same-version file
+  with other fields isn't one this Apsis wrote.
+- **Format.** One JSON object, indented, `version` first, a final newline. Sizes and times
+  are JSON whole numbers (never strings or floats; `u64::MAX` round-trips). This is Apsis's
+  own format, not Timeshift's all-strings one. A file over 64 KiB, one that isn't UTF-8 and
+  a symlink in its place are refused unread.
+
+What the plan left open:
+
+- **`request.json`'s field names:** `snapshot`, `backup_uuid`, `home` (`"keep"` or
+  `"restore"`), `old_format`, `safety_snapshot` (name or `null`), `root_uuid`,
+  `running_kernel`, `root_needs`, `separate_home` (`null`, or `{"uuid", "needs"}`),
+  `starter_uid`, `prepared_at`.
+- **"Space needed per destination partition"** is `root_needs` and `separate_home.needs`,
+  both with the margin (the space entry above). The separate `/home`'s UUID and its needs
+  are one object, so one can't be there without the other.
+- **Cross-field rules:** `separate_home` only with `home: "restore"` (a kept `/home` is
+  never entered); its UUID isn't the root's; the safety snapshot isn't the snapshot being
+  restored. The backup UUID may equal the root UUID (a backup on the system disk, filter
+  rule 7).
+- **Field checks:** snapshot names are `YYYY-MM-DD_HH-MM-SS` with a real date; UUIDs pass
+  `usage::is_plain_uuid`; the kernel passes the filter's `is_kernel_version`; `starter_uid`
+  fits 32 bits; times are Unix seconds after 1970.
+- **Times are Unix seconds (UTC)**, not local time: the 30 minutes must not depend on the
+  time zone.
+- **Too old** (`Plan::is_too_old(now)`): more than 30 minutes (`MAX_AGE_SECS`) after
+  `prepared_at`; exactly 30 minutes still passes. A plan made after `now` (the clock was
+  set back) has an unknown age and is too old as well.
+- **`state.json`:** `attempts` is 0 to 3 (`MAX_ATTEMPTS`). `attempts` and `written` must
+  agree, since step 3 sets both before the copy: 0 with `written`, or an attempt without
+  it, is refused. The arm writes `State::default()`.
+- **`result.json`'s fields:** `outcome`, `snapshot`, `safety_snapshot`, `home`, `message`,
+  `when`. The plan lists the outcome, the snapshot, the safety snapshot and the time;
+  `home` is added because the result's tooltip says "Home folders were kept" and
+  `request.json` is gone by then; `message` is the helper's reason (`RestoreResult`'s
+  message), any text, empty for `done`.
+- **Outcomes:** `done`, `problems`, `boot-kept`, `boot-broken`, `not-started`, `failed`.
+  `ready` isn't one: `RestoreResult` answers it from `request.json`.
+- **No kernel version in the result.** The `boot-kept` tooltip's "{version}" is the kernel
+  the system runs when it's shown (`uname -r`), which is the kept one.
+- **No `written` in the result.** A restore that never started after an earlier broken copy
+  (6b.10) is `failed`, not `not-started`; choosing between them is the state machine's.
+
+Left for later slices:
+
+- The state machine: counting an attempt, and what an invalid `state.json` or
+  `request.json` means at the arm check (never started; whether anything was written is
+  then unknown).
+- The helper: making the folder, removing a stale or refused plan, cutting `message` to a
+  length worth showing.
+- **Verified** with apsis-core's tests and clippy `-D warnings` through the scratch
+  workspace. Each new test was seen failing first only as a compile error (the types
+  didn't exist yet).
+
+## 2026-10-01 - 6b: plan and state files, four fixes (core)
+
+- **The state folder is protected, and tested.** It already was: `/var/lib/apsis/***` is on
+  the protect list, and `restore::file::DIR` is under it. Two tests now hold that: `DIR` is
+  under a protected `/***` path, and the restore's own argv with its own filter, run with real
+  rsync over a temp "live root", deletes a folder the snapshot doesn't have but leaves
+  `request.json`, `state.json` and `result.json` as they were. Nothing had to change in the
+  filter.
+- **A result's message is cut, never refused.** `Report::to_text` (so `save`) writes only the
+  first `MAX_MESSAGE_BYTES` (2048) of `message`, ending on a character boundary; `parse` cuts
+  the same way. The start is kept: the reason is Apsis's own words first, then rsync's lines.
+  The worst case as JSON (every byte a `\u00XX` escape) is about 12 KiB, far under the 64 KiB
+  read limit. So a failure report of any length saves and loads; tested with 1 MiB of plain
+  text, of two-byte characters and of control characters. A report can still be refused for
+  its other fields (a snapshot name that isn't one, a time before 1970): those come from the
+  plan and the clock, not from rsync, and the state machine has to give them right.
+- **Reads open with `O_NOFOLLOW`.** `load` no longer looks at the name and then opens it. It
+  opens with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC` (rustix, already a dependency)
+  and asks the open file whether it's a regular file. A link at the name fails the open
+  (`ELOOP`) and is refused as "not a regular file", whatever it points to; a folder or a
+  FIFO is refused by the check on the descriptor. `O_NONBLOCK` keeps a FIFO from holding the
+  open up.
+- **The temporary file is made with `O_EXCL`** (`create_new`, as before, now a function of
+  its own with a test): a name that's taken, also by a dangling link, is an error. `save`
+  removes a leftover first; a link planted at the temporary name is removed as a link and
+  its target isn't written.
+- **Two minutes of future skew.** `Plan::is_too_old(now)` passes a `prepared_at` up to
+  `MAX_FUTURE_SECS` (120) after `now`: a clock corrected a little between preparing and the
+  check. Further ahead, or more than 30 minutes old, is refused as before.
+- **A hardware clock in local time** (dual boot with Windows) can make the clock at early
+  boot differ by the zone's offset from the one the plan was made with, until the system
+  corrects it. An armed plan can then look hours too old or future-dated at apply time. If
+  the apply checks the plan's age, that must end as a clean refusal: never started, nothing
+  written under `/`, `/system-update` removed, and `result.json` (`not-started`) saying why.
+  It must never be a half-run restore or a boot loop. Whether the apply checks the age at
+  all (PLAN 6b.5 asks for it at "Restart now" only) is the state machine's to settle; this
+  is the constraint it works under.
+- **`result.json` is read by the Apsis in the restored snapshot, which may be older** than
+  the one that wrote it (PLAN 6b.2). What follows from the version rule:
+  - Apsis 0.4.x and older don't know the file: no result line (the dialog says so before).
+  - An older 0.5.x reads version 1 only, with exactly version 1's fields. A later Apsis that
+    adds a field or bumps the version makes its result unreadable to that older Apsis, which
+    then shows no result line after such a restore.
+  - So `result.json` should stay version 1, with these fields, for as long as it can. A
+    change to it costs the result line on every restore back to an older 0.5.x, and needs a
+    decision of its own. `request.json` and `state.json` don't have this limit: the apply
+    runs the helper copy that wrote them.
+  - Not built: reading a newer file "as far as it's understood". That would be half-trusting
+    it, which this slice rules out.
+- **How the tests failed first.** With stubs that kept the old behaviour: the 1 MiB, the
+  character-boundary and the control-character messages, the two-minute skew, the open that
+  follows a link, and a temporary file opened without `O_EXCL` (the stub left it out) all
+  failed on their assertions. The two protection tests and the planted-link test passed at
+  once, since that behaviour was already there.
+- **Verified** with apsis-core's tests and clippy `-D warnings` through the scratch workspace.
+
+## 2026-10-01 - 6b: the message's end, no age check in the apply, the disarm timer (owner)
+
+- **A cut message keeps its end** (this replaces "the start is kept" in the entry above).
+  rsync's summary and exit code come last. A message over `MAX_MESSAGE_BYTES` (2048) is
+  stored as `... ` and its end, 2048 bytes at most together, the end starting on a character
+  boundary (the cut moves forward to the next one). A message that fits is stored as it is.
+  Reading a cut message and writing it again changes nothing more. `parse` cuts the same
+  way. Tests: 1 MiB ending in rsync's error line, two-byte characters, control characters.
+- **The apply does no wall-clock age check** (PLAN 6b.6 step 1). This settles what the entry
+  above left to the state machine. The clock in early boot can be hours off (a hardware
+  clock in local time), so comparing `prepared_at` with it would refuse good plans, or pass
+  old ones. `Plan::is_too_old` stays for "Restart now" (30 minutes, 2 minutes of future
+  skew), where the clock is the same one the plan was made with.
+- **What covers an old armed plan instead: a disarm timer** (helper slice; PLAN 6b.5, 6b.9).
+  Arming also starts a transient systemd timer in the current boot. If no restart happened
+  within 10 minutes, it disarms: the arm is undone, `request.json` is removed, the journal
+  gets a line, and the window shows the restore as cancelled. A transient timer doesn't
+  survive the restart, so it can't fire during the restore's own boot.
+  - The owner's words were "removes request.json, journal line, UI shows the restore was
+    cancelled". PLAN also lists undoing the arm itself (`/system-update`, the unit and its
+    wants link, the helper copy, `state.json`): with only `request.json` gone, the next
+    restart would still go to offline mode and stop at the arm check. To confirm with the
+    owner if that reading is wrong.
+  - The UI line is the existing "Restore cancelled".
+- **A result that can't be saved gets a minimal one** (state machine slice; PLAN 6b.10): if
+  saving the real `result.json` is refused, the apply writes the outcome and "result could
+  not be saved, see journal" instead.
+  - **Open for that slice:** version 1's `result.json` needs every field, and a valid
+    snapshot name and time. If one of those is what was refused, the minimal report has
+    nothing valid to put there. Either the format lets `snapshot` (and the rest) be `null`
+    in a minimal report, or the checks on a report loosen. Version 1 isn't released, so the
+    format can still change without a version bump; it should be settled before 0.5.0,
+    given that `result.json` is the file an older Apsis reads (entry above).
+- **Verified** with apsis-core's tests and clippy `-D warnings` through the scratch
+  workspace. The four changed message tests failed on their assertions before the change.
+
+## 2026-10-01 - 6b: the commit point, and result.json's times (owner; follow-up)
+
+Follows the entry above. Docs only; no code changed.
+
+- **`/system-update` is the single commit point** (PLAN 6b.5, 6b.9). With the link the next
+  boot restores; without it nothing does. Arm creates it last, after the unit, its wants
+  link, the helper copy and `state.json` are written and synced. Disarm removes it first.
+  This confirms the reading in the entry above (disarm undoes the arm, not only
+  `request.json`) and gives it an order.
+- **Leftovers without the link** arm nothing, and are cleaned by the next arm or the
+  helper's next start. So a disarm, or an arm, that's cut short at any point leaves either
+  a complete arm or nothing that acts.
+- **The disarm service has `Conflicts=shutdown.target`**: it can't run once a restart has
+  begun. Without it the timer could fire while the system is going down and remove the
+  link under a restart the user asked for.
+- **For the state machine slice, to decide before 0.5.0:**
+  - `result.json` must not cross-check its time against the plan's or any other time. A
+    hardware clock in local time makes the apply's clock and the plan's disagree by hours,
+    so `when` before `prepared_at`, or far after it, is normal there.
+  - The minimal report (PLAN 6b.10) may have `null` for the snapshot and the time, and only
+    with the outcome `failed`. That answers the open point of the entry above in outline;
+    the exact fields and the change to the format are that slice's.
+- **What the code does today** (unchanged): no time is cross-checked. `Report`'s validation
+  checks the snapshot name, the safety snapshot's name, and that `when` is after 1970, each
+  by itself. `Plan`'s checks that `prepared_at` is after 1970. `Report` never sees a plan.
+  The only comparison of a time with a clock is `Plan::is_too_old(now)`, which the caller
+  runs at "Restart now", not when a file is read. `null` for a report's snapshot or time
+  is refused for every outcome today, so the minimal report needs the format change.

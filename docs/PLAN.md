@@ -429,7 +429,12 @@ released; the core slice (6b.13 step 1) started 2026-10-01 on branch `restore-6b
 Core so far: the filter and protect list, home detection (`apsis_core::restore::filter`), the
 restore's rsync argv (`apsis_core::restore::argv`), the refusals of 6b.7 except Busy
 (`apsis_core::restore::refusal`), the Apsis in a snapshot (`apsis_core::restore::apsis`),
-space parsing and the two space refusals (`apsis_core::restore::space`). Format detection is 0.4.1's `Info::is_old_format`, unchanged.
+space parsing and the two space refusals (`apsis_core::restore::space`), the plan and state
+files: `request.json` (`apsis_core::restore::plan`), `state.json` and `result.json`
+(`apsis_core::restore::state`), with their shared format, version rule and atomic write
+(`apsis_core::restore::file`). Format detection is 0.4.1's `Info::is_old_format`, unchanged.
+Still to come in the core slice: ESP backup and check, the apply state machine, the real-rsync
+temp-tree tests.
 
 Goal: pick a snapshot, click Restore, and after a restart the system is back to that state.
 One person at the keyboard. The copy is rsync over `/` with excludes, like Timeshift's. When
@@ -590,6 +595,27 @@ is up, Create, Delete, Settings Save and another Restore get Busy, so the snapsh
 deleted from under it. A plan whose window went away without an answer (crash, logout) is
 removed at the helper's next call.
 
+**Armed, but no restart** (owner, 2026-10-01): arming also starts a transient systemd timer in
+the current boot. If the computer hasn't restarted 10 minutes after "Restart now" (the reboot
+was blocked or failed), the timer disarms: it undoes the arm (`/system-update`, the unit and
+its wants link, the helper copy, `state.json`), removes `request.json`, writes a journal line,
+and the window shows the restore as cancelled ("Restore cancelled", as for Cancel restore). A
+transient timer is gone at the restart, so it never runs in the restore's own boot. This is
+what keeps an armed plan from being applied at some later, unrelated restart; the apply itself
+doesn't look at the plan's age (6b.6).
+
+**`/system-update` is the single commit point** (owner, 2026-10-01). With the link, the next
+boot restores; without it, nothing does, whatever else is on disk.
+- **Arm creates it last**: the unit and its wants link, the helper copy and `state.json` are
+  written and synced first, then the link.
+- **Disarm removes it first**, then the rest. A disarm cut short after that leaves only
+  leftovers.
+- **Leftovers without the link** (a unit, a helper copy, `state.json`, `request.json`) arm
+  nothing. The next arm or the helper's next start cleans them.
+- **The disarm service has `Conflicts=shutdown.target`**, so it can't run once a restart has
+  begun: systemd stops it, or never starts it, when shutdown is queued. A restart that's
+  under way keeps its link.
+
 ### 6b.6 The apply, and the boot files
 
 Everything runs from `apsis-restore.service` in offline-update mode, as root, with the helper's
@@ -602,7 +628,10 @@ written by this restore), both fsynced before the step that depends on them.
 
 1. **Arm check.** `/system-update` must point to `/var/lib/apsis/restore`, and `request.json`
    and `state.json` must be there. Otherwise remove the link and boot normally (a stray link
-   isn't Apsis's to act on beyond that).
+   isn't Apsis's to act on beyond that). **No wall-clock age check** (owner, 2026-10-01): the
+   apply never compares `prepared_at` with the clock. The clock in early boot can be hours off
+   (a hardware clock in local time), and the 30 minutes are checked at "Restart now" (6b.5),
+   with the disarm timer covering an arm that no restart followed.
 2. **Backup disk.** Wait up to 60 s for `/dev/disk/by-uuid/<uuid>` (USB disks are slow at
    boot), mount it read-only (`ro,nosuid,nodev,noexec`) at `/run/apsis/backup`, then the delete's
    path checks (`O_NOFOLLOW` walk, `info.json` a regular file, nothing mounted inside) and the
@@ -1004,6 +1033,11 @@ the one lock (a ready plan counts as held for everything but its own restart and
   own mount (else none), starter uid, prepared-at), `restore.filter`, `state.json`, `rsync-log`, `esp-backup/`, `result.json`, and
   the helper copy while armed. serde_json, already a dependency.
 - `apsis-helper --apply-restore` is the offline entry point. It uses no D-Bus.
+- The disarm timer (6b.5): a transient timer unit started on arm, 10 minutes, in the current
+  boot only, calling the helper to disarm. Its service has `Conflicts=shutdown.target`. Arm
+  creates `/system-update` last and disarm removes it first; the helper's start and the next
+  arm clean leftovers that have no link. Started like the other tools (fixed argv) or over
+  the system bus; no new crate.
 - Journal: `restore "2026-09-25_11-28-00" keep-home safety for :1.42: ready`, `armed;
   restarting`; in the offline boot, each step, the attempt number, rsync's summary, both boot
   commands' output, the ESP backup and check results.
@@ -1017,6 +1051,15 @@ the one lock (a ready plan counts as held for everything but its own restart and
 | **never started** | Step 1 or 2 fails: the backup disk isn't there after 60 s, the mount fails, a path check or refusal fails, the snapshot is gone, a separate `/home` being restored isn't mounted or has another UUID than the plan's | Nothing is written in this boot. Remove `/system-update`, the unit and the helper copy; write `result.json` `not-started` with the reason; boot normally. The boot screen says "The restore didn't start: the backup disk wasn't found. Starting normally." After login: the result line (6b.8) | **No** |
 | **copy broke** | Pass 1 exits with anything but 0, 23 or 24 (disk pulled out, I/O error, disk full), or the power goes during pass 1 | `/system-update` stays. The boot screen says "The restore was interrupted. Restarting to try again (attempt 2 of 3)." and restarts; the next boot runs from step 1 (rsync picks up where the files differ) | **Yes** |
 | **boot files failed** | Step 4 or 6 | The ESP files are put back, the protected kernel is kept, `boot-kept` (or `boot-broken`), end (6b.6) | Not retried |
+
+**A result that can't be saved** (owner, 2026-10-01): if saving the real `result.json` is
+refused (a field fails validation), the apply writes a minimal one instead: the outcome and
+the message "result could not be saved, see journal". The outcome is never lost to a bad
+field; the details are in the journal. **To decide before 0.5.0, in the state machine slice:**
+the minimal report may have `null` for the snapshot and the time, and only with the outcome
+`failed`; and `result.json`'s time is never checked against the plan's or any other time (a
+hardware clock in local time makes them disagree). Today's validation has no such cross-check
+(DECISIONS.md, 2026-10-01).
 
 "Never started" after an earlier broken copy (the disk was pulled, and is still missing at the
 next boot) also removes the link and boots normally. The result line then says the restore
@@ -1105,7 +1148,9 @@ No root (run by Claude):
   23 vs 11; ESP backup, a failed check puts the files back and keeps the protected kernel
   (`boot-kept`); a put-back that doesn't compare gives `boot-broken`; cleanup only after a
   passed check and only when the snapshot lacks the kernel; a power cut at each step
-  (re-entering from step 1 with the saved state) ends in the same result.
+  (re-entering from step 1 with the saved state) ends in the same result; a plan of any age
+  is applied (no clock is read); a refused `result.json` is replaced by the minimal report
+  with the same outcome.
 - **Real rsync** on temp trees (as the tester, no root): a fake snapshot over a fake live root
   with the real filter: changed files replaced, new system files removed, home kept (including
   `/home`'s own mode) or restored, the protect list and other protected paths untouched,
@@ -1114,7 +1159,9 @@ No root (run by Claude):
 - **Unit text** and its install path; **RECOVER.txt** has only UUIDs and the snapshot name.
 - **Helper**: introspection (new methods), policy file (6 actions, `restore` is `auth_admin`
   everywhere), Busy while a plan is ready, the starter exemption for restart and cancel, the
-  expired plan.
+  expired plan, the disarm timer (started on arm; disarming removes the arm and
+  `request.json`), the order (the link made last and removed first), leftovers without the
+  link cleaned at start, `Conflicts=shutdown.target` in the disarm service's text.
 - **Applet** (messages into the model): Restore enabled only with one real snapshot; no key
   opens the dialog; Enter and double-click on the list open nothing; the dialogs open with no
   forced focus; home radios default to keep and are
@@ -1180,12 +1227,24 @@ Checks:
 0. **0.4.1** (above), released on its own, with its apsis-test checks.
 1. **Core** (no root): filter and protect list, refusals, home and format detection, Apsis
    version reading, space parsing, plan and state files, argv, ESP backup and check, the apply
-   state machine with a fake runner, real-rsync temp-tree tests.
+   state machine with a fake runner, real-rsync temp-tree tests. The state machine does no
+   wall-clock age check (6b.6 step 1), and writes the minimal report when the real
+   `result.json` is refused (6b.10; its `null` fields and the no-cross-check rule are decided
+   there, before 0.5.0).
 2. The owner runs checks 0.1 to 0.3 and sets up the baseline. Revise here if 0.1 or 0.3
    surprise.
 3. **Helper**: methods, polkit action, the unit, `--apply-restore`, plymouth, logind reboot,
    journal. Also decide how the list carries a snapshot's format for the row tooltip (moved
-   here from 0.4.1; step 4 builds the tooltip).
+   here from 0.4.1; step 4 builds the tooltip). Carried over from the core slice:
+   - the dry runs use `--no-human-readable` and `LC_ALL=C`, so the `--stats` sizes are plain
+     byte counts;
+   - `transfer_size` returning `None` refuses the restore (the size is never taken as zero);
+   - free space is `statvfs` `f_bavail`, not `f_bfree`;
+   - the plan and state files are read and written only through `apsis_core::restore::{plan,
+     state}` (version 1, refused whole when invalid; DECISIONS.md, 2026-10-01). The helper
+     makes `/var/lib/apsis/restore/` (root, 0700) and decides what an unreadable file means
+     at each point;
+   - arming starts the 10-minute disarm timer (6b.5, 6b.9).
 4. **UI**, rebuilt from the preview (6b.8) in the real code: the toolbar's Restore (no key, no
    tooltip), the dialog, refusals, preparing status, ready prompt, results in the status line. The preview branch stays unmerged.
 5. Docs: README (experimental; "If a restore goes wrong"; how it differs from Timeshift, never
