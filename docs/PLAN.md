@@ -1644,8 +1644,8 @@ Checks:
   lasted 2 s; every spike line is there (the USB mounted read-only, 2 snapshots);
   `pop-upgrade-init` was skipped on the drop-in's condition, logged at info; nothing of
   `upgrade.sh` ran; `system-update-cleanup` didn't run; the next boot was normal with 0 failed
-  units; the cleanup verified clean. Still to be stated by the owner: what the screen showed
-  (the plymouth text and progress, no unit text over the splash). 0.3's unit, script and
+  units; the cleanup verified clean. The screen showed the plymouth text and progress; the boot
+  was fast, as in 0.3, and rebooted normally (owner). No unit text was reported over the splash. 0.3's unit, script and
   `/var/lib/apsis-spike` were removed after 0.3, so 0.4 re-creates them. The names below are
   0.4's (`apsis-spike.service`, `/var/lib/apsis-spike/spike.sh`); if 0.3's were different,
   either works. The drop-in's condition is the real one, `!/system-update/apsis-helper`, so the

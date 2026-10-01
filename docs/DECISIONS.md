@@ -3397,12 +3397,12 @@ steps were the owner's over `ssh apsis-test`; everything was cleaned up and veri
     The wait loop on a changed `boot_id` worked (`378e6551...` to `f32bc05e...`); the offline
     boot answered no ssh.
 
-**Still open from this check**: what the screen showed during the 2 s offline boot: the
-plymouth text "Apsis check 0.4: offline boot" and the progress at 42 %, and whether any unit
-text appeared over the splash. The owner hasn't stated it. If 2 s was too short to see,
-that's a result too: the apply itself takes minutes, so the splash will be visible then; the
-"no unit text" observation then comes from the first real apply (6b.12 check 1) with
-`StandardOutput=journal` already in the unit text.
+**The screen** (owner, same evening): the plymouth text "Apsis check 0.4: offline boot" and the
+progress were seen; the offline boot was fast, as in 0.3, and the machine rebooted normally on
+its own. The owner did not single out unit text over the splash; with `StandardOutput=journal`
+nothing is written to the console, and nothing was reported. Taken as: plymouth is what the
+person sees. The first real apply (6b.12 check 1) runs for minutes and is the long look at the
+splash.
 
 **What changes in the design**: nothing. The drop-in (`restore::unit::drop_in_text`, its path,
 its place in `filter::PROTECTED`) is built as designed. The helper slice build can start
