@@ -31,15 +31,24 @@ pub enum Step {
     Armed,
     /// Pass 1 started (step 3) and hasn't ended well: it runs again.
     Copy,
-    /// Pass 1 ended and is on disk: the boot files are next (steps 4 to 7), and the copy
-    /// isn't run again.
+    /// Pass 1 ended and is on disk: the ESP backup is next (step 4), and the copy isn't run
+    /// again. The boot files are still as they were before the restore.
     BootFiles,
+    /// The ESP backup is whole and the boot refresh started (steps 5 to 7): the boot files
+    /// may be changed, so no backup is ever taken of them again.
+    Refresh,
     /// `result.json` is written: only the cleanup is left (step 8).
     End,
 }
 
 impl Step {
-    const ALL: [Self; 4] = [Self::Armed, Self::Copy, Self::BootFiles, Self::End];
+    const ALL: [Self; 5] = [
+        Self::Armed,
+        Self::Copy,
+        Self::BootFiles,
+        Self::Refresh,
+        Self::End,
+    ];
 
     #[must_use]
     pub fn word(self) -> &'static str {
@@ -47,6 +56,7 @@ impl Step {
             Self::Armed => "armed",
             Self::Copy => "copy",
             Self::BootFiles => "boot-files",
+            Self::Refresh => "boot-refresh",
             Self::End => "end",
         }
     }
@@ -147,7 +157,7 @@ impl State {
             (Step::Armed, 1..) => {
                 return invalid(format!("an attempt was counted but the step is {word:?}"));
             }
-            (Step::Copy | Step::BootFiles, 0) => {
+            (Step::Copy | Step::BootFiles | Step::Refresh, 0) => {
                 return invalid(format!("the step is {word:?} but no attempt was counted"));
             }
             _ => {}
@@ -229,7 +239,7 @@ pub struct Report {
     pub message: String,
     /// When the apply ended, in Unix seconds, by the clock of that boot. It's never compared
     /// with the plan's time or any other: a hardware clock in local time puts them hours
-    /// apart. `None` only with [`Outcome::Failed`]: the clock gave no time.
+    /// apart. `None`, with any outcome: the clock, its only source, gave no time.
     pub when: Option<i64>,
 }
 
@@ -318,10 +328,8 @@ impl Report {
         if let Some(safety) = &self.safety_snapshot {
             file::check_snapshot("safety_snapshot", safety)?;
         }
-        match self.when {
-            Some(when) => file::check_time("when", when),
-            None => only_failed("when"),
-        }
+        self.when
+            .map_or(Ok(()), |when| file::check_time("when", when))
     }
 }
 
@@ -402,6 +410,7 @@ mod tests {
             (Step::Armed, "armed"),
             (Step::Copy, "copy"),
             (Step::BootFiles, "boot-files"),
+            (Step::Refresh, "boot-refresh"),
             (Step::End, "end"),
         ] {
             let text = state(1, step, false).to_text();
@@ -467,6 +476,8 @@ mod tests {
             state(3, Step::Copy, false),
             state(2, Step::BootFiles, false),
             state(2, Step::BootFiles, true),
+            state(2, Step::Refresh, false),
+            state(1, Step::Refresh, true),
             state(0, Step::End, false),
             state(3, Step::End, true),
         ] {
@@ -565,7 +576,7 @@ mod tests {
         }
     }
 
-    /// PLAN 6b.10: the report of last resort. Only `failed` may lack the snapshot or the time.
+    /// PLAN 6b.10: the report of last resort. Only `failed` may lack the snapshot.
     #[test]
     fn a_failed_result_may_have_no_snapshot_and_no_time() {
         let minimal = Report {
@@ -606,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn any_other_outcome_needs_its_snapshot_and_its_time() {
+    fn any_other_outcome_needs_its_snapshot() {
         for outcome in [
             Outcome::Done,
             Outcome::Problems,
@@ -623,23 +634,29 @@ mod tests {
                 invalid(no_snapshot.to_text()),
                 "\"snapshot\" is null, and the outcome isn't \"failed\""
             );
-            let no_time = Report {
+        }
+    }
+
+    /// The clock is the time's only source: when it gives none, the result still says how
+    /// the restore ended.
+    #[test]
+    fn any_outcome_may_have_no_time() {
+        for outcome in [
+            Outcome::Done,
+            Outcome::Problems,
+            Outcome::BootKept,
+            Outcome::BootBroken,
+            Outcome::NotStarted,
+            Outcome::Failed,
+        ] {
+            let report = Report {
                 outcome,
                 when: None,
                 ..report()
             };
-            let reason = "\"when\" is null, and the outcome isn't \"failed\"";
-            assert_eq!(invalid(no_time.to_text()), reason);
-            let text = Report {
-                outcome,
-                ..report()
-            }
-            .to_text()
-            .unwrap();
-            assert_eq!(
-                invalid(Report::parse(&text.replace("1790000600", "null"))),
-                reason
-            );
+            let text = report.to_text().unwrap();
+            assert!(text.contains("\"when\": null"), "{text}");
+            assert_eq!(Report::parse(&text).unwrap(), report);
         }
     }
 

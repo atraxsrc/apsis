@@ -483,6 +483,54 @@ pub fn put_back(esp: &Path, state_dir: &Path, root_uuid: &str) -> Result<(), Esp
     Ok(())
 }
 
+/// Removes a backup that a power cut stopped: the folder is there and has no manifest, which
+/// is written last. Only a real folder at the backup's own name in `state_dir` is removed,
+/// never through a link, and never one that has a manifest, readable or not. Says whether
+/// it removed one.
+///
+/// Whether the ESP is still what it was, so that the backup may be taken once more, is the
+/// caller's to know ([`super::apply`]: the boot refresh hasn't started).
+///
+/// # Errors
+///
+/// Any I/O error but "not found".
+pub fn remove_partial(state_dir: &Path) -> io::Result<bool> {
+    let dir = state_dir.join(BACKUP_DIR);
+    // Asked of the name itself: a link there isn't a folder.
+    if !fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
+        return Ok(false);
+    }
+    match fs::symlink_metadata(dir.join(MANIFEST_FILE)) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+        Ok(_) => return Ok(false),
+    }
+    fs::remove_dir_all(&dir)?;
+    File::open(state_dir)?.sync_all()?;
+    Ok(true)
+}
+
+/// Removes the temporary files a put-back leaves on the ESP when a power cut stops it:
+/// `<name>.apsis-tmp` beside each boot file of [`SET`], and nothing else.
+///
+/// # Errors
+///
+/// Any I/O error but "not found"; `InvalidInput` for a `root_uuid` that isn't one.
+pub fn clear_temporaries(esp: &Path, root_uuid: &str) -> io::Result<()> {
+    if !is_plain_uuid(root_uuid) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    for file in BootFile::ALL {
+        let path = esp.join(file.esp_path(root_uuid));
+        let temp = path.with_file_name(format!("{}{TEMP_SUFFIX}", file.name()));
+        match fs::remove_file(temp) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Removes the backup (PLAN 6b.6 step 8). No backup is fine.
 ///
 /// # Errors
@@ -906,7 +954,7 @@ pub(in crate::restore) mod tests {
         }
     }
 
-    fn cmdline(version: &str) -> String {
+    pub(in crate::restore) fn cmdline(version: &str) -> String {
         format!("root=UUID={UUID} ro quiet splash # {version}\n")
     }
 
@@ -918,7 +966,7 @@ pub(in crate::restore) mod tests {
         format!("initrd {version}\n").repeat(9000)
     }
 
-    fn entry(version: &str) -> String {
+    pub(in crate::restore) fn entry(version: &str) -> String {
         format!("title Pop!_OS\nlinux /EFI/Pop_OS-{UUID}/vmlinuz.efi\n# {version}\n")
     }
 
@@ -1382,6 +1430,62 @@ pub(in crate::restore) mod tests {
     fn the_check_passes_when_the_esp_boots_what_boot_links_to() {
         let lab = lab("esp-check");
         assert_eq!(check(&lab.esp, &lab.root, UUID), checked(NEW, good(OLD)));
+    }
+
+    /// A power cut during the backup leaves a folder with no manifest. Only that is removed:
+    /// a real folder at the backup's own name, never through a link, never a whole backup.
+    #[test]
+    fn only_a_backup_folder_without_a_manifest_is_removed_as_partial() {
+        let lab = lab("esp-partial");
+        // No folder.
+        assert!(!remove_partial(&lab.state).unwrap());
+        // A whole backup.
+        back_up(&lab.esp, &lab.state, UUID).unwrap();
+        assert!(!remove_partial(&lab.state).unwrap());
+        verify(&lab.state).unwrap();
+        // A partial one.
+        fs::remove_file(lab.state.join(BACKUP_DIR).join(MANIFEST_FILE)).unwrap();
+        assert!(remove_partial(&lab.state).unwrap());
+        assert!(!lab.state.join(BACKUP_DIR).exists());
+        // A link at the name, to a folder without a manifest.
+        let elsewhere = lab.root.join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        fs::write(elsewhere.join("vmlinuz.efi"), "not ours").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, lab.state.join(BACKUP_DIR)).unwrap();
+        assert!(!remove_partial(&lab.state).unwrap());
+        assert!(elsewhere.join("vmlinuz.efi").is_file());
+        assert!(fs::symlink_metadata(lab.state.join(BACKUP_DIR)).is_ok());
+        // A manifest that's there but not readable as one isn't "no manifest".
+        fs::remove_file(lab.state.join(BACKUP_DIR)).unwrap();
+        fs::create_dir(lab.state.join(BACKUP_DIR)).unwrap();
+        fs::write(lab.state.join(BACKUP_DIR).join(MANIFEST_FILE), "{").unwrap();
+        assert!(!remove_partial(&lab.state).unwrap());
+    }
+
+    /// A put-back that a power cut stopped leaves its temporary file on the ESP.
+    #[test]
+    fn temporary_files_of_a_put_back_are_cleared_and_nothing_else() {
+        let lab = lab("esp-clear-tmp");
+        let before = lab.esp_tree();
+        clear_temporaries(&lab.esp, UUID).unwrap();
+        assert_eq!(lab.esp_tree(), before);
+        let folder = lab.esp.join(format!("EFI/Pop_OS-{UUID}"));
+        fs::write(folder.join("initrd.img.apsis-tmp"), "half").unwrap();
+        fs::write(
+            lab.esp.join("loader/entries/Pop_OS-current.conf.apsis-tmp"),
+            "h",
+        )
+        .unwrap();
+        // Not a boot file's temporary name: not Apsis's.
+        fs::write(lab.esp.join("loader/loader.conf.apsis-tmp"), "theirs").unwrap();
+        clear_temporaries(&lab.esp, UUID).unwrap();
+        let mut expected = before;
+        expected.push((
+            "loader/loader.conf.apsis-tmp".to_owned(),
+            "theirs".to_owned(),
+        ));
+        expected.sort();
+        assert_eq!(lab.esp_tree(), expected);
     }
 
     /// What a put-back claims, and what tells an untouched ESP from a refreshed one.

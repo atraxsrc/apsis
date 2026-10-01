@@ -50,7 +50,8 @@ pub struct Copied {
 
 /// What the apply needs done on the machine. The helper has the real one; the tests a fake.
 pub trait Runner {
-    /// `/system-update` is a link to the state folder (PLAN 6b.6 step 1).
+    /// `/system-update` is a link to the state folder (PLAN 6b.6 step 1). If it isn't, the
+    /// apply touches neither the link nor anything else but Apsis's own unit files.
     fn is_armed(&mut self) -> bool;
 
     /// Step 2: waits for the backup disk, mounts it read-only, runs the path checks and the
@@ -95,13 +96,23 @@ pub trait Runner {
     /// Why the files couldn't be removed.
     fn remove_protected_kernel(&mut self, plan: &Plan) -> Result<bool, String>;
 
-    /// Removes `/system-update` first, then the unit, its wants link and the helper copy
-    /// (PLAN 6b.5). Without the link it removes whatever of the rest is there.
+    /// Removes `/system-update`: the commit point (PLAN 6b.5). Only called when it's
+    /// Apsis's ([`Runner::is_armed`]). A link that isn't there is fine.
     ///
     /// # Errors
     ///
-    /// What couldn't be removed.
-    fn disarm(&mut self) -> Result<(), String>;
+    /// The link is still there. The apply then removes nothing else and never calls
+    /// [`Runner::restart`]: a restart would come straight back here
+    /// (`systemd.offline-updates(7)`).
+    fn remove_link(&mut self) -> Result<(), String>;
+
+    /// Removes the rest of the arm: the unit, its wants link and the helper copy. Only
+    /// called once Apsis's link is gone, or when the link was never Apsis's.
+    ///
+    /// # Errors
+    ///
+    /// What couldn't be removed. Without the link it arms nothing (PLAN 6b.5).
+    fn remove_arm_files(&mut self) -> Result<(), String>;
 
     /// The clock, in Unix seconds, for the result's time. Never compared with anything.
     fn now(&mut self) -> i64;
@@ -109,36 +120,65 @@ pub trait Runner {
     /// One line for the journal, the console and the boot screen.
     fn say(&mut self, line: &str);
 
-    /// Restarts the computer. Called once, last, however the apply ended: with the link
-    /// gone that's the normal boot, with the link kept it's the next attempt.
+    /// Restarts the computer. Called once, last, unless the link couldn't be removed
+    /// ([`End::LinkStuck`]): with the link gone that's the normal boot, and with the link
+    /// kept on purpose it's the next attempt.
     fn restart(&mut self);
 }
 
 /// How one boot's apply ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum End {
-    /// `/system-update` wasn't Apsis's link: nothing was read, written or reported.
+    /// `/system-update` isn't a link to Apsis's state folder: another tool's update, or no
+    /// link. Nothing was read, written or reported, the link is as it was, and
+    /// [`Runner::restart`] wasn't called (`systemd.offline-updates(7)`, point 5).
     NotArmed,
     /// The copy broke. The link stays, and the next boot is this attempt.
     Retry { attempt: u32 },
     /// The restore is over, with this outcome in `result.json`.
     Finished(Outcome),
+    /// The restore is over with this outcome in `result.json`, but `/system-update` couldn't
+    /// be removed. [`Runner::restart`] wasn't called: the helper exits cleanly, and what
+    /// happens to the link next is systemd's (`systemd.offline-updates(7)`, point 7).
+    LinkStuck { outcome: Outcome },
 }
 
-/// Runs the apply for this boot, then restarts.
+impl End {
+    /// How a restore that's over ended, by whether the link is gone.
+    fn over(link_gone: bool, outcome: Outcome) -> Self {
+        if link_gone {
+            Self::Finished(outcome)
+        } else {
+            Self::LinkStuck { outcome }
+        }
+    }
+}
+
+/// Runs the apply for this boot, then restarts, unless the link is stuck or isn't Apsis's.
+///
+/// The link is there at a restart in two cases only. A retry: an attempt is on disk before
+/// each copy and there are [`MAX_ATTEMPTS`] at most, so that's two restarts in all. And a
+/// link that can't be removed: then the apply doesn't restart at all.
 pub fn apply(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
     let end = run(paths, runner);
-    runner.restart();
+    if matches!(end, End::Retry { .. } | End::Finished(_)) {
+        runner.restart();
+    }
     end
 }
 
 fn run(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
     let dir = paths.state_dir;
 
-    // Step 1: the arm check. A link that isn't Apsis's is removed, and that's all.
+    // Step 1: the arm check. A link that isn't Apsis's is another tool's update: it's left
+    // alone. What made this run without Apsis's link is a leftover of an arm, and goes.
     if !runner.is_armed() {
-        runner.say("no restore is armed: removing /system-update and starting normally");
-        clean_up(paths, runner);
+        runner.say("no restore is armed: /system-update isn't Apsis's link, leaving it alone");
+        if let Err(error) = runner.remove_arm_files() {
+            runner.say(&format!(
+                "the restore's unit files weren't removed: {error}"
+            ));
+        }
         return End::NotArmed;
     }
     let state = State::load(dir);
@@ -166,10 +206,7 @@ fn run(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
     // The result is written: an earlier boot got that far, and only the cleanup is left.
     if state.step == Step::End {
         return match Report::load(dir) {
-            Ok(report) => {
-                clean_up(paths, runner);
-                End::Finished(report.outcome)
-            }
+            Ok(report) => End::over(clean_up(paths, runner), report.outcome),
             Err(error) => {
                 let message = format!("the restore ended, but its result can't be read ({error})");
                 finish(
@@ -284,7 +321,7 @@ fn run(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
     }
 
     // Steps 4 to 7.
-    let (outcome, message) = boot_files(paths, runner, &plan, state.problems);
+    let (outcome, message) = boot_files(paths, runner, &plan, &mut state);
     finish(paths, runner, Some(&plan), Some(state), outcome, message)
 }
 
@@ -304,16 +341,35 @@ fn boot_files(
     paths: &Paths<'_>,
     runner: &mut impl Runner,
     plan: &Plan,
-    problems: bool,
+    state: &mut State,
 ) -> (Outcome, String) {
     let Paths {
         state_dir,
         esp,
         root,
     } = *paths;
+    let problems = state.problems;
 
-    // Step 4. A backup folder that's there was made by an earlier boot, before or while the
-    // boot files were changed: it's kept if it verifies, and never taken again.
+    // Step 4. The backup is of the boot files from before the restore, so it's only ever
+    // taken while `state.json` says the boot refresh hasn't started.
+    if state.step == Step::BootFiles {
+        // The power went during the backup: no manifest, and the ESP is still untouched.
+        match esp::remove_partial(state_dir) {
+            Ok(true) => {
+                runner.say("an ESP backup that was cut short is removed and taken once more");
+            }
+            Ok(false) => {}
+            Err(error) => {
+                return (
+                    Outcome::BootKept,
+                    format!(
+                        "a partial backup of the boot files couldn't be removed ({error}), so \
+                         they were left as they are"
+                    ),
+                );
+            }
+        }
+    }
     if fs::symlink_metadata(state_dir.join(esp::BACKUP_DIR)).is_ok() {
         let verified = esp::verify(state_dir)
             .map_err(|error| error.to_string())
@@ -329,6 +385,9 @@ fn boot_files(
             return unverified(paths, runner, plan, problems);
         }
         runner.say("the ESP backup of an earlier boot verifies: kept");
+    } else if state.step != Step::BootFiles {
+        runner.say("the boot refresh had started, and the ESP backup is gone");
+        return unverified(paths, runner, plan, problems);
     } else if let Err(error) = runner.back_up_esp(plan) {
         return (
             Outcome::BootKept,
@@ -336,6 +395,30 @@ fn boot_files(
                 "the boot files couldn't be backed up ({error}), so they were left as they are"
             ),
         );
+    }
+
+    // From here the boot files may be changed: on disk before the refresh starts.
+    if state.step != Step::Refresh {
+        let refreshing = State {
+            step: Step::Refresh,
+            ..*state
+        };
+        if let Err(error) = refreshing.save(state_dir) {
+            return (
+                Outcome::BootKept,
+                format!(
+                    "state.json couldn't be saved ({error}), so the boot files were left as \
+                     they are"
+                ),
+            );
+        }
+        *state = refreshing;
+    }
+    // A put-back that the power cut left its temporary file on the ESP.
+    if let Err(error) = esp::clear_temporaries(esp, &plan.root_uuid) {
+        runner.say(&format!(
+            "a temporary file on the ESP wasn't removed: {error}"
+        ));
     }
 
     // Step 5.
@@ -463,8 +546,7 @@ fn finish(
         Ok(()) => outcome,
         Err(error) => {
             runner.say(&format!("result.json wasn't saved: {error}"));
-            save_minimal(dir, runner, &report);
-            Outcome::Failed
+            save_minimal(dir, runner, &report)
         }
     };
     runner.say(&format!(
@@ -483,44 +565,60 @@ fn finish(
             runner.say(&format!("state.json wasn't saved: {error}"));
         }
     }
-    clean_up(paths, runner);
-    End::Finished(saved)
+    End::over(clean_up(paths, runner), saved)
 }
 
-/// The report of last resort (PLAN 6b.10): `failed`, the message, and what's left of the
-/// real one that can stand by itself. If even that is refused, nothing but the message.
-fn save_minimal(dir: &Path, runner: &mut impl Runner, refused: &Report) {
+/// The report of last resort (PLAN 6b.10), when the real one is refused: the same outcome,
+/// [`MINIMAL_MESSAGE`], and no time unless the clock gave one. If that's refused too, it's
+/// the snapshot's name: only `failed` may lack it, so the bare report is `failed` and its
+/// message names the real outcome. Gives the outcome that's in the file.
+fn save_minimal(dir: &Path, runner: &mut impl Runner, refused: &Report) -> Outcome {
     let minimal = Report {
+        message: MINIMAL_MESSAGE.to_owned(),
+        when: refused.when.filter(|when| *when > 0),
+        ..refused.clone()
+    };
+    if minimal.save(dir).is_ok() {
+        return minimal.outcome;
+    }
+    let bare = Report {
         outcome: Outcome::Failed,
+        snapshot: None,
+        safety_snapshot: None,
         message: format!(
             "{MINIMAL_MESSAGE} (the restore ended: {})",
             refused.outcome.word()
         ),
-        when: refused.when.filter(|when| *when > 0),
-        ..refused.clone()
+        ..minimal
     };
-    let bare = Report {
-        snapshot: None,
-        safety_snapshot: None,
-        when: None,
-        ..minimal.clone()
-    };
-    let saved: Result<(), FileError> = minimal.save(dir).or_else(|_| bare.save(dir));
+    let saved: Result<(), FileError> = bare.save(dir);
     if let Err(error) = saved {
         runner.say(&format!(
             "the minimal result.json wasn't saved either: {error}"
         ));
     }
+    bare.outcome
 }
 
-/// Removes the arm, the link first, then the ESP backup.
-fn clean_up(paths: &Paths<'_>, runner: &mut impl Runner) {
-    if let Err(error) = runner.disarm() {
-        runner.say(&format!("disarming failed: {error}"));
+/// Step 8's cleanup: the link first, then the rest of the arm and the ESP backup. Says
+/// whether the link is gone. If it isn't, nothing else is removed (the arm stays whole) and
+/// the caller must not restart.
+fn clean_up(paths: &Paths<'_>, runner: &mut impl Runner) -> bool {
+    if let Err(error) = runner.remove_link() {
+        runner.say(&format!(
+            "/system-update couldn't be removed ({error}): not restarting"
+        ));
+        return false;
+    }
+    if let Err(error) = runner.remove_arm_files() {
+        runner.say(&format!(
+            "the restore's unit files weren't removed: {error}"
+        ));
     }
     if let Err(error) = esp::remove(paths.state_dir) {
         runner.say(&format!("the ESP backup wasn't removed: {error}"));
     }
+    true
 }
 
 #[cfg(test)]
@@ -528,7 +626,9 @@ mod tests {
     use std::collections::VecDeque;
     use std::panic::{AssertUnwindSafe, catch_unwind, panic_any};
 
-    use super::super::esp::tests::{Lab, NEW, OLD, OLDER, UUID, initrd, kernel, lab};
+    use super::super::esp::tests::{
+        Lab, NEW, OLD, OLDER, UUID, cmdline, entry, initrd, kernel, lab,
+    };
     use super::super::esp::{BACKUP_DIR, BootFile, CheckFailure, MANIFEST_FILE};
     use super::super::plan;
     use super::super::state::{RESULT_FILE, STATE_FILE};
@@ -613,6 +713,10 @@ mod tests {
         break_put_back: bool,
         snapshot_has_running_kernel: bool,
         fail_kernel_removal: bool,
+        /// `/system-update` can't be removed.
+        stuck_link: bool,
+        /// The power goes inside this step, once, with its work half done.
+        cut_inside: Option<&'static str>,
         now: i64,
         /// `state.json` as each copy, ESP backup, boot refresh and disarm found it.
         states: Vec<(&'static str, State)>,
@@ -635,6 +739,8 @@ mod tests {
                 break_put_back: false,
                 snapshot_has_running_kernel: false,
                 fail_kernel_removal: false,
+                stuck_link: false,
+                cut_inside: None,
                 now: NOW,
                 states: Vec::new(),
                 result_at_disarm: Vec::new(),
@@ -708,6 +814,16 @@ mod tests {
         fn back_up_esp(&mut self, plan: &Plan) -> Result<Manifest, EspError> {
             self.call("back_up_esp", |fake| {
                 fake.note_state("back_up_esp");
+                if fake.cut_inside == Some("back_up_esp") {
+                    // Two files are copied, and there's no manifest yet.
+                    fake.cut_inside = None;
+                    let dir = fake.lab.state.join(BACKUP_DIR);
+                    fs::create_dir(&dir).unwrap();
+                    for file in [BootFile::Kernel, BootFile::Initrd] {
+                        fs::copy(fake.lab.esp_file(file), dir.join(file.name())).unwrap();
+                    }
+                    panic_any(PowerCut);
+                }
                 if fake.fail_esp_backup {
                     return Err(EspError::Missing("vmlinuz.efi"));
                 }
@@ -741,6 +857,18 @@ mod tests {
 
         fn put_back_esp(&mut self, plan: &Plan) -> Result<(), EspError> {
             self.call("put_back_esp", |fake| {
+                if fake.cut_inside == Some("put_back_esp") {
+                    // Two files are back, and the third is half written under its
+                    // temporary name.
+                    fake.cut_inside = None;
+                    let dir = fake.lab.state.join(BACKUP_DIR);
+                    for file in [BootFile::Kernel, BootFile::Initrd] {
+                        fs::copy(dir.join(file.name()), fake.lab.esp_file(file)).unwrap();
+                    }
+                    let cmdline = fake.lab.esp_file(BootFile::Cmdline);
+                    fs::write(cmdline.with_file_name("cmdline.apsis-tmp"), "half").unwrap();
+                    panic_any(PowerCut);
+                }
                 if fake.break_put_back {
                     fs::write(fake.lab.esp_file(BootFile::Initrd), "half an initrd").unwrap();
                     return Err(EspError::Mismatch("initrd.img"));
@@ -766,14 +894,21 @@ mod tests {
             })
         }
 
-        fn disarm(&mut self) -> Result<(), String> {
-            self.call("disarm", |fake| {
-                fake.note_state("disarm");
+        fn remove_link(&mut self) -> Result<(), String> {
+            self.call("remove_link", |fake| {
+                fake.note_state("remove_link");
                 fake.result_at_disarm
                     .push(fake.lab.state.join(RESULT_FILE).is_file());
+                if fake.stuck_link {
+                    return Err("Read-only file system".to_owned());
+                }
                 let _ = fs::remove_file(fake.lab.root.join("system-update"));
                 Ok(())
             })
+        }
+
+        fn remove_arm_files(&mut self) -> Result<(), String> {
+            self.call("remove_arm_files", |_| Ok(()))
         }
 
         fn now(&mut self) -> i64 {
@@ -882,7 +1017,8 @@ mod tests {
                 "refresh_boot",
                 "remove_protected_kernel",
                 "now",
-                "disarm",
+                "remove_link",
+                "remove_arm_files",
                 "restart",
             ]
         );
@@ -918,10 +1054,13 @@ mod tests {
         );
         assert_eq!(
             step_states(&fake, "refresh_boot"),
-            [state(1, Step::BootFiles, false)]
+            [state(1, Step::Refresh, false)]
         );
         // The result and the end are saved before the link goes.
-        assert_eq!(step_states(&fake, "disarm"), [state(1, Step::End, false)]);
+        assert_eq!(
+            step_states(&fake, "remove_link"),
+            [state(1, Step::End, false)]
+        );
         assert_eq!(fake.result_at_disarm, [true]);
     }
 
@@ -938,7 +1077,7 @@ mod tests {
         assert_eq!(boot(&mut fake), End::Finished(Outcome::Problems));
         assert_eq!(
             step_states(&fake, "refresh_boot"),
-            [state(1, Step::BootFiles, true)]
+            [state(1, Step::Refresh, true)]
         );
         assert_eq!(
             report(&lab).message,
@@ -996,7 +1135,7 @@ mod tests {
             state(1, Step::Copy, false)
         );
         assert_eq!(fake.count_of("back_up_esp"), 0);
-        assert_eq!(fake.count_of("disarm"), 0);
+        assert_eq!(fake.count_of("remove_link"), 0);
         assert_eq!(fake.count_of("restart"), 1);
 
         assert_eq!(boot(&mut fake), End::Finished(Outcome::Done));
@@ -1216,8 +1355,11 @@ mod tests {
         fn remove_protected_kernel(&mut self, plan: &Plan) -> Result<bool, String> {
             self.0.remove_protected_kernel(plan)
         }
-        fn disarm(&mut self) -> Result<(), String> {
-            self.0.disarm()
+        fn remove_link(&mut self) -> Result<(), String> {
+            self.0.remove_link()
+        }
+        fn remove_arm_files(&mut self) -> Result<(), String> {
+            self.0.remove_arm_files()
         }
         fn now(&mut self) -> i64 {
             self.0.now()
@@ -1287,8 +1429,11 @@ mod tests {
         fn remove_protected_kernel(&mut self, plan: &Plan) -> Result<bool, String> {
             self.0.remove_protected_kernel(plan)
         }
-        fn disarm(&mut self) -> Result<(), String> {
-            self.0.disarm()
+        fn remove_link(&mut self) -> Result<(), String> {
+            self.0.remove_link()
+        }
+        fn remove_arm_files(&mut self) -> Result<(), String> {
+            self.0.remove_arm_files()
         }
         fn now(&mut self) -> i64 {
             self.0.now()
@@ -1421,7 +1566,10 @@ mod tests {
             .copied()
             .filter(|call| *call != "say")
             .collect();
-        assert_eq!(again, ["is_armed", "disarm", "restart"]);
+        assert_eq!(
+            again,
+            ["is_armed", "remove_link", "remove_arm_files", "restart"]
+        );
         assert!(!is_linked(&lab));
     }
 
@@ -1471,12 +1619,85 @@ mod tests {
         lab
     }
 
-    /// The power went while the backup was being made: no manifest. The copy has run, so
-    /// the backup isn't taken again, and without one the boot files aren't touched.
+    /// One boot in which the power goes inside a step ([`Fake::cut_inside`]).
+    fn boot_and_lose_power(fake: &mut Fake<'_>) {
+        let end = catch_unwind(AssertUnwindSafe(|| boot(fake)));
+        assert!(end.is_err_and(|payload| payload.is::<PowerCut>()));
+        assert_eq!(fake.cut_inside, None, "the step was never reached");
+    }
+
+    fn boot_files_on_the_esp(lab: &Lab) -> Vec<String> {
+        BootFile::ALL
+            .map(|file| fs::read_to_string(lab.esp_file(file)).unwrap())
+            .to_vec()
+    }
+
+    /// The seven files as a boot refresh for the snapshot's kernels leaves them.
+    fn refreshed() -> Vec<String> {
+        vec![
+            kernel(OLD),
+            initrd(OLD),
+            cmdline(OLD),
+            entry(OLD),
+            kernel(OLDER),
+            initrd(OLDER),
+            entry(OLDER),
+        ]
+    }
+
+    fn has_temporary_files(lab: &Lab) -> bool {
+        lab.esp_tree()
+            .iter()
+            .any(|(name, _)| name.ends_with(".apsis-tmp"))
+    }
+
+    /// The power went while the backup was being made: two files, no manifest. The state
+    /// says the boot refresh hasn't started, so the ESP is as it was: the partial folder is
+    /// removed and the backup is taken once more.
     #[test]
-    fn a_backup_without_a_manifest_is_never_retaken_and_the_esp_is_left_alone() {
+    fn a_backup_cut_halfway_is_removed_and_taken_once_more() {
+        let lab = armed("apply-backup-cut");
+        let mut fake = Fake::new(&lab);
+        fake.cut_inside = Some("back_up_esp");
+        boot_and_lose_power(&mut fake);
+        assert_eq!(
+            State::load(&lab.state).unwrap(),
+            state(1, Step::BootFiles, false)
+        );
+        assert!(lab.state.join(BACKUP_DIR).join("initrd.img").is_file());
+        assert!(!lab.state.join(BACKUP_DIR).join(MANIFEST_FILE).exists());
+
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::Done));
+        assert_eq!(fake.count_of("copy"), 1);
+        assert_eq!(fake.count_of("back_up_esp"), 2);
+        // Fully refreshed, never mixed.
+        assert_eq!(boot_files_on_the_esp(&lab), refreshed());
+        assert_eq!(passed(&lab), restored_boot_files());
+        assert!(!lab.state.join(BACKUP_DIR).exists());
+    }
+
+    /// The backup that's taken once more is of the untouched ESP: a refresh that then fails
+    /// is put back to exactly what was there.
+    #[test]
+    fn a_backup_taken_once_more_puts_back_the_esp_of_before() {
+        let lab = armed("apply-backup-cut-kept");
+        let before = lab.esp_tree();
+        let mut fake = Fake::new(&lab);
+        fake.cut_inside = Some("back_up_esp");
+        boot_and_lose_power(&mut fake);
+        fake.refresh = Refresh::Fails;
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::BootKept));
+        assert_eq!(lab.esp_tree(), before);
+    }
+
+    /// The same folder without a manifest, but the state says the boot refresh has started:
+    /// the ESP may be changed, so no backup is taken of it, and without one the boot files
+    /// aren't touched.
+    #[test]
+    fn a_backup_is_never_taken_again_once_the_refresh_has_started() {
         let lab = cut_with_a_backup("apply-backup-partial");
         fs::remove_file(lab.state.join(BACKUP_DIR).join(MANIFEST_FILE)).unwrap();
+        state(1, Step::Refresh, false).save(&lab.state).unwrap();
         let before = lab.esp_tree();
         let mut fake = Fake::new(&lab);
         assert_eq!(boot(&mut fake), End::Finished(Outcome::BootKept));
@@ -1492,12 +1713,141 @@ mod tests {
         );
     }
 
+    /// The refresh has started and there's no backup folder at all: the same.
+    #[test]
+    fn a_backup_that_is_gone_once_the_refresh_has_started_isnt_taken_again() {
+        let lab = cut_with_a_backup("apply-backup-gone");
+        esp::remove(&lab.state).unwrap();
+        state(1, Step::Refresh, false).save(&lab.state).unwrap();
+        let mut fake = Fake::new(&lab);
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::BootKept));
+        assert_eq!(fake.count_of("back_up_esp"), 0);
+        assert_eq!(fake.count_of("refresh_boot"), 0);
+    }
+
+    /// A backup that has its manifest and doesn't verify is damaged, not partial: it's never
+    /// removed and retaken, whatever the step.
+    #[test]
+    fn a_damaged_backup_isnt_partial_and_isnt_taken_again() {
+        let lab = cut_with_a_backup("apply-backup-damaged-early");
+        fs::write(lab.state.join(BACKUP_DIR).join("initrd.img"), "damaged").unwrap();
+        let before = lab.esp_tree();
+        let mut fake = Fake::new(&lab);
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::BootKept));
+        assert_eq!(fake.count_of("back_up_esp"), 0);
+        assert_eq!(fake.count_of("refresh_boot"), 0);
+        assert_eq!(lab.esp_tree(), before);
+    }
+
+    // ---- cuts inside a step ----
+
+    /// The power went during the put-back: the kernel and initrd are the old ones, the rest
+    /// is what the failed refresh left, and a temporary file is on the ESP. The next boot's
+    /// refresh fails again, and its put-back makes the ESP fully what it was.
+    #[test]
+    fn a_put_back_cut_halfway_is_finished_by_the_next_boot() {
+        let lab = armed("apply-put-back-cut");
+        let before = lab.esp_tree();
+        let mut fake = Fake::new(&lab);
+        fake.refresh = Refresh::Fails;
+        fake.cut_inside = Some("put_back_esp");
+        boot_and_lose_power(&mut fake);
+        // Mixed: the kernel is back, the previous pair isn't.
+        assert_eq!(boot_files_on_the_esp(&lab)[0], kernel(NEW));
+        assert_eq!(boot_files_on_the_esp(&lab)[4], kernel(OLDER));
+        assert!(has_temporary_files(&lab));
+        assert_eq!(
+            State::load(&lab.state).unwrap(),
+            state(1, Step::Refresh, false)
+        );
+
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::BootKept));
+        assert_eq!(fake.count_of("back_up_esp"), 1);
+        assert_eq!(fake.count_of("copy"), 1);
+        assert_eq!(lab.esp_tree(), before);
+        assert!(esp::boots_kernel(&lab.esp, &lab.root, UUID, NEW));
+    }
+
+    /// The same cut, and a boot refresh that works the next time: the ESP is fully the
+    /// refreshed one, with nothing of the half put-back left.
+    #[test]
+    fn a_put_back_cut_halfway_is_replaced_by_a_refresh_that_works() {
+        let lab = armed("apply-put-back-cut-done");
+        let mut fake = Fake::new(&lab);
+        fake.refresh = Refresh::Fails;
+        fake.cut_inside = Some("put_back_esp");
+        boot_and_lose_power(&mut fake);
+        fake.refresh = Refresh::Works;
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::Done));
+        assert_eq!(boot_files_on_the_esp(&lab), refreshed());
+        assert_eq!(passed(&lab), restored_boot_files());
+        assert!(!has_temporary_files(&lab));
+        assert_eq!(fake.count_of("back_up_esp"), 1);
+    }
+
+    // ---- a link that can't be removed ----
+
+    /// systemd.offline-updates(7): with the link still there, a restart goes to the update
+    /// again. So the apply never restarts over a link it couldn't remove.
+    #[test]
+    fn a_link_that_cant_be_removed_ends_without_a_restart() {
+        let lab = armed("apply-stuck");
+        let mut fake = Fake::new(&lab);
+        fake.stuck_link = true;
+        let stuck = End::LinkStuck {
+            outcome: Outcome::Done,
+        };
+        assert_eq!(boot(&mut fake), stuck);
+        assert_eq!(fake.count_of("restart"), 0);
+        // The arm stays whole: nothing of it is removed around a link that's still there.
+        assert_eq!(fake.count_of("remove_arm_files"), 0);
+        assert!(is_linked(&lab));
+        assert_eq!(report(&lab).outcome, Outcome::Done);
+        assert_eq!(State::load(&lab.state).unwrap(), state(1, Step::End, false));
+
+        // Whatever starts the next boot, it does no work and again doesn't restart.
+        let calls = fake.calls.len();
+        assert_eq!(boot(&mut fake), stuck);
+        let again: Vec<_> = fake.calls[calls..]
+            .iter()
+            .copied()
+            .filter(|call| *call != "say")
+            .collect();
+        assert_eq!(again, ["is_armed", "remove_link"]);
+        assert_eq!(fake.count_of("restart"), 0);
+        assert_eq!(fake.count_of("copy"), 1);
+    }
+
+    /// The only restarts with the link in place are the retries, and an attempt is on disk
+    /// before each: two at most. The third broken copy ends the restore, and a link that
+    /// can't be removed then gets no third restart.
+    #[test]
+    fn three_broken_copies_and_a_stuck_link_restart_twice_and_no_more() {
+        let lab = armed("apply-stuck-failed");
+        let mut fake = Fake::new(&lab);
+        fake.stuck_link = true;
+        fake.exits = [Some(11), Some(11), Some(11)].into();
+        assert_eq!(boot(&mut fake), End::Retry { attempt: 2 });
+        assert_eq!(boot(&mut fake), End::Retry { attempt: 3 });
+        let stuck = End::LinkStuck {
+            outcome: Outcome::Failed,
+        };
+        assert_eq!(boot(&mut fake), stuck);
+        assert_eq!(fake.count_of("restart"), 2);
+        for _ in 0..3 {
+            assert_eq!(boot(&mut fake), stuck);
+        }
+        assert_eq!(fake.count_of("restart"), 2);
+        assert_eq!(fake.count_of("copy"), 3);
+    }
+
     /// A backup that doesn't verify, and an ESP the refresh had already finished: it boots
     /// the restored kernel, and that's a restore that's done.
     #[test]
     fn a_damaged_backup_with_a_finished_refresh_ends_done() {
         let lab = cut_with_a_backup("apply-backup-damaged-done");
         fs::write(lab.state.join(BACKUP_DIR).join("initrd.img"), "damaged").unwrap();
+        state(1, Step::Refresh, false).save(&lab.state).unwrap();
         lab.kernelstub(OLD);
         lab.kernelstub_previous(OLDER);
         let mut fake = Fake::new(&lab);
@@ -1518,6 +1868,7 @@ mod tests {
     fn a_damaged_backup_with_a_half_refreshed_esp_ends_boot_broken() {
         let lab = cut_with_a_backup("apply-backup-damaged-broken");
         fs::write(lab.state.join(BACKUP_DIR).join("initrd.img"), "damaged").unwrap();
+        state(1, Step::Refresh, false).save(&lab.state).unwrap();
         fs::write(lab.esp_file(BootFile::Kernel), "half a kernel").unwrap();
         let mut fake = Fake::new(&lab);
         assert_eq!(boot(&mut fake), End::Finished(Outcome::BootBroken));
@@ -1546,21 +1897,33 @@ mod tests {
 
     // ---- the arm check (item 6) ----
 
+    /// systemd.offline-updates(7), point 5: a link that points somewhere else is another
+    /// tool's update. It's left where it is, and the apply doesn't restart under that tool.
     #[test]
-    fn without_the_link_nothing_is_read_or_reported() {
+    fn a_link_that_isnt_apsiss_is_left_alone() {
         let lab = armed("apply-not-armed");
+        fs::remove_file(lab.root.join("system-update")).unwrap();
+        std::os::unix::fs::symlink("/var/lib/system-update", lab.root.join("system-update"))
+            .unwrap();
+        let mut fake = Fake::new(&lab);
+        assert_eq!(boot(&mut fake), End::NotArmed);
+        // Only Apsis's own leftovers go: the unit that ran this, and the helper copy.
+        assert_eq!(fake.calls, ["is_armed", "say", "remove_arm_files"]);
+        assert_eq!(
+            fs::read_link(lab.root.join("system-update")).unwrap(),
+            Path::new("/var/lib/system-update")
+        );
+        assert!(!lab.state.join(RESULT_FILE).exists());
+        assert_eq!(State::load(&lab.state).unwrap(), State::default());
+    }
+
+    #[test]
+    fn without_a_link_nothing_is_read_or_reported() {
+        let lab = armed("apply-no-link");
         fs::remove_file(lab.root.join("system-update")).unwrap();
         let mut fake = Fake::new(&lab);
         assert_eq!(boot(&mut fake), End::NotArmed);
-        assert_eq!(fake.calls, ["is_armed", "say", "disarm", "restart"]);
-        assert!(!lab.state.join(RESULT_FILE).exists());
-        assert_eq!(State::load(&lab.state).unwrap(), State::default());
-
-        // A link that isn't Apsis's is removed, and that's all.
-        std::os::unix::fs::symlink("/var/lib/system-update", lab.root.join("system-update"))
-            .unwrap();
-        assert_eq!(boot(&mut fake), End::NotArmed);
-        assert!(!is_linked(&lab));
+        assert_eq!(fake.calls, ["is_armed", "say", "remove_arm_files"]);
         assert!(!lab.state.join(RESULT_FILE).exists());
     }
 
@@ -1577,7 +1940,13 @@ mod tests {
                 .copied()
                 .filter(|call| *call != "say")
                 .collect::<Vec<_>>(),
-            ["is_armed", "now", "disarm", "restart"]
+            [
+                "is_armed",
+                "now",
+                "remove_link",
+                "remove_arm_files",
+                "restart"
+            ]
         );
         let report = report(&lab);
         assert_eq!(report.outcome, Outcome::Failed);
@@ -1677,22 +2046,21 @@ mod tests {
     // ---- the minimal report (item 8) ----
 
     /// A clock that gives no time: the real result is refused, and the minimal one is
-    /// written in its place.
+    /// written in its place, with the real outcome.
     #[test]
-    fn a_refused_result_is_replaced_by_the_minimal_report() {
+    fn a_refused_result_is_replaced_by_the_minimal_report_with_its_outcome() {
         let lab = armed("apply-minimal");
         let mut fake = Fake::new(&lab);
         fake.now = 0;
-        assert_eq!(boot(&mut fake), End::Finished(Outcome::Failed));
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::Done));
         assert_eq!(
             report(&lab),
             Report {
-                outcome: Outcome::Failed,
+                outcome: Outcome::Done,
                 snapshot: Some(SNAPSHOT.to_owned()),
                 safety_snapshot: Some(SAFETY.to_owned()),
                 home: Home::Keep,
-                message: "result could not be saved, see journal (the restore ended: done)"
-                    .to_owned(),
+                message: "result could not be saved, see journal".to_owned(),
                 when: None,
             }
         );
@@ -1708,6 +2076,51 @@ mod tests {
         );
     }
 
+    /// Every outcome keeps itself in the minimal report.
+    #[test]
+    fn the_minimal_report_keeps_a_boot_kept_outcome() {
+        let lab = armed("apply-minimal-kept");
+        let mut fake = Fake::new(&lab);
+        fake.now = 0;
+        fake.refresh = Refresh::Fails;
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::BootKept));
+        let report = report(&lab);
+        assert_eq!(report.outcome, Outcome::BootKept);
+        assert_eq!(report.when, None);
+    }
+
+    /// What's left when the snapshot's name is what was refused: only `failed` may lack it,
+    /// so the real outcome goes into the message.
+    #[test]
+    fn a_minimal_report_without_a_snapshot_is_failed_and_names_the_outcome() {
+        let lab = armed("apply-minimal-bare");
+        let mut fake = Fake::new(&lab);
+        let refused = Report {
+            outcome: Outcome::Done,
+            snapshot: Some("newest".to_owned()),
+            safety_snapshot: Some(SAFETY.to_owned()),
+            home: Home::Restore,
+            message: String::new(),
+            when: Some(NOW),
+        };
+        assert_eq!(
+            save_minimal(&lab.state, &mut fake, &refused),
+            Outcome::Failed
+        );
+        assert_eq!(
+            report(&lab),
+            Report {
+                outcome: Outcome::Failed,
+                snapshot: None,
+                safety_snapshot: None,
+                home: Home::Restore,
+                message: "result could not be saved, see journal (the restore ended: done)"
+                    .to_owned(),
+                when: Some(NOW),
+            }
+        );
+    }
+
     #[test]
     fn the_minimal_report_of_an_unreadable_plan_has_neither_snapshot_nor_time() {
         let lab = armed("apply-minimal-null");
@@ -1717,9 +2130,6 @@ mod tests {
         assert_eq!(boot(&mut fake), End::Finished(Outcome::Failed));
         let report = report(&lab);
         assert_eq!((report.snapshot, report.when), (None, None));
-        assert_eq!(
-            report.message,
-            "result could not be saved, see journal (the restore ended: failed)"
-        );
+        assert_eq!(report.message, "result could not be saved, see journal");
     }
 }

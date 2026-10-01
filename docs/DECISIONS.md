@@ -2428,3 +2428,92 @@ Not covered here:
   attempt not saved before the copy (5 tests), a backup that doesn't verify taken again
   (4), the end not saved before the cleanup (6), a refresh that exits 0 taken as passed
   without the check (1), no limit on attempts cut by the power (1).
+
+## 2026-10-01 - 6b: the apply, follow-up: backup retake, minimal report, cuts inside a step, the link (owner)
+
+Five points from the owner on the entry above; they replace its picks 4, 5 (in part), 8, 12
+and 13.
+
+1. **A backup cut by the power is taken once more, while the boot refresh hasn't started.**
+   - `state.json` has a fifth step, `boot-refresh`, saved after the ESP backup is whole and
+     before the boot refresh runs. `boot-files` now means: the copy ended, the boot files
+     are untouched.
+   - At `boot-files`, a backup folder with no manifest is removed (`esp::remove_partial`)
+     and the backup taken again. The path is validated: only a real folder named
+     `esp-backup` in the state folder, never through a link, and never one that has a
+     manifest, readable or not.
+   - At `boot-refresh`, no backup is ever taken: not over a partial folder, not when the
+     folder is gone. That ends as before (no refresh, no put-back, the outcome read off the
+     ESP).
+   - **Picked:** a backup that has a manifest and doesn't verify is damaged, not partial. It
+     isn't removed or retaken at either step.
+2. **`when` may be `null` with any outcome; `snapshot` only with `failed`.** `result.json`
+   stays version 1 (unshipped). The minimal report keeps the real outcome, with the message
+   "result could not be saved, see journal" and no time unless the clock gave one after 1970.
+   - **Picked:** if that's refused too, the only field left that can be wrong is the
+     snapshot's name. The report is then `failed` without a snapshot, and its message names
+     the real outcome. A validated plan can't produce this; it's tested directly.
+3. **Cuts inside a step**, with the fake runner: a backup with two of seven files copied and
+   no manifest; a put-back with the kernel and initrd back, the rest not, and a temporary
+   file on the ESP. The next boot ends `done` or `boot-kept`, and the seven files are all the
+   refreshed ones or the whole ESP tree is what it was before.
+   - **Found by the test:** a put-back that's cut leaves `<name>.apsis-tmp` on the ESP (up to
+     an initrd's size). If the next boot's refresh then works, nothing removed it. New:
+     `esp::clear_temporaries` removes exactly those names beside the seven files, before the
+     boot refresh.
+4. **The restart loop, and `systemd.offline-updates(7)`** (systemd 255, read on this machine).
+   What the design rests on, quoted:
+   - Point 5: "As the first step, an update service should check if the /system-update or
+     /etc/system-update symlink points to the location used by that update service. In case
+     it does not exist or points to a different location, the service must exit without
+     error."
+   - Point 6: "After completion (regardless whether the update succeeded or failed) the
+     machine must be rebooted, for example by calling systemctl reboot."
+   - Point 7: "If the system-update.target is successfully reached, i.e. all update services
+     have run, and the /system-update or /etc/system-update symlink still exists, it will be
+     removed and the machine rebooted as a safety measure."
+   - Recommendation 2: "Make sure to remove the /system-update and /etc/system-update
+     symlinks as early as possible in the update script to avoid reboot loops in case the
+     update fails."
+   - Recommendation 3: "Use FailureAction=reboot in the service file for your update script
+     to ensure that a reboot is automatically triggered if the update fails."
+
+   Checked against them:
+   - **A link that can't be removed gets no restart.** `Runner::disarm` is split into
+     `remove_link` and `remove_arm_files`. If `remove_link` fails, nothing else is removed,
+     `Runner::restart` isn't called, and the apply returns `End::LinkStuck { outcome }` for
+     the helper to exit 0. Point 7 then applies: systemd removes the link and restarts. The
+     result and step `end` are saved before, so a boot that comes back with the link still
+     there does no work and again doesn't restart.
+   - **With attempts capped at 3**: the apply restarts over a link only as a retry, and
+     `attempts` is on disk before each copy. Boots 1 and 2 restart; the third broken copy
+     ends the restore; with a stuck link that boot, and any later one, ends without a
+     restart. Tested: two restarts in six boots.
+   - **A deliberate departure from recommendation 2**: the link is kept until the end, not
+     removed early, so that a broken copy is retried at the next boot (PLAN 6b.10). The
+     attempts are what bounds that.
+   - **A conflict with point 5, fixed**: PLAN step 1 said to remove a link that isn't
+     Apsis's, and the apply did. That link is another tool's pending update. Now it's left
+     alone: the apply removes only its own leftover unit files, doesn't restart, and returns
+     `End::NotArmed`. PLAN step 1 is changed, with the reason.
+   - **Not covered, for the helper slice:** the apply can only bound what it returns from.
+     If the helper dies before that (a panic, a kill) in a boot that counted no attempt, the
+     unit's `OnFailure=reboot.target` restarts with the link in place, and nothing stops the
+     next boot doing the same. PLAN's helper list now says the helper never exits non-zero
+     with Apsis's link there. If systemd's own removal in point 7 fails too (a read-only
+     `/`), the restart loop is systemd's, and each boot of it does no work in Apsis.
+   - **Not read:** `system-update-cleanup.service` itself. The man page's point 7 is what's
+     relied on; the unit's text and its condition are worth a look in the helper slice.
+   - PLAN's unit has `OnFailure=reboot.target` where the man page recommends
+     `FailureAction=reboot`: noted in the helper list, not changed.
+5. **PLAN, helper slice**: the real runner's copy step calls `syncfs` on the restored
+   filesystem (`/`, and a separate `/home` that's restored) after rsync exits; core saves
+   step `boot-files` only after the copy step returns (6b.6 step 3, 6b.13 step 3).
+
+- **Verified** with apsis-core's tests (314 unit, 46 of them the apply's) and clippy
+  `-D warnings` through the scratch workspace; the workspace run is the owner's. The new
+  tests failed first as compile errors on the missing API (the step, `remove_partial`,
+  `clear_temporaries`, `remove_link`, `LinkStuck`). Deliberate breakages then failed on
+  assertions and were undone: a backup taken again after the refresh started (2 tests), a
+  restart over a stuck link (3), temporary files not cleared (1), the `boot-refresh` step
+  not saved (3), the minimal report not keeping its outcome (3).
