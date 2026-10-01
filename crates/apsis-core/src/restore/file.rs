@@ -107,7 +107,7 @@ pub(super) fn load(dir: &Path, name: &str) -> Result<String, FileError> {
 
 /// A new file at `path` for writing: `O_CREAT | O_EXCL`, so a name that's taken, also by a
 /// link, is an error and nothing is written through it.
-fn create_new(path: &Path) -> io::Result<File> {
+pub(super) fn create_new(path: &Path) -> io::Result<File> {
     OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -117,7 +117,7 @@ fn create_new(path: &Path) -> io::Result<File> {
 
 /// `path` for reading, with `O_NOFOLLOW`: a link at the name fails the open itself (`ELOOP`),
 /// so there's no check before it to race. `O_NONBLOCK` keeps a FIFO from holding it up.
-fn open_nofollow(path: &Path) -> io::Result<File> {
+pub(super) fn open_nofollow(path: &Path) -> io::Result<File> {
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
     Ok(File::from(rustix::fs::open(path, flags, Mode::empty())?))
 }

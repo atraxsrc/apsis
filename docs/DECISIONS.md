@@ -2144,3 +2144,97 @@ Follows the entry above. Docs only; no code changed.
   The only comparison of a time with a clock is `Plan::is_too_old(now)`, which the caller
   runs at "Restart now", not when a file is read. `null` for a report's snapshot or time
   is refused for every outcome today, so the minimal report needs the format change.
+
+## 2026-10-01 - 6b: ESP backup, check and put-back (core)
+
+`restore::esp` holds PLAN 6b.6's steps 4 and 6 as functions on paths (the ESP, the root, the
+state folder), tested on temp trees with a fake ESP laid out as on apsis-test.
+
+- `back_up(esp, state_dir, root_uuid)`: the four files to `state_dir/esp-backup/`.
+- `verify(state_dir)`: the backup against its manifest.
+- `check(esp, root, root_uuid)`: step 6's check; gives the kernel version or a `CheckFailure`.
+- `put_back(esp, state_dir, root_uuid)`: the backed-up files back on the ESP.
+- `remove(state_dir)`: step 8's cleanup.
+- `esp_needs(on_esp, restored)`, `check_esp_space(needs, free)`: the ESP's space.
+
+**The snapshot from before a kernel update** (the ESP boots a kernel whose modules the
+snapshot lacks) is spelled out in the plan, so nothing was picked: rule 10 keeps the running
+kernel's `/boot` files and modules through the copy; the boot refresh moves the ESP to the
+snapshot's kernel; step 6 checks it; a failed check puts the ESP back to the kept kernel
+(`boot-kept`); step 7 removes the kept kernel only after a passed check. Two tests walk that
+snapshot through a refresh that works and one that fails.
+
+What the plan left open:
+
+- **Verification is the plan's byte compare, plus a size and SHA-256 on record.** Right
+  after each copy, the copy is compared byte for byte with the original (PLAN step 4). The
+  size and SHA-256 of what was read go into `esp-backup/manifest.json`. A byte compare proves
+  the copy at that moment; the manifest is what lets a later step (a put-back, or a boot
+  after a power cut) tell that the backup is still whole.
+- **`sha2` is now a direct dependency of apsis-core** (`default-features = false`). It was
+  already in `Cargo.lock` (0.11.0) and in the cargo cache, so nothing is downloaded and no
+  package is added to the tree. `Cargo.lock` got one line by hand (`"sha2"` in apsis-core's
+  list), since the workspace commands don't run in the sandbox: the owner's first workspace
+  build confirms or rewrites it. The alternative was a hand-written SHA-256, which is worse
+  to own.
+- **The manifest** uses the plan and state files' rules (`restore::file`: version 1, exact
+  fields, refused whole, atomic write). Fields: `root_uuid`, then one per file by its name
+  (`vmlinuz.efi`, `initrd.img`, `Pop_OS-current.conf`, `Pop_OS-oldkern.conf`), each
+  `{"size", "sha256"}` or `null`. It's written last, after the files and their folder are
+  flushed, so a backup that a power cut stopped has none and counts as no backup.
+- **The oldkern entry may be missing** (a machine with one kernel): recorded as `null`. The
+  kernel, the initrd and the current entry must be there, or the backup fails (`Missing`).
+- **A failed backup leaves no folder**, so "nothing to put back" (PLAN step 4) is what the
+  state machine finds.
+- **A backup is never made over an earlier one**: `back_up` fails with `AlreadyExists`. The
+  rule for a boot after a power cut (take it again only if the ESP still matches the
+  protected kernel, else keep the earlier one; PLAN 6b.10) is the state machine's, with
+  `verify` and `remove` to build it from.
+- **A link in place of a boot file is refused**, not followed (`O_NOFOLLOW`, as the state
+  files). vfat has no links; this is for anything else mounted there.
+- **The root UUID** must pass `usage::is_plain_uuid` before it's put in a path.
+- **The put-back verifies the whole backup first**, so a damaged kernel is never written to
+  the ESP and a refused put-back leaves the ESP untouched. A backup of another root UUID is
+  refused the same way. Then each file: a temporary name in its folder
+  (`<name>.apsis-tmp`), fsync, rename, fsync of the folder, and a byte compare with the
+  backup (PLAN step 6). A temporary file left by an earlier put-back is removed first.
+- **A file that wasn't backed up is left alone** by the put-back: an oldkern entry that
+  kernelstub made since isn't Apsis's to remove.
+- **An error after the put-back started writing** means the ESP's state is unknown: that's
+  `boot-broken`. Mapping errors to `boot-kept` and `boot-broken` is the state machine's.
+- **The check** reads only the last part of the `/boot/vmlinuz` and `/boot/initrd.img`
+  links (`vmlinuz-<version>`, `initrd.img-<version>`) and looks the files up in the root's
+  own `boot`, so an absolute link can't lead outside the root. The version must read as a
+  kernel version (the filter's rule). A file that can't be read counts as one that differs.
+  Order: the kernel link, the kernel, the initrd, the modules, the current entry. That both
+  commands exited 0 stays with the caller.
+- **ESP space: the plan has no rule, so this one is new, and the least certain pick here.**
+  `esp_needs` is what the kernel and the initrd each grow by (the snapshot's `/boot` files
+  against the ESP's, never less than nothing), plus the larger of the ESP's two (the
+  put-back's temporary copy), plus 16 MiB (the initrd is rebuilt, so the snapshot's size is
+  an estimate; FAT rounds up to clusters). Short: `Refusal::BootSpace { needs, free }`, a
+  new case. It isn't in `refusal::check` (it needs sizes, like the other space lines). Its
+  two dialog lines are the UI slice's; PLAN 6b.7 has the row.
+  - It assumes kernelstub writes over the files in place. If it writes a new file first,
+    the growth term is too small.
+  - It isn't recorded in `request.json`, so it isn't checked again at "Restart now". The
+    ESP changes only on a kernel update, which gets Busy while the prompt is up only if it
+    goes through Apsis, which it doesn't. To decide with the helper slice.
+
+For the owner:
+
+- **The "previous" kernel on the ESP isn't in the plan's four files.** The oldkern entry
+  boots its own kernel and initrd copies in `EFI/Pop_OS-<root-uuid>/` (kernelstub's
+  `-previous` files, as far as the code was read from memory, not from the machine), and
+  the boot refresh rewrites those too. After a put-back the oldkern entry is the old one,
+  but the files it names are whatever kernelstub left. The current entry, which is what
+  boots, is covered. Check 0.1's listing of the ESP folder settles the names; adding them
+  is two more `BootFile`s and manifest keys.
+- **The fake ESP is a folder on the test's filesystem, not vfat.** Rename-over and fsync
+  behave the same for this code, but vfat's own limits (no links, case folding) aren't
+  exercised until apsis-test.
+
+- **Verified** with apsis-core's tests and clippy `-D warnings` through the scratch
+  workspace. The new tests were first seen failing as compile errors; three deliberate
+  breakages then failed on assertions and were undone: a verification that compares sizes
+  only, a check that ignores the modules, and a put-back that doesn't rename.

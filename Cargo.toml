@@ -18,6 +18,9 @@ rust-embed = "8.11"
 rustix = { version = "1", features = ["fs", "process"] }
 # Timeshift's config: `preserve_order` keeps its fields in the order they were read.
 serde_json = { version = "1", features = ["preserve_order"] }
+# The ESP backup's manifest (restore). Already in the dependency tree (no download); no
+# default features, so nothing comes with it.
+sha2 = { version = "0.11", default-features = false }
 # /etc/apsis/config.toml. 0.5 is the version already in the dependency tree (no download).
 toml = "0.5"
 thiserror = "2"

@@ -432,9 +432,10 @@ restore's rsync argv (`apsis_core::restore::argv`), the refusals of 6b.7 except 
 space parsing and the two space refusals (`apsis_core::restore::space`), the plan and state
 files: `request.json` (`apsis_core::restore::plan`), `state.json` and `result.json`
 (`apsis_core::restore::state`), with their shared format, version rule and atomic write
-(`apsis_core::restore::file`). Format detection is 0.4.1's `Info::is_old_format`, unchanged.
-Still to come in the core slice: ESP backup and check, the apply state machine, the real-rsync
-temp-tree tests.
+(`apsis_core::restore::file`), the ESP backup with its manifest, the check after the boot
+refresh, the put-back and the ESP space refusal (`apsis_core::restore::esp`). Format detection
+is 0.4.1's `Info::is_old_format`, unchanged.
+Still to come in the core slice: the apply state machine, the real-rsync temp-tree tests.
 
 Goal: pick a snapshot, click Restore, and after a restart the system is back to that state.
 One person at the keyboard. The copy is rsync over `/` with excludes, like Timeshift's. When
@@ -657,7 +658,10 @@ written by this restore), both fsynced before the step that depends on them.
    `loader/entries/Pop_OS-{current,oldkern}.conf` to `/var/lib/apsis/restore/esp-backup/`
    (on `/`, protected), fsync, and byte-compare each copy with the original. A copy that
    doesn't match: stop before touching the boot files, and go to the **boot files failed**
-   path below with nothing to put back. This happens before `update-initramfs`, because Pop's
+   path below with nothing to put back. Each file's size and SHA-256 go into
+   `esp-backup/manifest.json`, written last: a backup without a manifest isn't one, and a
+   put-back verifies the backup against it before it writes anything to the ESP. The oldkern
+   entry may be missing (one kernel installed); the other three must be there. This happens before `update-initramfs`, because Pop's
    post-update hook runs kernelstub itself.
 5. **Boot files**, on the restored `/`. No chroot is needed: the running system *is* the target,
    and the tools are the restored system's own:
@@ -728,6 +732,7 @@ line on what to do, and Close (wording in 6b.8's string table). The lines below 
 | snapshot's `/boot/vmlinuz` has no `/usr/lib/modules/<version>/` in the snapshot, or the snapshot has no `update-initramfs` or `kernelstub` | "This snapshot's kernel files are incomplete, so it can't be restored safely." |
 | `/system-update` already exists (a pending system update) | "A system update is waiting for a restart. Restart first, then restore." |
 | not enough space (6b.4) | the space line |
+| the ESP is short for the boot refresh and a put-back (`esp::esp_needs`; added 2026-10-01, core) | wording in the UI slice |
 | Timeshift's lock is held; another Apsis job runs | the existing Busy wording |
 
 The checks are pure functions on text that has already been read (mountinfo, lsblk JSON,

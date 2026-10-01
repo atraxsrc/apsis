@@ -50,6 +50,11 @@ pub enum Refusal {
         needs: u64,
         free: u64,
     },
+    /// The ESP is short for the boot refresh and a put-back ([`super::esp`]). Both in bytes.
+    BootSpace {
+        needs: u64,
+        free: u64,
+    },
 }
 
 /// Why a snapshot can't be read as something to restore.
