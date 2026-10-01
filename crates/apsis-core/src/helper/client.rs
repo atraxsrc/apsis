@@ -9,19 +9,21 @@ use std::future::Future;
 
 use super::names::{
     BUS_NAME, ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
-    ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CREATE, METHOD_DELETE, METHOD_DELETE_MANY, METHOD_JOB,
-    METHOD_LIST, METHOD_READ_CONFIG, METHOD_STOP, METHOD_WRITE_CONFIG, OBJECT_PATH, OP_CREATE,
-    OP_DELETE, OP_DELETE_MANY, SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
+    ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CHECK_RESTORE, METHOD_CREATE, METHOD_DELETE,
+    METHOD_DELETE_MANY, METHOD_JOB, METHOD_LIST, METHOD_READ_CONFIG, METHOD_STOP,
+    METHOD_WRITE_CONFIG, OBJECT_PATH, OP_CREATE, OP_DELETE, OP_DELETE_MANY, SIGNAL_FINISHED,
+    SIGNAL_JOB_CHANGED,
 };
 use super::{
-    WireConfigInfo, WireListWithUsage3, check_delete_many, config_info_from_wire, config_to_wire,
-    decode_error, from_wire_with_usage3,
+    WireCheckRestore, WireConfigInfo, WireListWithUsage3, check_delete_many, config_info_from_wire,
+    config_to_wire, decode_error, from_wire_with_usage3,
 };
 use crate::config::{Config, ConfigInfo};
 use crate::error::{Error, Result};
 use crate::job::{self, Job, WireJob};
 use crate::model::SnapshotList;
 use crate::progress::Progress;
+use crate::restore::dialog::{self, Dialog};
 
 /// The applet's side of `apsis-helper`, on the system bus.
 ///
@@ -62,6 +64,22 @@ impl HelperClient {
             .await
             .map_err(from_zbus)?;
         from_wire_with_usage3(wire)
+    }
+
+    /// Whether the snapshot `name` can be restored on this computer, and what the Restore
+    /// dialog says ([`Dialog`]). No password: the helper mounts read-only, as for a list.
+    ///
+    /// # Errors
+    ///
+    /// What the helper reported (see [`Error`]; `Busy` while a write runs), or a bad reply.
+    pub async fn check_restore(&self, name: &str) -> Result<Dialog> {
+        let wire: WireCheckRestore = self
+            .proxy()
+            .await?
+            .call(METHOD_CHECK_RESTORE, &(name,))
+            .await
+            .map_err(from_zbus)?;
+        dialog::from_wire(wire)
     }
 
     /// Creates a snapshot and waits until it's done (this can take minutes).

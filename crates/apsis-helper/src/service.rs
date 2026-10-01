@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! The D-Bus interface `Helper3`: `List`, `Create`, `Delete`, `DeleteMany`, `Stop`, `Job`,
-//! `ReadConfig`, `WriteConfig`, and the `JobChanged` and `Finished` signals. Nothing else.
+//! `ReadConfig`, `WriteConfig`, `CheckRestore`, and the `JobChanged` and `Finished` signals.
+//! Nothing else.
 //!
-//! `List` is a read: it shares the read-only mount with other lists and is never a job
+//! `List` and `CheckRestore` are reads: they share the read-only mount and are never jobs
 //! (`state.rs` has the rules). Everything that writes is a job under the one lock.
 //!
 //! Every call is logged with its result on stderr, which systemd puts in the journal
@@ -17,11 +18,12 @@ use apsis_core::helper::names::{
     OP_CREATE, OP_DELETE, OP_DELETE_MANY,
 };
 use apsis_core::helper::{
-    WireConfig, WireConfigInfo, WireListWithUsage3, check_delete_many, config_from_wire,
-    encode_error, to_wire_with_usage3,
+    WireCheckRestore, WireConfig, WireConfigInfo, WireListWithUsage3, check_delete_many,
+    config_from_wire, encode_error, to_wire_with_usage3,
 };
 use apsis_core::job::{self, JobKind, JobState, WireJob};
 use apsis_core::native::{Cancel, TooLate};
+use apsis_core::restore::dialog;
 use apsis_core::status::BY_UUID;
 use apsis_core::{Backend, Error, SnapshotList, parse_snapshot_name, validate_comment};
 use zbus::fdo::DBusProxy;
@@ -30,6 +32,7 @@ use zbus::names::{BusName, UniqueName};
 use zbus::object_server::SignalEmitter;
 use zbus::{Connection, DBusError, interface};
 
+use crate::check::{self, Live, SnapshotFiles};
 use crate::native::{self, SharedMount};
 use crate::polkit;
 use crate::runner::DirectRunner;
@@ -127,6 +130,49 @@ impl Helper {
             Err(error) => log(&format!("{label}: {}", describe_error(error))),
         }
         Ok(to_wire_with_usage3(&result?))
+    }
+
+    /// Whether `snapshot` can be restored on this computer, and what the Restore dialog says
+    /// (PLAN 6b.7, 6b.9; polkit: `list`, no password). A read like `List`: it shares the
+    /// read-only mount, is never a job, and is refused `Busy` while a write runs or waits.
+    /// `snapshot` must be a snapshot name the fresh list has (not a leftover).
+    async fn check_restore(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+        snapshot: String,
+    ) -> Result<WireCheckRestore, HelperError> {
+        let _call = self.state.call();
+        let caller = caller(&header)?;
+        let label = format!("check-restore {snapshot:?} for {caller}");
+        let result = async {
+            if parse_snapshot_name(&snapshot).is_none() {
+                return Err(Error::InvalidSnapshotName(snapshot.clone()));
+            }
+            authorize(connection, &caller, ACTION_LIST, false).await?;
+            let reading = self.state.read()?;
+            let mount = Arc::clone(&self.mount);
+            blocking(move || {
+                let _reading = reading;
+                let (backend, _shared) = native::open_shared(&DirectRunner, &mount, log_lines)?;
+                let list = backend.list()?;
+                if !list.snapshots.iter().any(|s| s.name == snapshot) {
+                    return Err(Error::NoSuchSnapshot(snapshot));
+                }
+                let files =
+                    SnapshotFiles::read(&check::snapshot_dir(&backend.config().repo, &snapshot));
+                let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")?;
+                let live = Live::read(Path::new("/"), &DirectRunner, &mountinfo)?;
+                Ok(check::dialog(&live, &files))
+            })
+            .await
+        }
+        .await;
+        match &result {
+            Ok(dialog) => log(&format!("{label}: {}", describe_dialog(dialog))),
+            Err(error) => log(&format!("{label}: {}", describe_error(error))),
+        }
+        Ok(dialog::to_wire(&result?))
     }
 
     /// Starts a snapshot (polkit: `create`) and returns; `Finished("create", ..)` follows.
@@ -559,6 +605,26 @@ fn log(line: &str) {
     eprintln!("apsis-helper: {line}");
 }
 
+/// One journal line for a `CheckRestore` result: `ok` or the refusal's word, then the lines
+/// that aren't refusals.
+fn describe_dialog(dialog: &dialog::Dialog) -> String {
+    let verdict = dialog
+        .refusal
+        .as_ref()
+        .map_or_else(|| "ok".to_owned(), |r| format!("refused: {}", r.to_wire()));
+    format!(
+        "{verdict}; home {}, root {}, {}, apsis {}",
+        if dialog.has_home { "yes" } else { "no" },
+        if dialog.has_root { "yes" } else { "no" },
+        if dialog.old_format {
+            "old format"
+        } else {
+            "current format"
+        },
+        dialog.apsis.to_wire()
+    )
+}
+
 /// [`log`] for text that may have several lines: one journal line each.
 fn log_lines(text: &str) {
     text.lines().for_each(log);
@@ -677,9 +743,9 @@ mod tests {
     use apsis_core::helper::decode_error;
     use apsis_core::helper::names::{
         ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
-        ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CREATE, METHOD_DELETE, METHOD_DELETE_MANY,
-        METHOD_JOB, METHOD_LIST, METHOD_READ_CONFIG, METHOD_STOP, METHOD_WRITE_CONFIG,
-        SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
+        ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CHECK_RESTORE, METHOD_CREATE, METHOD_DELETE,
+        METHOD_DELETE_MANY, METHOD_JOB, METHOD_LIST, METHOD_READ_CONFIG, METHOD_STOP,
+        METHOD_WRITE_CONFIG, SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
     };
     use zbus::object_server::Interface;
 
@@ -699,6 +765,7 @@ mod tests {
             METHOD_JOB,
             METHOD_READ_CONFIG,
             METHOD_WRITE_CONFIG,
+            METHOD_CHECK_RESTORE,
         ] {
             assert!(
                 xml.contains(&format!("<method name=\"{method}\">")),
@@ -711,8 +778,10 @@ mod tests {
                 "{signal}\n{xml}"
             );
         }
-        // Nothing else: exactly eight methods and two signals.
-        assert_eq!(xml.matches("<method ").count(), 8, "{xml}");
+        // Nothing else: exactly nine methods and two signals.
+        assert_eq!(xml.matches("<method ").count(), 9, "{xml}");
+        // `CheckRestore(s snapshot) -> (bsbbbs)`.
+        assert!(xml.contains("type=\"(bsbbbs)\""), "{xml}");
         // `DeleteMany(as names)`.
         assert!(
             xml.contains("<arg name=\"names\" type=\"as\" direction=\"in\"/>"),

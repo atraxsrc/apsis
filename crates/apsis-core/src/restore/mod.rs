@@ -9,6 +9,7 @@
 pub mod apply;
 pub mod apsis;
 pub mod argv;
+pub mod dialog;
 pub mod esp;
 pub mod file;
 pub mod filter;

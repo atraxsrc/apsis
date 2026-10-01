@@ -1863,6 +1863,10 @@ Checks:
       `Helper3` names, the `CheckRestore`/`RestoreResult` wire types, `Refusal`'s words on
       the wire, `JobKind::Restore`, the ready plan. The design of the drop-in (text, path,
       protection) is built as written and stands or falls with check 0.4c.
+      **Update 2026-10-02**: of those, done with items 2 to 4 below: `JobKind::Restore` and
+      the ready plan (item 2), the `Helper3` names (item 3), the hook-flag rule, `Refusal`'s
+      words and the `CheckRestore` wire type (item 4). Still open: `refresh_boot`'s contract
+      (item 8) and the `RestoreResult` wire type (item 9).
       The list as designed: `restore::unit` gets the drop-in's text and path;
       `filter::PROTECTED` gets the drop-in (6 entries; the package test still passes);
       `refusal::check_pending` and `Refusal::PopUpgradePending` (the three Pop names);
@@ -1897,6 +1901,11 @@ Checks:
       kernelstub configuration, its hook, its crypttab, its `var/lib/dpkg/status`), then core's
       `refusal::check`, `check_pending`, `crypttab_differs`, `esp::check_before_arming`,
       `filter::has_home`, the Apsis-in-the-snapshot line.
+      **Status (2026-10-02): done** (`check.rs` in the helper, `restore::dialog` in core,
+      `HelperClient::check_restore`; DECISIONS 2026-10-02 "CheckRestore"). With it, item 1's
+      leftovers: the hook-flag rule (`refusal::Snapshot::hook`, `HOOK_FLAG`), `Refusal` and
+      `InSnapshot` on the wire, the `(bsbbbs)` wire type. Open for the owner: `has_root` was
+      never defined; it's "the snapshot's `exclude.list` lets `/root` in".
    5. **`Restore`**: the same checks, both dry runs (`argv::rsync_dry_run`, `LC_ALL=C`,
       `space::dry_run_size`), the space checks, the safety snapshot (the 0.4.x create, with
       `/home` when home is restored), `request.json` (with `snapshot_created`, the starter

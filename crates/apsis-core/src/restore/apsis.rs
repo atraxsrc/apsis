@@ -25,6 +25,36 @@ pub enum InSnapshot {
     OldSettings { version: String },
 }
 
+impl InSnapshot {
+    /// As `CheckRestore` carries it (`apsis_note`): a word, with the version after a `:`
+    /// where there is one.
+    #[must_use]
+    pub fn to_wire(&self) -> String {
+        match self {
+            Self::Current => "current".to_owned(),
+            Self::NotInstalled => "not-installed".to_owned(),
+            Self::NoRestore { version } => format!("no-restore:{version}"),
+            Self::OldSettings { version } => format!("old-settings:{version}"),
+        }
+    }
+
+    /// What a helper sent; `None` for a word this version doesn't know.
+    #[must_use]
+    pub fn from_wire(word: &str) -> Option<Self> {
+        match word.split_once(':').unwrap_or((word, "")) {
+            ("current", "") => Some(Self::Current),
+            ("not-installed", "") => Some(Self::NotInstalled),
+            ("no-restore", version) if !version.is_empty() => Some(Self::NoRestore {
+                version: version.to_owned(),
+            }),
+            ("old-settings", version) if !version.is_empty() => Some(Self::OldSettings {
+                version: version.to_owned(),
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// Reads the text of a snapshot's `var/lib/dpkg/status`; `None` if it has no such file.
 #[must_use]
 pub fn in_snapshot(dpkg_status: Option<&str>) -> InSnapshot {

@@ -182,6 +182,15 @@ pub fn has_home(snapshot_excludes: &str) -> bool {
         .any(|line| line.starts_with("+ /home/"))
 }
 
+/// Whether a snapshot holds root's home: its `exclude.list` lets `/root` in (`+ /root/**`).
+/// Not a dialog choice (PLAN 6b.8): if the snapshot has it, it's restored with the system.
+#[must_use]
+pub fn has_root(snapshot_excludes: &str) -> bool {
+    snapshot_excludes
+        .lines()
+        .any(|line| line == "+ /root/**" || line.starts_with("+ /root/"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,6 +449,18 @@ mod tests {
     fn text_is_one_rule_per_line() {
         let list = ["- /a/***".to_owned(), "/b".to_owned()];
         assert_eq!(to_text(&list), "- /a/***\n/b\n");
+    }
+
+    /// `/root` isn't a dialog choice (PLAN 6b.8), but `CheckRestore` says whether the
+    /// snapshot has it, like `/home`: the README's "restored with the system if the snapshot
+    /// has it".
+    #[test]
+    fn root_is_in_a_snapshot_when_its_list_lets_it_in() {
+        assert!(has_root("+ /root/**\n/root/**\n"));
+        assert!(has_root("+ /home/**\n+ /root/**\n"));
+        assert!(!has_root("/root/**\n+ /home/**\n"));
+        assert!(!has_root("+ /rootfs/**\n"));
+        assert!(!has_root(""));
     }
 
     #[test]

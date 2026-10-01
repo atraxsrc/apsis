@@ -74,6 +74,67 @@ pub enum Refusal {
     BootFiles(CheckFailure),
 }
 
+impl Refusal {
+    /// The refusal as `CheckRestore` carries it (PLAN 6b.9): one stable word per variant, the
+    /// space ones with their two numbers and the boot-files one with its failure's word after
+    /// a `:`. Never empty, never with whitespace.
+    #[must_use]
+    pub fn to_wire(&self) -> String {
+        match self {
+            Self::NotUefi => "not-uefi".to_owned(),
+            Self::NotKernelstub => "not-kernelstub".to_owned(),
+            Self::BootPartition => "boot-partition".to_owned(),
+            Self::RootFilesystem { fstype } => format!("root-filesystem:{fstype}"),
+            Self::RootDevice => "root-device".to_owned(),
+            Self::SplitSystem => "split-system".to_owned(),
+            Self::OtherInstallation => "other-installation".to_owned(),
+            Self::Unreadable(why) => format!("unreadable:{}", why.word()),
+            Self::KernelIncomplete => "kernel-incomplete".to_owned(),
+            Self::PendingUpdate => "pending-update".to_owned(),
+            Self::PopUpgradePending => "pop-upgrade-pending".to_owned(),
+            Self::CrypttabDiffers => "crypttab-differs".to_owned(),
+            Self::BackupSpace { needs, free } => format!("backup-space:{needs}:{free}"),
+            Self::SystemSpace { needs, free } => format!("system-space:{needs}:{free}"),
+            Self::BootSpace { needs, free } => format!("boot-space:{needs}:{free}"),
+            Self::SizeUnknown => "size-unknown".to_owned(),
+            Self::BootFiles(failure) => format!("boot-files:{}", failure.to_wire()),
+        }
+    }
+
+    /// The refusal a helper sent; `None` for a word this version doesn't know (a newer
+    /// helper's) or for none.
+    #[must_use]
+    pub fn from_wire(word: &str) -> Option<Self> {
+        let (head, rest) = word.split_once(':').unwrap_or((word, ""));
+        let space = |make: fn(u64, u64) -> Self| {
+            let (needs, free) = rest.split_once(':')?;
+            Some(make(needs.parse().ok()?, free.parse().ok()?))
+        };
+        match (head, rest) {
+            ("not-uefi", "") => Some(Self::NotUefi),
+            ("not-kernelstub", "") => Some(Self::NotKernelstub),
+            ("boot-partition", "") => Some(Self::BootPartition),
+            ("root-filesystem", fstype) if !fstype.is_empty() => Some(Self::RootFilesystem {
+                fstype: fstype.to_owned(),
+            }),
+            ("root-device", "") => Some(Self::RootDevice),
+            ("split-system", "") => Some(Self::SplitSystem),
+            ("other-installation", "") => Some(Self::OtherInstallation),
+            ("unreadable", why) => Unreadable::from_word(why).map(Self::Unreadable),
+            ("kernel-incomplete", "") => Some(Self::KernelIncomplete),
+            ("pending-update", "") => Some(Self::PendingUpdate),
+            ("pop-upgrade-pending", "") => Some(Self::PopUpgradePending),
+            ("crypttab-differs", "") => Some(Self::CrypttabDiffers),
+            ("backup-space", _) => space(|needs, free| Self::BackupSpace { needs, free }),
+            ("system-space", _) => space(|needs, free| Self::SystemSpace { needs, free }),
+            ("boot-space", _) => space(|needs, free| Self::BootSpace { needs, free }),
+            ("size-unknown", "") => Some(Self::SizeUnknown),
+            ("boot-files", failure) => CheckFailure::from_wire(failure).map(Self::BootFiles),
+            _ => None,
+        }
+    }
+}
+
 /// Why a snapshot can't be read as something to restore.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unreadable {
@@ -83,6 +144,29 @@ pub enum Unreadable {
     NotRsync,
     NoLocalhost,
     NoExcludeList,
+}
+
+impl Unreadable {
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::NoInfo => "no-info",
+            Self::NotRsync => "not-rsync",
+            Self::NoLocalhost => "no-localhost",
+            Self::NoExcludeList => "no-exclude-list",
+        }
+    }
+
+    #[must_use]
+    pub fn from_word(word: &str) -> Option<Self> {
+        match word {
+            "no-info" => Some(Self::NoInfo),
+            "not-rsync" => Some(Self::NotRsync),
+            "no-localhost" => Some(Self::NoLocalhost),
+            "no-exclude-list" => Some(Self::NoExcludeList),
+            _ => None,
+        }
+    }
 }
 
 /// The running system.
@@ -123,9 +207,16 @@ pub struct Snapshot<'a> {
     pub boot_files: &'a [String],
     /// The names in its `usr/lib/modules`.
     pub modules: &'a [String],
-    pub has_update_initramfs: bool,
+    /// The text of its `etc/initramfs/post-update.d/zz-kernelstub`, if it has one. The apply's
+    /// boot refresh relies on the hook's `--preserve-live-mode` (PLAN 6b.6 step 5).
+    pub hook: Option<&'a str>,
+    /// It has a `kernelstub` program.
     pub has_kernelstub: bool,
 }
+
+/// What the snapshot's kernelstub hook must contain for the boot refresh to keep the ESP's
+/// kernel (PLAN 6b.6 step 5).
+pub const HOOK_FLAG: &str = "--preserve-live-mode";
 
 /// Runs every check, in the order of PLAN 6b.7's table (the snapshot must be readable before
 /// its UUID is).
@@ -186,7 +277,8 @@ pub fn check(system: &System<'_>, snapshot: &Snapshot<'_>) -> Result<(), Refusal
     if let Some(config) = snapshot.kernelstub_config {
         kernelstub_root(config, system.root_uuid)?;
     }
-    if !(kernel_is_whole(snapshot) && snapshot.has_update_initramfs && snapshot.has_kernelstub) {
+    let hook_has_flag = snapshot.hook.is_some_and(|hook| hook.contains(HOOK_FLAG));
+    if !(kernel_is_whole(snapshot) && hook_has_flag && snapshot.has_kernelstub) {
         return Err(Refusal::KernelIncomplete);
     }
     if system.pending_update {
@@ -336,6 +428,75 @@ mod tests {
 
     const ROOT_UUID: &str = "11111111-1111-1111-1111-111111111111";
     const KERNEL: &str = "6.9.3-76060903-generic";
+    /// Pop!_OS 24.04's `etc/initramfs/post-update.d/zz-kernelstub`, in short.
+    const HOOK: &str = "#!/bin/sh\nexec kernelstub --verbose --preserve-live-mode\n";
+
+    /// Every refusal has a word on the wire and comes back the same (`CheckRestore`'s
+    /// `refusal`, PLAN 6b.9); the numbers of the space ones ride along.
+    #[test]
+    fn every_refusal_survives_the_bus() {
+        let all = [
+            Refusal::NotUefi,
+            Refusal::NotKernelstub,
+            Refusal::BootPartition,
+            Refusal::RootFilesystem {
+                fstype: "btrfs".to_owned(),
+            },
+            Refusal::RootDevice,
+            Refusal::SplitSystem,
+            Refusal::OtherInstallation,
+            Refusal::Unreadable(Unreadable::NoInfo),
+            Refusal::Unreadable(Unreadable::NotRsync),
+            Refusal::Unreadable(Unreadable::NoLocalhost),
+            Refusal::Unreadable(Unreadable::NoExcludeList),
+            Refusal::KernelIncomplete,
+            Refusal::PendingUpdate,
+            Refusal::PopUpgradePending,
+            Refusal::CrypttabDiffers,
+            Refusal::BackupSpace {
+                needs: 1_000_000,
+                free: 999,
+            },
+            Refusal::SystemSpace { needs: 5, free: 0 },
+            Refusal::BootSpace { needs: 7, free: 6 },
+            Refusal::SizeUnknown,
+            Refusal::BootFiles(CheckFailure::NoKernelLink),
+            Refusal::BootFiles(CheckFailure::KernelDiffers),
+            Refusal::BootFiles(CheckFailure::InitrdDiffers),
+            Refusal::BootFiles(CheckFailure::NoModules {
+                version: KERNEL.to_owned(),
+            }),
+            Refusal::BootFiles(CheckFailure::NoEntry),
+            Refusal::BootFiles(CheckFailure::PreviousIncomplete),
+        ];
+        let mut words = std::collections::HashSet::new();
+        for refusal in all {
+            let word = refusal.to_wire();
+            assert!(
+                !word.is_empty() && !word.contains(char::is_whitespace),
+                "{word:?}"
+            );
+            assert!(words.insert(word.clone()), "{word} twice");
+            assert_eq!(Refusal::from_wire(&word), Some(refusal), "{word}");
+        }
+        assert_eq!(Refusal::NotUefi.to_wire(), "not-uefi");
+        assert_eq!(
+            Refusal::SystemSpace { needs: 5, free: 0 }.to_wire(),
+            "system-space:5:0"
+        );
+        assert_eq!(
+            Refusal::BootFiles(CheckFailure::NoModules {
+                version: KERNEL.to_owned()
+            })
+            .to_wire(),
+            format!("boot-files:no-modules:{KERNEL}")
+        );
+        // A newer helper's word, or none, is nothing this version knows.
+        assert_eq!(Refusal::from_wire(""), None);
+        assert_eq!(Refusal::from_wire("moon-phase"), None);
+        assert_eq!(Refusal::from_wire("system-space:x:0"), None);
+        assert_eq!(Refusal::from_wire("boot-files:no-modules"), None);
+    }
 
     /// A Pop!_OS machine as apsis-test. Devices are placeholders.
     const MOUNTINFO: &str = "\
@@ -454,7 +615,7 @@ mod tests {
                 vmlinuz: Some("vmlinuz-6.9.3-76060903-generic"),
                 boot_files: &self.boot_files,
                 modules: &self.modules,
-                has_update_initramfs: true,
+                hook: Some(HOOK),
                 has_kernelstub: true,
             };
             (self.snapshot)(&mut snapshot);
@@ -806,13 +967,22 @@ mod tests {
         assert_eq!(case.check(), Ok(()));
     }
 
+    /// The hook flag rule (PLAN 6b.6 step 5): the snapshot's
+    /// `etc/initramfs/post-update.d/zz-kernelstub` must be there and contain
+    /// `--preserve-live-mode`, or the boot refresh of the apply would rewrite the ESP for the
+    /// snapshot's kernel. `update-initramfs` isn't needed: the apply doesn't run it.
     #[test]
     fn a_snapshot_without_its_boot_tools_is_refused() {
-        let no_initramfs = Case {
-            snapshot: |s| s.has_update_initramfs = false,
+        let no_hook = Case {
+            snapshot: |s| s.hook = None,
             ..Case::good()
         };
-        assert_eq!(no_initramfs.check(), Err(Refusal::KernelIncomplete));
+        assert_eq!(no_hook.check(), Err(Refusal::KernelIncomplete));
+        let hook_without_flag = Case {
+            snapshot: |s| s.hook = Some("#!/bin/sh\nexec kernelstub --verbose\n"),
+            ..Case::good()
+        };
+        assert_eq!(hook_without_flag.check(), Err(Refusal::KernelIncomplete));
         let no_kernelstub = Case {
             snapshot: |s| s.has_kernelstub = false,
             ..Case::good()

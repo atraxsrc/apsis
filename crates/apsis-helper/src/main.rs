@@ -10,6 +10,7 @@
 //! `mount` with a fixed argv, no shell. `WriteConfig` writes `/etc/apsis/config.toml`, nothing
 //! else. See `docs/ARCHITECTURE.md`.
 
+mod check;
 mod native;
 mod polkit;
 mod runner;

@@ -568,6 +568,37 @@ pub enum CheckFailure {
     PreviousIncomplete,
 }
 
+impl CheckFailure {
+    /// The failure as `CheckRestore` carries it inside a refusal's word (`boot-files:<this>`).
+    #[must_use]
+    pub fn to_wire(&self) -> String {
+        match self {
+            Self::NoKernelLink => "no-kernel-link".to_owned(),
+            Self::KernelDiffers => "kernel-differs".to_owned(),
+            Self::InitrdDiffers => "initrd-differs".to_owned(),
+            Self::NoModules { version } => format!("no-modules:{version}"),
+            Self::NoEntry => "no-entry".to_owned(),
+            Self::PreviousIncomplete => "previous-incomplete".to_owned(),
+        }
+    }
+
+    /// The failure a helper sent; `None` for a word this version doesn't know.
+    #[must_use]
+    pub fn from_wire(word: &str) -> Option<Self> {
+        match word.split_once(':').unwrap_or((word, "")) {
+            ("no-kernel-link", "") => Some(Self::NoKernelLink),
+            ("kernel-differs", "") => Some(Self::KernelDiffers),
+            ("initrd-differs", "") => Some(Self::InitrdDiffers),
+            ("no-modules", version) if !version.is_empty() => Some(Self::NoModules {
+                version: version.to_owned(),
+            }),
+            ("no-entry", "") => Some(Self::NoEntry),
+            ("previous-incomplete", "") => Some(Self::PreviousIncomplete),
+            _ => None,
+        }
+    }
+}
+
 /// The previous pair on the ESP, as [`check`] found it. Never a failure of the check: the
 /// current pair is what boots.
 #[derive(Debug, Clone, PartialEq, Eq)]

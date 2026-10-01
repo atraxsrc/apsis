@@ -15,6 +15,7 @@
 mod client;
 pub mod names;
 
+pub use crate::restore::dialog::WireCheckRestore;
 pub use client::{HelperClient, JobEvent};
 
 use std::collections::HashMap;

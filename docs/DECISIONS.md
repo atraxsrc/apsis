@@ -3485,3 +3485,60 @@ and the restore methods are added to the same interface.
   `deb-install` already says to re-add it or log out and in.
 
 Gate: workspace tests, clippy `-D warnings` on all targets, fmt check: all clean.
+
+## 2026-10-02 - 6b helper slice: `CheckRestore` (step 3 item 4), and the core bits it needed
+
+Built tests first: core (`refusal::tests`, `dialog::tests`, `filter::tests`, `apsis`), the
+helper (`check::tests`, four tests on temp trees, no root) and the introspection test.
+
+**Core, finishing item 1's leftovers:**
+- **The hook-flag rule** (PLAN 6b.7, 6b.6 step 5): `refusal::Snapshot` carries `hook`, the
+  text of the snapshot's `etc/initramfs/post-update.d/zz-kernelstub`, instead of
+  `has_update_initramfs`. `KernelIncomplete` unless the hook is there and contains
+  `refusal::HOOK_FLAG` (`--preserve-live-mode`). Tests: missing, present without the flag.
+- **`Refusal` on the wire** (`to_wire`/`from_wire`): one stable word per variant
+  (`not-uefi`, `kernel-incomplete`, ...), `root-filesystem:<fstype>`,
+  `unreadable:<no-info|not-rsync|no-localhost|no-exclude-list>`, the three space ones as
+  `<word>:<needs>:<free>`, and `boot-files:<failure>` with `CheckFailure`'s own words
+  (`no-modules:<version>` carries the version). A test round-trips every variant and checks
+  the words are distinct and unknown ones decode to `None`.
+- **`InSnapshot` on the wire**: `current`, `not-installed`, `no-restore:<version>`,
+  `old-settings:<version>`.
+- **`restore::dialog`** (new): `Dialog { refusal, has_home, has_root, old_format, apsis }`,
+  `Inputs` (what the helper read and checked), `build` (6b.7's order: `refusal::check`'s
+  result, `check_pending`, `crypttab_differs`, the ESP check's result; then the lines that
+  aren't refusals) and the `(bsbbbs)` wire (`WireCheckRestore`, re-exported from `helper`).
+  `from_wire` refuses `ok` with a refusal word, a refusal word it doesn't know, and an Apsis
+  word it doesn't know.
+- **`has_root`** (`filter`): the wire's `has_root` was in 6b.9's signature with no definition
+  anywhere in PLAN. Taken as "the snapshot's `exclude.list` lets `/root` in" (`+ /root/**`),
+  the mirror of `has_home`: the README's "restored with the system if the snapshot has it".
+  The dialog doesn't show it (6b.8). **For the owner**: if `has_root` meant something else,
+  say so; it's one function and one wire field.
+
+**Helper:**
+- **`check.rs`** (new): `Live::read(root, runner, mountinfo)` (`/sys/firmware/efi`,
+  `/etc/kernelstub/configuration`, `/usr/bin/kernelstub`, lsblk, `findmnt` for the root
+  UUID, the names in `/boot/efi/EFI`, `/system-update` and `/etc/system-update` by `lstat`,
+  `pop_upgrade_found`, `/etc/crypttab`, and `esp::check_before_arming` on `/boot/efi`
+  against `/`); `SnapshotFiles::read(dir)` (`info.json`, `localhost/`, `exclude.list`, and
+  under `localhost/`: the kernelstub configuration, where `boot/vmlinuz` points, the names in
+  `boot/` and `usr/lib/modules/`, the hook, `usr/bin/kernelstub`, `etc/crypttab`,
+  `var/lib/dpkg/status`); `dialog(live, files)`; `snapshot_dir(repo, name)`.
+  Files are opened with `O_NOFOLLOW` and folders asked of their own name. Since
+  `O_NOFOLLOW` guards the last name only, nothing under a `localhost` that is a link is read
+  (the test moves the tree away and links it). Links deeper down are the snapshot's own
+  content and aren't guarded: a snapshot is root's data on the backup disk.
+  The `kernelstub` program is looked for at `usr/bin/kernelstub` under the root (Pop!_OS's
+  path), not on `PATH`, so a tree can stand in for `/` in the tests.
+- **`CheckRestore(s snapshot) -> (bsbbbs)`** in `service.rs`: polkit `list`, not
+  interactive; the name must parse and be in the fresh list's snapshots (a leftover is
+  `NoSuchSnapshot`); a read under `State::read` on the shared mount (Busy while a write runs
+  or waits; never a job). Journal line: `check-restore "<name>" for :1.x: ok; home yes, root
+  no, current format, apsis no-restore:0.4.2` or `refused: <word>; ...`.
+- **Client**: `HelperClient::check_restore(name) -> Dialog`.
+- Introspection: nine methods, `(bsbbbs)`. The method's test on a real bus is the UI slice's
+  (apsis-test check 1's dialog); here the reads and the composition are tested on trees and
+  the wire on both sides.
+
+Gate: workspace tests, clippy `-D warnings` on all targets, fmt check: all clean.
