@@ -2517,3 +2517,72 @@ and 13.
   assertions and were undone: a backup taken again after the refresh started (2 tests), a
   restart over a stuck link (3), temporary files not cleared (1), the `boot-refresh` step
   not saved (3), the minimal report not keeping its outcome (3).
+
+## 2026-10-01 - 6b: the apply, second follow-up: the boot count, the arming check, the temporary-file invariant (owner)
+
+1. **Every offline boot is counted first.** `state.json` has a sixth field, `boots` (version
+   1, unshipped; written last in the file). `MAX_BOOTS` is 5: three copies, and two boots to
+   spare for power cuts.
+   - **What runs before the count, exactly:** `Runner::is_armed` (the link is Apsis's), and
+     `State::load` (open with `O_NOFOLLOW`, read, parse, validate), then the comparison with
+     the cap. Nothing else: the plan is read after it, and the runner isn't asked for
+     anything else before it.
+   - **The count is the apply's first write.** If it can't be saved, the boot does nothing
+     else and the restore ends (`not-started`, or `failed` if an earlier copy wrote), with
+     the link removed. One exception: step `end` is already saved, where only the cleanup is
+     left and the result isn't written again.
+   - **Past the cap** (`boots` is 5 when a boot begins): `End::GaveUp`. The link is removed
+     first, before anything that could stop the helper again; then `result.json` (`failed`),
+     step `end`, the unit files. `Runner::restart` isn't called. If the link can't be
+     removed it's `End::LinkStuck`, also without a restart.
+   - **Picked:** the ESP backup is kept at a give-up (every other end removes it). If the
+     boot refresh had started and the ESP boots neither the restored kernel nor the one from
+     before, the message says so. The outcome stays `failed`, as asked.
+   - **Picked:** `attempts` can't be more than `boots` (validation): a boot is counted
+     first and starts one copy at most.
+   - **Tested** with a fake runner that dies (unwinds, as a panic or a kill would) every time
+     it gets to one thing, for each of ten: the backup disk, the copy, the ESP backup, the
+     boot refresh, the put-back, the kept kernel's removal, the clock, the journal line, the
+     unit files' removal, the restart. Each ends within 6 boots with the link gone, and no
+     boot past the cap restarts.
+   - **Not covered by the count:** a helper that dies in the link check, in reading
+     `state.json`, or in removing the link. A test holds what that is: with a death at the
+     link check, nothing is ever written.
+   - **For the owner:** "no restart" at the cap is built as asked. With the link gone a
+     restart would go to the normal boot and couldn't loop; without one the machine stays in
+     `system-update.target`. The helper slice decides how it leaves; PLAN says so.
+2. **Arming is refused while another update is pending.** `Refusal::PendingUpdate` and its
+   6b.7 row were there already (`/system-update` exists, in `refusal::check`). No second
+   variant was added. New: `refusal::check_arming(system_update, etc_system_update)`, pure,
+   on what `lstat` found at each name (`UpdateLink`: nothing, a link, a dangling link, a file
+   or folder). Anything at either name refuses, wherever it points, Apsis's own folder
+   included. `/etc/system-update` is new: the man page says the generator reads both. The
+   6b.7 row is rewritten.
+3. **No end leaves a `.apsis-tmp` file on the ESP.** The test module's `boot` checks it after
+   every apply that returns, so every existing test holds it. Making it true took one
+   change: the temporary files are now also cleared when the apply ends (and at a give-up),
+   not only before a boot refresh. A new test has a backup that doesn't verify and a
+   leftover temporary file: no refresh runs, and the file still goes.
+   - **Where it can't hold:** the plan is unreadable. The root UUID that names the ESP's
+     folder is the plan's, so nothing is cleared then.
+4. **PLAN's unit has `FailureAction=reboot`** in `[Unit]`, in place of
+   `OnFailure=reboot.target` (`systemd.offline-updates(7)`, recommendation 3).
+5. **Known limitation: a `/` that's read-only, or any state where systemd can't remove the
+   link either.**
+   - The apply can't remove `/system-update`, so it doesn't restart (`End::LinkStuck`) and
+     the helper exits 0. `state.json` can't be written either, so no boot is counted.
+   - systemd then does what the man page's point 7 says: it removes the link "and the
+     machine rebooted as a safety measure". If its removal fails as well, whether it still
+     restarts, and so whether the machine loops, is systemd's behaviour. It wasn't tested
+     here and `system-update-cleanup.service` wasn't read.
+   - In such a loop each boot does no work in Apsis: the apply reads the link and the state,
+     fails to write, and returns. Nothing under `/` is changed.
+   - The way out is by hand: the recovery partition or a live USB, then
+     `rm /mnt/system-update` (PLAN 6b.11's steps already end with that line).
+
+- **Verified** with apsis-core's tests (323 unit, 52 of them the apply's) and clippy
+  `-D warnings` through the scratch workspace; the workspace run is the owner's. The new
+  tests failed first as compile errors on the missing API (`boots`, `MAX_BOOTS`, `GaveUp`,
+  `check_arming`). Deliberate breakages then failed on assertions and were undone: a cap
+  that's never reached (3 tests), a restart at the cap (2), the count not saved (2), the
+  temporary files not cleared at all (2), not cleared at the end (1).

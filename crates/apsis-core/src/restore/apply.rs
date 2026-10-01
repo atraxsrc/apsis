@@ -19,7 +19,7 @@ use super::esp::{self, Checked, EspError, Manifest, Previous};
 use super::file::FileError;
 use super::filter::Home;
 use super::plan::Plan;
-use super::state::{MAX_ATTEMPTS, Outcome, Report, State, Step};
+use super::state::{MAX_ATTEMPTS, MAX_BOOTS, Outcome, Report, State, Step};
 
 /// The message of the report of last resort (PLAN 6b.10).
 pub const MINIMAL_MESSAGE: &str = "result could not be saved, see journal";
@@ -137,6 +137,9 @@ pub enum End {
     Retry { attempt: u32 },
     /// The restore is over, with this outcome in `result.json`.
     Finished(Outcome),
+    /// [`MAX_BOOTS`] boots began this restore and none ended it: it's given up. The link is
+    /// removed, `result.json` says `failed`, and [`Runner::restart`] wasn't called.
+    GaveUp,
     /// The restore is over with this outcome in `result.json`, but `/system-update` couldn't
     /// be removed. [`Runner::restart`] wasn't called: the helper exits cleanly, and what
     /// happens to the link next is systemd's (`systemd.offline-updates(7)`, point 7).
@@ -181,26 +184,52 @@ fn run(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
         }
         return End::NotArmed;
     }
-    let state = State::load(dir);
-    let plan = match Plan::load(dir) {
-        Ok(plan) => plan,
-        Err(error) => {
-            let written = match &state {
-                Ok(state) if !state.written => "nothing was written",
-                _ => "the system may be partly restored",
-            };
-            let message = format!("the restore's plan couldn't be read ({error}); {written}");
-            return finish(paths, runner, None, state.ok(), Outcome::Failed, message);
-        }
-    };
-    let mut state = match state {
+    // Before the boot is counted, nothing runs but the link check above and this read.
+    let mut state = match State::load(dir) {
         Ok(state) => state,
         Err(error) => {
+            // Nothing can be counted, so the restore ends here and the link goes.
+            let plan = Plan::load(dir).ok();
             let message = format!(
                 "the restore's state couldn't be read ({error}); whether anything was written \
                  isn't known"
             );
-            return finish(paths, runner, Some(&plan), None, Outcome::Failed, message);
+            return finish(paths, runner, plan.as_ref(), None, Outcome::Failed, message);
+        }
+    };
+    if state.boots >= MAX_BOOTS {
+        return give_up(paths, runner, state);
+    }
+    // The apply's first write: this boot, counted before any other work.
+    let counted = State {
+        boots: state.boots + 1,
+        ..state
+    };
+    match counted.save(dir) {
+        Ok(()) => state = counted,
+        // The result is there already: the cleanup below needs no count.
+        Err(error) if state.step == Step::End => {
+            runner.say(&format!("state.json wasn't saved: {error}"));
+        }
+        Err(error) => {
+            // A boot that can't be counted does nothing else.
+            let plan = Plan::load(dir).ok();
+            let message =
+                format!("state.json couldn't be saved ({error}), so nothing was done in this boot");
+            let outcome = unstarted(state);
+            return finish(paths, runner, plan.as_ref(), Some(state), outcome, message);
+        }
+    }
+    let plan = match Plan::load(dir) {
+        Ok(plan) => plan,
+        Err(error) => {
+            let written = if state.written {
+                "the system may be partly restored"
+            } else {
+                "nothing was written"
+            };
+            let message = format!("the restore's plan couldn't be read ({error}); {written}");
+            return finish(paths, runner, None, Some(state), Outcome::Failed, message);
         }
     };
     // The result is written: an earlier boot got that far, and only the cleanup is left.
@@ -252,6 +281,7 @@ fn run(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
             written: true,
             step: Step::Copy,
             problems: false,
+            ..state
         };
         if let Err(error) = copying.save(dir) {
             let message = format!("state.json couldn't be saved ({error}), so nothing was copied");
@@ -323,6 +353,68 @@ fn run(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
     // Steps 4 to 7.
     let (outcome, message) = boot_files(paths, runner, &plan, &mut state);
     finish(paths, runner, Some(&plan), Some(state), outcome, message)
+}
+
+/// The cap: [`MAX_BOOTS`] boots began and none ended, so something stops the helper in each
+/// of them. The link goes first, before anything that could stop it again; then the result.
+/// Never a restart. The ESP backup stays, for a recovery by hand.
+fn give_up(paths: &Paths<'_>, runner: &mut impl Runner, state: State) -> End {
+    let Paths {
+        state_dir,
+        esp,
+        root,
+    } = *paths;
+    let link_gone = runner.remove_link().is_ok();
+    let plan = Plan::load(state_dir).ok();
+    let mut message = format!(
+        "the restore was started in {MAX_BOOTS} boots and ended in none, so it was given up; {}",
+        if state.written {
+            "the system may be partly restored"
+        } else {
+            "nothing was written"
+        }
+    );
+    if let Some(plan) = &plan {
+        clear_temporaries(esp, plan, runner);
+        // The boot refresh had started: say so if the ESP boots neither kernel whole.
+        if state.step == Step::Refresh
+            && esp::check(esp, root, &plan.root_uuid).is_err()
+            && !esp::boots_kernel(esp, root, &plan.root_uuid, &plan.running_kernel)
+        {
+            message.push_str(
+                "; the boot files are neither the restored kernel's nor the ones from before",
+            );
+        }
+    }
+    save_result(state_dir, runner, plan.as_ref(), Outcome::Failed, message);
+    let end = State {
+        step: Step::End,
+        ..state
+    };
+    if let Err(error) = end.save(state_dir) {
+        runner.say(&format!("state.json wasn't saved: {error}"));
+    }
+    if !link_gone {
+        runner.say("/system-update couldn't be removed: not restarting");
+        return End::LinkStuck {
+            outcome: Outcome::Failed,
+        };
+    }
+    if let Err(error) = runner.remove_arm_files() {
+        runner.say(&format!(
+            "the restore's unit files weren't removed: {error}"
+        ));
+    }
+    End::GaveUp
+}
+
+/// Removes what a put-back that was cut left on the ESP ([`esp::clear_temporaries`]).
+fn clear_temporaries(esp: &Path, plan: &Plan, runner: &mut impl Runner) {
+    if let Err(error) = esp::clear_temporaries(esp, &plan.root_uuid) {
+        runner.say(&format!(
+            "a temporary file on the ESP wasn't removed: {error}"
+        ));
+    }
 }
 
 /// A restore that stops before this boot's copy: it never started, unless an earlier boot's
@@ -414,12 +506,8 @@ fn boot_files(
         }
         *state = refreshing;
     }
-    // A put-back that the power cut left its temporary file on the ESP.
-    if let Err(error) = esp::clear_temporaries(esp, &plan.root_uuid) {
-        runner.say(&format!(
-            "a temporary file on the ESP wasn't removed: {error}"
-        ));
-    }
+    // A put-back that the power cut left its temporary file on the ESP: room for the refresh.
+    clear_temporaries(esp, plan, runner);
 
     // Step 5.
     runner.say("refreshing the boot files");
@@ -533,6 +621,33 @@ fn finish(
     message: String,
 ) -> End {
     let dir = paths.state_dir;
+    // No end leaves a temporary file of a put-back on the ESP.
+    if let Some(plan) = plan {
+        clear_temporaries(paths.esp, plan, runner);
+    }
+    let saved = save_result(dir, runner, plan, outcome, message);
+    // Saved before the cleanup: a boot that still finds the link only cleans up.
+    if let Some(state) = state {
+        let end = State {
+            step: Step::End,
+            ..state
+        };
+        if let Err(error) = end.save(dir) {
+            runner.say(&format!("state.json wasn't saved: {error}"));
+        }
+    }
+    End::over(clean_up(paths, runner), saved)
+}
+
+/// Writes `result.json`, the minimal one if the real one is refused, and says how the
+/// restore ended. Gives the outcome that's in the file.
+fn save_result(
+    dir: &Path,
+    runner: &mut impl Runner,
+    plan: Option<&Plan>,
+    outcome: Outcome,
+    message: String,
+) -> Outcome {
     let now = runner.now();
     let report = Report {
         outcome,
@@ -555,17 +670,7 @@ fn finish(
         if report.message.is_empty() { "" } else { ": " },
         report.message
     ));
-    // Saved before the cleanup: a boot that still finds the link only cleans up.
-    if let Some(state) = state {
-        let end = State {
-            step: Step::End,
-            ..state
-        };
-        if let Err(error) = end.save(dir) {
-            runner.say(&format!("state.json wasn't saved: {error}"));
-        }
-    }
-    End::over(clean_up(paths, runner), saved)
+    saved
 }
 
 /// The report of last resort (PLAN 6b.10), when the real one is refused: the same outcome,
@@ -631,7 +736,7 @@ mod tests {
     };
     use super::super::esp::{BACKUP_DIR, BootFile, CheckFailure, MANIFEST_FILE};
     use super::super::plan;
-    use super::super::state::{RESULT_FILE, STATE_FILE};
+    use super::super::state::{MAX_BOOTS, RESULT_FILE, STATE_FILE};
     use super::*;
 
     const SNAPSHOT: &str = "2026-09-25_11-28-00";
@@ -698,6 +803,9 @@ mod tests {
     /// What a power cut unwinds with.
     struct PowerCut;
 
+    /// What a helper that's killed, or panics, unwinds with.
+    struct Killed;
+
     struct Fake<'a> {
         lab: &'a Lab,
         /// Everything asked of the runner, over all boots.
@@ -717,6 +825,8 @@ mod tests {
         stuck_link: bool,
         /// The power goes inside this step, once, with its work half done.
         cut_inside: Option<&'static str>,
+        /// The helper dies whenever it gets to this, in every boot.
+        die_at: Option<&'static str>,
         now: i64,
         /// `state.json` as each copy, ESP backup, boot refresh and disarm found it.
         states: Vec<(&'static str, State)>,
@@ -741,6 +851,7 @@ mod tests {
                 fail_kernel_removal: false,
                 stuck_link: false,
                 cut_inside: None,
+                die_at: None,
                 now: NOW,
                 states: Vec::new(),
                 result_at_disarm: Vec::new(),
@@ -754,6 +865,9 @@ mod tests {
             self.count += 1;
             if self.cut == Some(Cut::Before(index)) {
                 panic_any(PowerCut);
+            }
+            if self.die_at == Some(name) {
+                panic_any(Killed);
             }
             self.calls.push(name);
             let value = effect(self);
@@ -790,7 +904,10 @@ mod tests {
         }
 
         fn open_backup(&mut self, _plan: &Plan) -> Result<(), String> {
-            self.call("open_backup", |fake| fake.backup.clone())
+            self.call("open_backup", |fake| {
+                fake.note_state("open_backup");
+                fake.backup.clone()
+            })
         }
 
         fn copy(&mut self, _plan: &Plan) -> Copied {
@@ -928,14 +1045,41 @@ mod tests {
     fn boot(fake: &mut Fake<'_>) -> End {
         let lab = fake.lab;
         fake.count = 0;
-        apply(
+        let end = apply(
             &Paths {
                 state_dir: &lab.state,
                 esp: &lab.esp,
                 root: &lab.root,
             },
             fake,
-        )
+        );
+        ended(lab, end)
+    }
+
+    /// The invariant of every end, on every path these tests take: whatever the apply
+    /// returns, it leaves none of a put-back's temporary files on the ESP.
+    fn ended(lab: &Lab, end: End) -> End {
+        assert!(
+            !has_temporary_files(lab),
+            "{end:?} left a temporary file on the ESP: {:?}",
+            lab.esp_tree()
+                .iter()
+                .map(|(name, _)| name)
+                .filter(|name| name.ends_with(".apsis-tmp"))
+                .collect::<Vec<_>>()
+        );
+        end
+    }
+
+    /// One boot in which the helper dies at [`Fake::die_at`]. `None`: it died.
+    fn boot_or_die(fake: &mut Fake<'_>) -> Option<End> {
+        match catch_unwind(AssertUnwindSafe(|| boot(fake))) {
+            Ok(end) => Some(end),
+            Err(payload) => {
+                assert!(payload.is::<Killed>(), "a panic that isn't the kill");
+                None
+            }
+        }
     }
 
     /// One boot in which the power goes at `cut`. `None`: it went.
@@ -977,6 +1121,8 @@ mod tests {
             written: attempts > 0,
             step,
             problems,
+            // One boot for each attempt, and one for a restore that never started.
+            boots: attempts.max(1),
         }
     }
 
@@ -1314,7 +1460,7 @@ mod tests {
             },
             &mut fake,
         );
-        assert_eq!(end, End::Finished(Outcome::Done));
+        assert_eq!(ended(fake.0.lab, end), End::Finished(Outcome::Done));
         assert_eq!(
             report(&lab).message,
             "the previous kernel's boot files: the initrd on the ESP isn't the one /boot links to"
@@ -1395,7 +1541,7 @@ mod tests {
             },
             &mut fake,
         );
-        assert_eq!(end, End::Finished(Outcome::Done));
+        assert_eq!(ended(fake.0.lab, end), End::Finished(Outcome::Done));
         assert_eq!(fake.0.count_of("remove_protected_kernel"), 0);
         assert!(lab.root.join("usr/lib/modules").join(NEW).is_dir());
     }
@@ -1457,6 +1603,164 @@ mod tests {
             "the kernel from before the restore couldn't be removed (Read-only file system)"
         );
         assert_eq!(passed(&lab), restored_boot_files());
+    }
+
+    // ---- the boot counter ----
+
+    /// The count is the apply's first write, before the plan is read or the runner is asked
+    /// for anything but the link.
+    #[test]
+    fn every_boot_is_counted_before_any_other_work() {
+        let lab = armed("apply-boots");
+        let mut fake = Fake::new(&lab);
+        fake.exits = [Some(11)].into();
+        assert_eq!(boot(&mut fake), End::Retry { attempt: 2 });
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::Done));
+        let counted: Vec<_> = step_states(&fake, "open_backup")
+            .iter()
+            .map(|state| (state.boots, state.attempts))
+            .collect();
+        assert_eq!(counted, [(1, 0), (2, 1)]);
+
+        // Also when the plan can't be read.
+        let lab = armed("apply-boots-no-plan");
+        fs::remove_file(lab.state.join(plan::FILE)).unwrap();
+        let mut fake = Fake::new(&lab);
+        boot(&mut fake);
+        assert_eq!(State::load(&lab.state).unwrap().boots, 1);
+    }
+
+    /// The cap: a restore that began [`MAX_BOOTS`] boots and ended none is given up. The
+    /// link goes first, then the result, and there's no restart.
+    #[test]
+    fn past_the_cap_the_link_is_removed_and_the_restore_given_up_without_a_restart() {
+        let lab = armed("apply-cap");
+        let before = lab.esp_tree();
+        State {
+            boots: MAX_BOOTS,
+            ..state(1, Step::Copy, false)
+        }
+        .save(&lab.state)
+        .unwrap();
+        let mut fake = Fake::new(&lab);
+        assert_eq!(boot(&mut fake), End::GaveUp);
+        assert_eq!(
+            fake.calls,
+            ["is_armed", "remove_link", "now", "say", "remove_arm_files"]
+        );
+        assert_eq!(fake.count_of("restart"), 0);
+        assert!(!is_linked(&lab));
+        let report = report(&lab);
+        assert_eq!(report.outcome, Outcome::Failed);
+        assert_eq!(report.snapshot.as_deref(), Some(SNAPSHOT));
+        assert_eq!(
+            report.message,
+            "the restore was started in 5 boots and ended in none, so it was given up; the \
+             system may be partly restored"
+        );
+        assert_eq!(lab.esp_tree(), before);
+        // The count isn't written past the cap.
+        assert_eq!(State::load(&lab.state).unwrap().boots, MAX_BOOTS);
+    }
+
+    #[test]
+    fn past_the_cap_a_link_that_cant_be_removed_gets_no_restart_either() {
+        let lab = armed("apply-cap-stuck");
+        State {
+            boots: MAX_BOOTS,
+            ..state(1, Step::Copy, false)
+        }
+        .save(&lab.state)
+        .unwrap();
+        let mut fake = Fake::new(&lab);
+        fake.stuck_link = true;
+        assert_eq!(
+            boot(&mut fake),
+            End::LinkStuck {
+                outcome: Outcome::Failed
+            }
+        );
+        assert_eq!(fake.count_of("restart"), 0);
+        assert_eq!(report(&lab).outcome, Outcome::Failed);
+    }
+
+    /// A helper that's killed, or panics, whenever it gets to one thing: every boot dies
+    /// there. Wherever that is after the count, the restore ends within the cap, with the
+    /// link gone, and the apply never restarts over a link past it.
+    #[test]
+    fn a_helper_that_dies_at_any_point_after_the_count_is_bounded() {
+        for (die_at, refresh) in [
+            ("open_backup", Refresh::Works),
+            ("copy", Refresh::Works),
+            ("back_up_esp", Refresh::Works),
+            ("refresh_boot", Refresh::Works),
+            ("put_back_esp", Refresh::Fails),
+            ("remove_protected_kernel", Refresh::Works),
+            ("now", Refresh::Works),
+            ("say", Refresh::Works),
+            ("remove_arm_files", Refresh::Works),
+            ("restart", Refresh::Works),
+        ] {
+            let lab = armed(&format!("apply-killed-{die_at}"));
+            let mut fake = Fake::new(&lab);
+            fake.die_at = Some(die_at);
+            fake.refresh = refresh;
+            let mut boots = 0;
+            let mut last = None;
+            // The unit only runs while the link is there.
+            while is_linked(&lab) {
+                boots += 1;
+                assert!(boots <= MAX_BOOTS + 1, "{die_at}: boot {boots}");
+                last = boot_or_die(&mut fake);
+            }
+            assert!(fake.count_of("copy") <= 3, "{die_at}");
+            // A boot past the cap never restarts.
+            if boots > MAX_BOOTS {
+                assert!(
+                    matches!(last, None | Some(End::GaveUp)),
+                    "{die_at}: {last:?}"
+                );
+                assert_eq!(
+                    fake.calls
+                        .iter()
+                        .rev()
+                        .take_while(|call| **call != "is_armed")
+                        .filter(|call| **call == "restart")
+                        .count(),
+                    0,
+                    "{die_at}"
+                );
+            }
+        }
+    }
+
+    /// The two things before the count, and the link's removal itself, are what the count
+    /// can't cover: a helper that dies there every time isn't stopped by the apply.
+    #[test]
+    fn what_runs_before_the_count_is_only_the_link_check_and_reading_the_state() {
+        let lab = armed("apply-before-count");
+        let mut fake = Fake::new(&lab);
+        fake.die_at = Some("is_armed");
+        for _ in 0..MAX_BOOTS + 2 {
+            assert_eq!(boot_or_die(&mut fake), None);
+        }
+        assert_eq!(State::load(&lab.state).unwrap(), State::default());
+        assert_eq!(fake.calls, Vec::<&str>::new());
+    }
+
+    /// A backup that doesn't verify and a temporary file a cut put-back left: the refresh
+    /// isn't run, and the temporary file still goes.
+    #[test]
+    fn a_temporary_file_is_cleared_also_when_nothing_is_refreshed() {
+        let lab = cut_with_a_backup("apply-tmp-unverified");
+        fs::write(lab.state.join(BACKUP_DIR).join("initrd.img"), "damaged").unwrap();
+        state(1, Step::Refresh, false).save(&lab.state).unwrap();
+        let cmdline = lab.esp_file(BootFile::Cmdline);
+        fs::write(cmdline.with_file_name("cmdline.apsis-tmp"), "half").unwrap();
+        let mut fake = Fake::new(&lab);
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::BootKept));
+        assert_eq!(fake.count_of("refresh_boot"), 0);
+        assert!(!has_temporary_files(&lab));
     }
 
     // ---- power cuts ----

@@ -19,6 +19,11 @@ pub const RESULT_FILE: &str = "result.json";
 /// A copy that breaks is tried again at the next boot, this many times in all (PLAN 6b.10).
 pub const MAX_ATTEMPTS: u32 = 3;
 
+/// The offline boots a restore may begin (PLAN 6b.10). A boot is counted before it does
+/// anything else, so a helper that dies in each of them is stopped here: three copies, and
+/// two boots to spare for power cuts.
+pub const MAX_BOOTS: u32 = 5;
+
 /// What's kept of a result's message, in bytes: enough for a tooltip and rsync's last lines.
 /// Written as JSON it stays far below the file limit, whatever the characters.
 pub const MAX_MESSAGE_BYTES: usize = 2048;
@@ -77,6 +82,8 @@ pub struct State {
     pub step: Step,
     /// The copy ended with rsync's exit 23: some files couldn't be written or deleted.
     pub problems: bool,
+    /// Offline boots in which the apply began. Its first write in each of them.
+    pub boots: u32,
 }
 
 impl State {
@@ -84,7 +91,7 @@ impl State {
     ///
     /// [`FileError::Invalid`] if `text` isn't a state this Apsis wrote, whole and in range.
     pub fn parse(text: &str) -> Result<Self, FileError> {
-        let map = file::object(text, &["attempts", "written", "step", "problems"])?;
+        let map = file::object(text, &["attempts", "written", "step", "problems", "boots"])?;
         let state = Self {
             attempts: map
                 .get("attempts")
@@ -95,6 +102,11 @@ impl State {
             step: Step::from_word(file::text(&map, "step")?)
                 .ok_or_else(|| FileError::Invalid("\"step\" isn't a step".to_owned()))?,
             problems: file::flag(&map, "problems")?,
+            boots: map
+                .get("boots")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|boots| u32::try_from(boots).ok())
+                .ok_or_else(boots_out_of_range)?,
         };
         state.validate()?;
         Ok(state)
@@ -112,6 +124,7 @@ impl State {
             ("written", self.written.into()),
             ("step", self.step.word().into()),
             ("problems", self.problems.into()),
+            ("boots", self.boots.into()),
         ]))
     }
 
@@ -168,8 +181,19 @@ impl State {
         if self.problems && self.attempts == 0 {
             return invalid("problems are marked but no attempt was counted".to_owned());
         }
+        if self.boots > MAX_BOOTS {
+            return Err(boots_out_of_range());
+        }
+        // The boot is counted first, and starts one copy at most.
+        if self.attempts > self.boots {
+            return invalid("more attempts were counted than boots".to_owned());
+        }
         Ok(())
     }
+}
+
+fn boots_out_of_range() -> FileError {
+    FileError::Invalid(format!("\"boots\" isn't 0 to {MAX_BOOTS}"))
 }
 
 fn attempts_out_of_range() -> FileError {
@@ -374,6 +398,7 @@ mod tests {
                 written: false,
                 step: Step::Armed,
                 problems: false,
+                boots: 0,
             }
         );
         assert_eq!(
@@ -383,7 +408,8 @@ mod tests {
   "attempts": 0,
   "written": false,
   "step": "armed",
-  "problems": false
+  "problems": false,
+  "boots": 0
 }
 "#
         );
@@ -395,13 +421,59 @@ mod tests {
             written: attempts > 0,
             step,
             problems,
+            boots: attempts,
         }
     }
 
     fn state_text(attempts: &str, written: &str, step: &str, problems: &str) -> String {
         format!(
-            r#"{{"version": 1, "attempts": {attempts}, "written": {written}, "step": {step}, "problems": {problems}}}"#
+            r#"{{"version": 1, "attempts": {attempts}, "written": {written}, "step": {step}, "problems": {problems}, "boots": 3}}"#
         )
+    }
+
+    /// The offline boots that began are counted, so a helper that dies in every one of them
+    /// is stopped (`apply`).
+    #[test]
+    fn the_boot_count_is_kept_and_capped() {
+        assert_eq!(MAX_BOOTS, 5);
+        for boots in [1, 3, 5] {
+            let state = State {
+                boots,
+                ..state(1, Step::Copy, false)
+            };
+            assert_eq!(State::parse(&state.to_text().unwrap()).unwrap(), state);
+        }
+        let over = State {
+            boots: 6,
+            ..state(1, Step::Copy, false)
+        };
+        assert_eq!(invalid(over.to_text()), "\"boots\" isn't 0 to 5");
+        let text = state_text("1", "true", "\"copy\"", "false");
+        for (boots, reason) in [
+            ("6", "\"boots\" isn't 0 to 5"),
+            ("-1", "\"boots\" isn't 0 to 5"),
+            ("\"3\"", "\"boots\" isn't 0 to 5"),
+        ] {
+            let text = text.replace("\"boots\": 3", &format!("\"boots\": {boots}"));
+            assert_eq!(invalid(State::parse(&text)), reason, "{boots}");
+        }
+        assert_eq!(
+            invalid(State::parse(&text.replace(", \"boots\": 3", ""))),
+            "no \"boots\""
+        );
+    }
+
+    /// The boot is counted first, and a boot starts one copy at most.
+    #[test]
+    fn more_attempts_than_boots_are_refused() {
+        let state = State {
+            boots: 1,
+            ..state(2, Step::Copy, false)
+        };
+        assert_eq!(
+            invalid(state.to_text()),
+            "more attempts were counted than boots"
+        );
     }
 
     #[test]

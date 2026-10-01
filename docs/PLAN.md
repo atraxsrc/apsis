@@ -637,12 +637,13 @@ progress and messages go to plymouth (`plymouth system-update --progress=N`, `pl
 display-message`) when it runs.
 
 `state.json` holds `attempts` (copies that started), `written` (anything under `/` was ever
-written by this restore), `step` (`armed`, `copy`, `boot-files`, `boot-refresh`, `end`) and
-`problems` (the copy ended with exit 23). It's saved, and so fsynced, before each step that
-depends on it:
+written by this restore), `step` (`armed`, `copy`, `boot-files`, `boot-refresh`, `end`),
+`problems` (the copy ended with exit 23) and `boots` (offline boots in which the apply
+began). It's saved, and so fsynced, before each step that depends on it:
 
 | saved | before |
 |---|---|
+| `boots + 1`: **the apply's first write in every offline boot** | everything else. Only two things run before it: the check that `/system-update` is Apsis's link, and reading `state.json` |
 | `attempts + 1`, `written`, step `copy` | pass 1 (step 3) |
 | step `boot-files`, `problems` | the ESP backup (step 4). The boot files are still untouched |
 | step `boot-refresh` | the boot refresh and everything after it (steps 5 to 7). From here the boot files may be changed |
@@ -785,7 +786,7 @@ Requires=sysinit.target
 After=sysinit.target system-update-pre.target local-fs.target
 Before=system-update.target shutdown.target
 ConditionPathIsSymbolicLink=/system-update
-OnFailure=reboot.target
+FailureAction=reboot
 
 [Service]
 Type=oneshot
@@ -812,7 +813,7 @@ line on what to do, and Close (wording in 6b.8's string table). The lines below 
 | **root UUID**: the snapshot's `info.json` `sys-uuid` differs from the UUID of the filesystem mounted at `/` (`findmnt`), or the snapshot's `etc/kernelstub/configuration` names another `root=UUID=` | "This snapshot is from another installation." |
 | snapshot isn't rsync, has no `localhost/` or `exclude.list` | "This snapshot can't be restored: <reason>." |
 | snapshot's `/boot/vmlinuz` has no `/usr/lib/modules/<version>/` in the snapshot, or the snapshot has no `update-initramfs` or `kernelstub` | "This snapshot's kernel files are incomplete, so it can't be restored safely." |
-| `/system-update` already exists (a pending system update) | "A system update is waiting for a restart. Restart first, then restore." |
+| **another update is pending**: `/system-update` or `/etc/system-update` already exists, as anything and pointing anywhere (a link, a dangling link, a file, a folder; systemd's generator reads both names). In `refusal::check`, and again as the last check before arming makes the link (`refusal::check_arming`, pure; owner, 2026-10-01). The same `PendingUpdate` refusal | "A system update is waiting for a restart. Restart first, then restore." |
 | not enough space (6b.4) | the space line |
 | the ESP is short for the boot refresh and a put-back (`esp::esp_needs`; added 2026-10-01, core). Not in `request.json`: re-checked at "Restart now" from a live `statvfs` (6b.4) | wording in the UI slice |
 | on the live system, the ESP's `vmlinuz.efi` and `initrd.img` aren't the files `/boot/vmlinuz` and `/boot/initrd.img` point to, or that kernel has no modules, or there's no current entry (`esp::check_before_arming`, 6b.6 step 6; added 2026-10-01, core). A whole previous pair that isn't the `.old` links' never refuses | wording in the UI slice |
@@ -1155,6 +1156,19 @@ minimal one instead.
   clock in local time makes them disagree).
 - `RestoreResult` (6b.9) gives `""` and `0` for a `null` snapshot or time.
 
+**The boot cap** (owner, 2026-10-01): a restore may begin 5 offline boots (`MAX_BOOTS`:
+three copies, and two to spare for power cuts). Each boot is counted in `state.json` before
+it does anything else, so a helper that's killed or panics in every boot, at any point after
+the count, is stopped. The boot that finds the count at 5 gives up: it removes the link
+**first**, writes `result.json` (`failed`, "started in 5 boots and ended in none"), saves
+step `end`, removes the unit files, and **doesn't restart** (`End::GaveUp`). The ESP backup
+is left in place for a recovery by hand, and the result says so if the boot files are
+neither the restored kernel's nor the ones from before. What the count can't cover: a helper
+that dies in the link check, in reading `state.json`, or in removing the link itself.
+For the helper slice: after `GaveUp` the link is gone and nothing restarts, so the machine
+would sit in `system-update.target`; the helper decides what it does then (a restart is safe
+once the link is gone).
+
 **A plan or state that can't be read** (6b.6 step 1): the link is Apsis's, but
 `request.json` or `state.json` is missing or refused. Nothing is applied. The arm is removed
 and `result.json` says why, with the outcome `failed`: without the plan there's no snapshot
@@ -1283,7 +1297,10 @@ No root (run by Claude):
   refresh started is taken once more, and never after; a plan of any age is applied (no
   clock is read); an unreadable plan or state disarms and reports why; another tool's link
   is left alone; a link that can't be removed gets no restart; a refused `result.json` is
-  replaced by the minimal report (the same outcome, no time).
+  replaced by the minimal report (the same outcome, no time); every boot is counted first,
+  a helper that dies at any point after the count ends within the cap, and the cap ends
+  without a restart; no end leaves a `.apsis-tmp` file on the ESP (checked after every
+  apply in every test).
 - **Real rsync** on temp trees (as the tester, no root): a fake snapshot over a fake live root
   with the real filter: changed files replaced, new system files removed, home kept (including
   `/home`'s own mode) or restored, the protect list and other protected paths untouched,
@@ -1390,8 +1407,14 @@ Checks:
    - **the helper never exits non-zero with Apsis's link in place.** `End::LinkStuck` and
      `End::NotArmed` exit 0 without a restart. A panic or an error outside the apply removes
      the link before exiting: the unit restarts on failure, and with the link there that's a
-     loop the attempts don't count (DECISIONS.md, 2026-10-01). To settle there: the unit's
-     `OnFailure=reboot.target` against the man page's `FailureAction=reboot`;
+     loop the attempts don't count (DECISIONS.md, 2026-10-01). The boot count (6b.10) is
+     what bounds it if that removal is never reached;
+   - **the unit has `FailureAction=reboot`**, not `OnFailure=reboot.target`
+     (`systemd.offline-updates(7)`, recommendation 3; owner, 2026-10-01);
+   - arming runs `refusal::check_arming` on an `lstat` of `/system-update` and
+     `/etc/system-update` right before it makes the link;
+   - `End::GaveUp` (the boot cap) isn't followed by a restart from core: the helper decides
+     how the machine leaves `system-update.target` then;
    - removing a stale plan (6b.5) stays the helper's: core has none.
 4. **UI**, rebuilt from the preview (6b.8) in the real code: the toolbar's Restore (no key, no
    tooltip), the dialog, refusals, preparing status, ready prompt, results in the status line. The preview branch stays unmerged.

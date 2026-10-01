@@ -39,7 +39,8 @@ pub enum Refusal {
     Unreadable(Unreadable),
     /// The snapshot's kernel has no modules, or its boot tools are missing.
     KernelIncomplete,
-    /// `/system-update` exists already: a system update waits for a restart.
+    /// `/system-update` or `/etc/system-update` exists already: another update is pending
+    /// and waits for a restart ([`check_arming`]).
     PendingUpdate,
     /// The backup disk is short for the safety snapshot ([`super::space`]). Both in bytes.
     BackupSpace {
@@ -89,7 +90,7 @@ pub struct System<'a> {
     pub root_uuid: &'a str,
     /// The names in `/boot/efi/EFI`.
     pub esp_folders: &'a [String],
-    /// `/system-update` exists (not followed).
+    /// `/system-update` or `/etc/system-update` exists (not followed).
     pub pending_update: bool,
 }
 
@@ -177,6 +178,36 @@ pub fn check(system: &System<'_>, snapshot: &Snapshot<'_>) -> Result<(), Refusal
         return Err(Refusal::KernelIncomplete);
     }
     if system.pending_update {
+        return Err(Refusal::PendingUpdate);
+    }
+    Ok(())
+}
+
+/// What's at `/system-update` or `/etc/system-update`, asked of the name itself (`lstat`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateLink {
+    Nothing,
+    /// A link to something that's there, wherever it points: also to Apsis's own folder.
+    Link,
+    /// A link to nothing.
+    Dangling,
+    /// A file or a folder.
+    Other,
+}
+
+/// The last check before arming, which makes `/system-update`: nothing may be at that name
+/// or at `/etc/system-update` (systemd's generator reads both, `systemd.offline-updates(7)`).
+/// Whatever is there is another update that's pending, or was left by one: it isn't Apsis's
+/// to replace, and systemd would act on it at the restart.
+///
+/// # Errors
+///
+/// [`Refusal::PendingUpdate`] if either name is taken, by anything.
+pub fn check_arming(
+    system_update: UpdateLink,
+    etc_system_update: UpdateLink,
+) -> Result<(), Refusal> {
+    if system_update != UpdateLink::Nothing || etc_system_update != UpdateLink::Nothing {
         return Err(Refusal::PendingUpdate);
     }
     Ok(())
@@ -726,6 +757,27 @@ mod tests {
             ..Case::good()
         };
         assert_eq!(case.check(), Err(Refusal::PendingUpdate));
+    }
+
+    /// Arming makes `/system-update`. Anything already at that name, or at
+    /// `/etc/system-update`, which systemd's generator reads too, is another update that's
+    /// pending, whatever it is and wherever it points: arming is refused.
+    #[test]
+    fn arming_is_refused_while_another_update_is_pending() {
+        use UpdateLink::{Dangling, Link, Nothing, Other};
+        assert_eq!(check_arming(Nothing, Nothing), Ok(()));
+        for found in [Link, Dangling, Other] {
+            assert_eq!(
+                check_arming(found, Nothing),
+                Err(Refusal::PendingUpdate),
+                "{found:?}"
+            );
+            assert_eq!(
+                check_arming(Nothing, found),
+                Err(Refusal::PendingUpdate),
+                "{found:?} in /etc"
+            );
+        }
     }
 
     /// One reason is shown: what's wrong with the computer comes before what's wrong with
