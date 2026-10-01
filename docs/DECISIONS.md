@@ -3806,3 +3806,45 @@ outcome, with and without a snapshot and a time; the introspection with the thir
 - **Client**: `HelperClient::restore_result()`.
 
 Gate: workspace tests, clippy `-D warnings` on all targets, fmt check: all clean.
+
+## 2026-10-02 - 6b helper slice: packaging (step 3 item 10), and the slice's gate (item 11)
+
+**Packaging.** Tests first (`resource_tests::purge_removes_the_restores_leftovers_and_only_apsis_link`).
+- The polkit `restore` action came with item 5, the `Helper3` bus policy with item 3.
+- **`postrm purge`** now also: stops `apsis-disarm.timer` if one runs; removes
+  `/system-update` **only when `readlink` gives Apsis's state folder** (another tool's link
+  is left where it is, as everywhere else); removes a leftover `apsis-restore.service` and
+  its wants link, the pop-upgrade-init drop-in and its folder with `rmdir` (so only when
+  empty); then `/var/lib/apsis` whole (the plan, the last result, an ESP backup, a helper
+  copy). `remove` keeps all of that: an armed restore survives a package remove and runs
+  from the helper copy, as designed. Snapshots are never touched; the test holds that the
+  script doesn't name `timeshift`. `sh -n` passes.
+- Nothing new is installed; `just deb-install`'s re-login note stays.
+
+**The gate (item 11)**: `cargo test --workspace` (core 364, helper 69, applet 77 and the
+rest, all green), `cargo clippy --workspace --all-targets -- -D warnings` clean, `cargo fmt
+--check` clean. Each item was committed on `restore-6b-core` as it passed, by the owner's
+"yes" (the plan's "no commit" was for the unattended variant).
+
+**The helper slice, as built (2026-10-02, nine commits):**
+1. `State` keeps the ready plan next to the lock; `JobKind::Restore`.
+2. The interface is `Helper3`; `List` carries each snapshot's format.
+3. `CheckRestore`; the hook-flag rule, refusals on the wire, the dialog.
+4. `Restore` prepares the plan to the ready prompt; the polkit `restore` action.
+5. `RestartToRestore` re-checks, arms, starts the disarm timer, reboots.
+6. `CancelRestore`; the plan goes with its window and at start without the link.
+7. `--apply-restore`, the real runner for the apply.
+8. `RestoreResult`.
+9. Packaging's `postrm purge`.
+
+**Open for the owner, gathered from the entries above:**
+- `has_root` (item 4): taken as "the snapshot's `exclude.list` lets `/root` in".
+- A refused "Restart now" removes the plan (item 6), not only a too-old one.
+- Plymouth's progress bar is sent after the copy, not during (item 8); a live bar needs a
+  second runner for plymouth.
+- The dry runs run under `LC_ALL=C.UTF-8`, not `C` (item 5); the numbers are the same.
+
+**Next**: the UI slice (PLAN 6b.13 step 4) can start; and apsis-test check 1 (6b.12), the
+first real apply, needs its runbook, for which the check 0.4 runbook is the template
+(DECISIONS 2026-10-01, "check 0.4 passed"). The helper's journal lines to expect are named
+in the entries above.

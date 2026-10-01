@@ -1954,7 +1954,14 @@ Checks:
    10. **Packaging**: the polkit file's sixth action; the bus policy names `Helper3`; `postrm
        purge` removes the drop-in and its folder when empty, `/var/lib/apsis/` and a leftover
        unit; nothing new is installed. `just deb-install`'s re-login note stays.
+       **Status (2026-10-02): done** (the action with item 5, the policy with item 3; `postrm
+       purge` also stops the disarm timer and removes `/system-update` only when it's
+       Apsis's link). DECISIONS 2026-10-02 "packaging".
    11. `cargo test --workspace`, clippy `-D warnings`, `cargo fmt`, summary. No commit.
+       **Status (2026-10-02): done**; each item was committed on `restore-6b-core` with the
+       owner's "yes". **The helper slice is complete.** The open points for the owner and the
+       next steps (the UI slice, step 4; check 1's runbook) are in DECISIONS 2026-10-02
+       "packaging".
 
    **For the UI slice (6b.13 step 4)**, wording this slice needs but doesn't build; the
    string table in 6b.8 gets them there:

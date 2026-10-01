@@ -99,6 +99,7 @@ mod resource_tests {
     const BUS_POLICY: &str =
         include_str!("../../../resources/helper/io.github.atraxsrc.Apsis.Helper.conf");
     const POLKIT: &str = include_str!("../../../resources/helper/io.github.atraxsrc.Apsis.policy");
+    const POSTRM: &str = include_str!("../../../resources/deb/postrm");
 
     fn has_line(file: &str, line: &str) {
         assert!(file.lines().any(|l| l == line), "missing {line:?}");
@@ -143,6 +144,41 @@ mod resource_tests {
             .and_then(|(_, rest)| rest.split_once("</action>"))
             .unwrap_or_else(|| panic!("no action {id}"))
             .0
+    }
+
+    /// `postrm purge` (PLAN 6b.13 step 3 item 10): the restore's state folder, a leftover
+    /// unit with its wants link, a leftover drop-in with its folder when empty, and
+    /// `/system-update` only when it's Apsis's link. Snapshots are never touched.
+    #[test]
+    fn purge_removes_the_restores_leftovers_and_only_apsis_link() {
+        use apsis_core::restore::unit::{DROP_IN_PATH, UNIT_PATH, UNIT_WANTS_LINK};
+        let purge = POSTRM
+            .split_once("purge)")
+            .map(|(_, rest)| rest)
+            .expect("a purge case");
+        for path in [
+            "/var/lib/apsis",
+            UNIT_PATH,
+            UNIT_WANTS_LINK,
+            DROP_IN_PATH,
+            "/etc/systemd/system/pop-upgrade-init.service.d",
+        ] {
+            assert!(purge.contains(path), "purge doesn't name {path}:\n{purge}");
+        }
+        assert!(
+            purge.contains("rmdir"),
+            "the drop-in's folder goes only when empty"
+        );
+        assert!(
+            purge.contains("readlink /system-update"),
+            "the link only when Apsis's"
+        );
+        assert!(
+            purge.contains("= /var/lib/apsis/restore"),
+            "compared with the state folder"
+        );
+        assert!(!POSTRM.contains("timeshift"), "snapshots are never touched");
+        assert!(POSTRM.contains("daemon-reload"));
     }
 
     #[test]

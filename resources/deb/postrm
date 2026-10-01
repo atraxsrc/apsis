@@ -3,7 +3,12 @@
 # them. As in postinst, neither may be running, which isn't an error.
 #
 # On purge, Apsis's config goes too: /etc/apsis/ (config.toml and its .bak), written by the
-# helper. Snapshots on the backup disk are never touched.
+# helper. So does the restore's state folder (/var/lib/apsis: a plan, the last result, an
+# ESP backup, a helper copy), a leftover restore unit with its wants link, a leftover drop-in
+# for pop-upgrade-init (and its folder when that's empty), the disarm timer if one runs, and
+# /system-update only when it's Apsis's own link (another tool's is left exactly where it
+# is). None of these is a packaged file: the helper writes them while a restore is armed.
+# Snapshots on the backup disk are never touched.
 set -e
 
 case "$1" in
@@ -19,6 +24,17 @@ esac
 case "$1" in
     purge)
         rm -rf /etc/apsis
+        if [ -d /run/systemd/system ]; then
+            systemctl stop apsis-disarm.timer >/dev/null 2>&1 || true
+        fi
+        if [ "$(readlink /system-update 2>/dev/null)" = /var/lib/apsis/restore ]; then
+            rm -f /system-update
+        fi
+        rm -f /etc/systemd/system/system-update.target.wants/apsis-restore.service
+        rm -f /etc/systemd/system/apsis-restore.service
+        rm -f /etc/systemd/system/pop-upgrade-init.service.d/50-apsis.conf
+        rmdir /etc/systemd/system/pop-upgrade-init.service.d 2>/dev/null || true
+        rm -rf /var/lib/apsis
         ;;
 esac
 
