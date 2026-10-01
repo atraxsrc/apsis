@@ -150,18 +150,18 @@ files in `resources/helper/` against them.
 | | |
 |---|---|
 | bus name | `io.github.atraxsrc.Apsis.Helper` (system bus, owned by root only) |
-| object / interface | `/io/github/atraxsrc/Apsis/Helper`, `io.github.atraxsrc.Apsis.Helper2` |
-| `List() -> ((sssa(sss)asas)a{st})` | `(device, uuid, mode, [(name, tags, comment)], warnings, leftovers)` and the backup device's usage in bytes (`total`, `used`, `free`, all or none, `statvfs` while mounted); polkit `list`, not interactive. A read, not a job (0.4.2): lists share one read-only mount and run at the same time; never announced |
+| object / interface | `/io/github/atraxsrc/Apsis/Helper`, `io.github.atraxsrc.Apsis.Helper3` |
+| `List() -> ((sssa(ssss)asas)a{st})` | `(device, uuid, mode, [(name, tags, comment, rsync_flags)], warnings, leftovers)` and the backup device's usage in bytes (`total`, `used`, `free`, all or none, `statvfs` while mounted). `rsync_flags` (0.5.0, `Helper3`) is the raw `apsis-rsync-flags` string from the snapshot's `info.json`, `""` when missing (an old-format snapshot; core's `native::info::is_old_format` reads it). polkit `list`, not interactive. A read, not a job (0.4.2): lists share one read-only mount and run at the same time; never announced |
 | `Create(s comment)` | a snapshot (leftovers removed first); polkit `create`, interactive; returns once started, `Finished("create", ..)` follows |
 | `Delete(s name)` | one snapshot or leftover (see Backend above), only a name the fresh list has; polkit `delete`, interactive; returns once started, `Finished("delete", ..)` follows |
 | `DeleteMany(as names)` | (0.4.2) two or more distinct snapshot names, as one job: each in order, `Job`'s `snapshot` the one being deleted and `percent` done of total, stopping at the first failure; polkit `delete` once, interactive; returns once started, `Finished("delete-many", ..)` follows, its failure message encoding what was deleted, what failed and what's left (`Error::DeleteManyStopped`) |
 | `Stop(s snapshot)` | stops the running create if it makes `snapshot`; no prompt for the starter's uid, else polkit `stop`; refused once the snapshot is being put in place |
-| `Job() -> (sssxdx)` | `(kind, state, snapshot, started, percent, eta_seconds)`, idle `("", "", "", 0, -1, -1)`; kinds `create`, `delete`, `delete-many`, `configure` (never `list`); polkit `list`, not interactive |
+| `Job() -> (sssxdx)` | `(kind, state, snapshot, started, percent, eta_seconds)`, idle `("", "", "", 0, -1, -1)`; kinds `create`, `delete`, `delete-many`, `configure`, `restore` (never `list`; a ready restore plan is a running `restore` at 100%); polkit `list`, not interactive |
 | `ReadConfig() -> (s(sbbas)sas)` | `(config.toml text or empty, the config in effect, lsblk JSON, notes)`; notes only while converted or imported; polkit `list`, not interactive |
 | `WriteConfig(s expected, (sbbas) config) -> s` | writes `/etc/apsis/config.toml` if it still reads `expected` (empty: none yet); polkit `configure`, interactive; returns once done |
 | `JobChanged((sssxdx) job)` | signal to everyone: a job started, got further (at most one per 500 ms, the end always), is stopping, or ended (`done`, `failed`, `stopped`, once). No comment, caller, error text or path |
 | `Finished(s op, b ok, s message)` | signal, sent only to the caller that started the operation; `message` is the error |
-| errors | `...Helper2.Error.{NotAuthorized,Busy,InvalidInput,Failed,DeviceNotFound,Changed}` |
+| errors | `...Helper3.Error.{NotAuthorized,Busy,InvalidInput,Failed,DeviceNotFound,Changed}` |
 
 `helper::encode_error` keeps an error's kind across the bus (a missing disk, a disk removed
 during the job `backup disk removed: <uuid>: <reason>`, a refusal `refused: `, `stopped`);

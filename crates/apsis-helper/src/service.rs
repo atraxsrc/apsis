@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The D-Bus interface `Helper2`: `List`, `Create`, `Delete`, `DeleteMany`, `Stop`, `Job`,
+//! The D-Bus interface `Helper3`: `List`, `Create`, `Delete`, `DeleteMany`, `Stop`, `Job`,
 //! `ReadConfig`, `WriteConfig`, and the `JobChanged` and `Finished` signals. Nothing else.
 //!
 //! `List` is a read: it shares the read-only mount with other lists and is never a job
@@ -17,8 +17,8 @@ use apsis_core::helper::names::{
     OP_CREATE, OP_DELETE, OP_DELETE_MANY,
 };
 use apsis_core::helper::{
-    WireConfig, WireConfigInfo, WireListWithUsage, check_delete_many, config_from_wire,
-    encode_error, to_wire_with_usage,
+    WireConfig, WireConfigInfo, WireListWithUsage3, check_delete_many, config_from_wire,
+    encode_error, to_wire_with_usage3,
 };
 use apsis_core::job::{self, JobKind, JobState, WireJob};
 use apsis_core::native::{Cancel, TooLate};
@@ -58,7 +58,7 @@ impl Helper {
 
 /// The helper's D-Bus errors, named `<ERROR_PREFIX>.<Variant>` (see `apsis_core::helper::names`).
 #[derive(Debug, DBusError)]
-#[zbus(prefix = "io.github.atraxsrc.Apsis.Helper2.Error")]
+#[zbus(prefix = "io.github.atraxsrc.Apsis.Helper3.Error")]
 pub enum HelperError {
     #[zbus(error)]
     ZBus(zbus::Error),
@@ -90,10 +90,11 @@ impl From<Error> for HelperError {
     }
 }
 
-#[interface(name = "io.github.atraxsrc.Apsis.Helper2")]
+#[interface(name = "io.github.atraxsrc.Apsis.Helper3")]
 impl Helper {
     /// The snapshots on the backup device (each one's `info.json`, read on the read-only
-    /// mount the lists share), leftovers of interrupted creates, and its `statvfs` (polkit:
+    /// mount the lists share, with its format as the raw rsync flags string, `""` for an old
+    /// one), leftovers of interrupted creates, and its `statvfs` (polkit:
     /// `list`, no password for the active session). A read, not a job: lists run at the same
     /// time as each other and are never announced; one that arrives while a write runs or
     /// waits is refused `Busy`.
@@ -101,7 +102,7 @@ impl Helper {
         &self,
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &Connection,
-    ) -> Result<WireListWithUsage, HelperError> {
+    ) -> Result<WireListWithUsage3, HelperError> {
         let _call = self.state.call();
         let caller = caller(&header)?;
         let label = format!("list for {caller}");
@@ -125,7 +126,7 @@ impl Helper {
             Ok(list) => log(&format!("{label}: {}", describe_list(list))),
             Err(error) => log(&format!("{label}: {}", describe_error(error))),
         }
-        Ok(to_wire_with_usage(&result?))
+        Ok(to_wire_with_usage3(&result?))
     }
 
     /// Starts a snapshot (polkit: `create`) and returns; `Finished("create", ..)` follows.
@@ -718,8 +719,8 @@ mod tests {
             "{xml}"
         );
         assert_eq!(xml.matches("<signal ").count(), 2, "{xml}");
-        // The list with its warnings, leftovers and the disk usage.
-        assert!(xml.contains("type=\"((sssa(sss)asas)a{st})\""), "{xml}");
+        // The list with each snapshot's format, its warnings, leftovers and the disk usage.
+        assert!(xml.contains("type=\"((sssa(ssss)asas)a{st})\""), "{xml}");
         // The config types.
         assert!(xml.contains("type=\"(s(sbbas)sas)\""), "{xml}");
         assert!(xml.contains("type=\"(sbbas)\""), "{xml}");

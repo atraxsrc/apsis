@@ -1887,7 +1887,10 @@ Checks:
       new items carry `#[cfg_attr(not(test), expect(dead_code, ..))]` for now. Next: item 3
       (`DeleteMany` moves with the rest of `Helper3`'s names) and item 4 (`CheckRestore`).
    3. **`DeleteMany`**: shipped in 0.4.2 on `Helper2`; here it only moves to `Helper3` with
-      the other methods.
+      the other methods. **Status (2026-10-02): done.** The interface, the error prefix, the
+      bus policy and `List`'s `(ssss)` are `Helper3` on both sides; the restore method names,
+      `OP_RESTORE` and `ACTION_RESTORE` are constants in `names.rs` (the methods come with
+      items 4 to 7, the polkit entry with item 10). DECISIONS 2026-10-02.
    4. **`CheckRestore`**: read-only mount, the reads (mountinfo, lsblk, `findmnt`, the ESP's
       names, `/sys/firmware/efi`, the kernelstub configuration, the pending names, the live
       crypttab; the snapshot's `info.json`, `exclude.list`, `boot/`, `usr/lib/modules/`, its

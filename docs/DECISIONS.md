@@ -3455,3 +3455,33 @@ with the attribute still on.
 
 Gate: `cargo test --workspace` (all green), `cargo clippy --workspace --all-targets -D warnings`,
 `cargo fmt --check`. Not committed; the checklist in PRIVACY.md comes first.
+
+## 2026-10-02 - 6b helper slice: the interface is `Helper3` (step 3 item 3)
+
+The interface bump decided in 6b.9 and confirmed by the owner (2026-10-01, item 1 of 6b.14),
+done as the small step it is, so `List`'s format field is on the wire before `CheckRestore`
+and the restore methods are added to the same interface.
+
+- `names.rs`: `INTERFACE` and the six `ERROR_*` names say `Helper3`; `METHOD_LIST`'s signature
+  is `((sssa(ssss)asas)a{st})`. The five restore method names (`CheckRestore`, `Restore`,
+  `RestartToRestore`, `CancelRestore`, `RestoreResult`), `OP_RESTORE` (`= JobKind::Restore.word()`,
+  checked by a test, as `OP_DELETE_MANY` now is against `DeleteMany`) and `ACTION_RESTORE`
+  are constants with their contracts in the doc comments. The methods themselves come with
+  items 4 to 7; the polkit action's file entry with item 10 (the resource test still counts
+  five actions until then).
+- `service.rs`: `#[interface(name = ..Helper3)]`, the error prefix, and `List` returns
+  `to_wire_with_usage3` (the raw flags string per snapshot, `""` for none). Introspection
+  test: `(ssss)`.
+- `client.rs`: `list` decodes `WireListWithUsage3` with `from_wire_with_usage3`, so
+  `Snapshot::rsync_flags` arrives in the applet (the row tooltip in the UI slice reads it
+  through `native::info::is_old_format`).
+- The bus policy file names `Helper3` in both `send_interface` lines; `ARCHITECTURE.md`'s table
+  has the new list type and the `restore` job kind.
+- `Helper2`'s wire types (`WireList`, `WireListWithUsage`, `to_wire`, `from_wire_with_usage`)
+  stay in core: `from_wire3` and `from_wire_with_usage3` are built on them, and they're what a
+  0.4.x list looked like.
+- Not changed: bus name, object path, unit, activation file. A 0.4.x panel still running after
+  the upgrade gets `UnknownInterface` until re-added, as at 0.4.0; the justfile's note after
+  `deb-install` already says to re-add it or log out and in.
+
+Gate: workspace tests, clippy `-D warnings` on all targets, fmt check: all clean.

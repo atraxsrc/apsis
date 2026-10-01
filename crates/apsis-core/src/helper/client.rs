@@ -14,8 +14,8 @@ use super::names::{
     OP_DELETE, OP_DELETE_MANY, SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
 };
 use super::{
-    WireConfigInfo, WireListWithUsage, check_delete_many, config_info_from_wire, config_to_wire,
-    decode_error, from_wire_with_usage,
+    WireConfigInfo, WireListWithUsage3, check_delete_many, config_info_from_wire, config_to_wire,
+    decode_error, from_wire_with_usage3,
 };
 use crate::config::{Config, ConfigInfo};
 use crate::error::{Error, Result};
@@ -55,13 +55,13 @@ impl HelperClient {
     ///
     /// What the helper reported (see [`Error`]), or a bad reply.
     pub async fn list(&self) -> Result<SnapshotList> {
-        let wire: WireListWithUsage = self
+        let wire: WireListWithUsage3 = self
             .proxy()
             .await?
             .call(METHOD_LIST, &())
             .await
             .map_err(from_zbus)?;
-        from_wire_with_usage(wire)
+        from_wire_with_usage3(wire)
     }
 
     /// Creates a snapshot and waits until it's done (this can take minutes).
