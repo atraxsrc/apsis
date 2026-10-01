@@ -1928,6 +1928,9 @@ Checks:
       "RestartToRestore".
    7. **`CancelRestore`**, the stale plan, the disarm timer's service, the leftover cleanup at
       start.
+      **Status (2026-10-02): done** (`cancel_restore`, `remove_plan` and `watch_starters` in
+      `service.rs`; `arm::clean_at_start` run from `main.rs`; the timer's service is item 6's
+      `--disarm`; `HelperClient::cancel_restore`). DECISIONS 2026-10-02 "CancelRestore".
    8. **`--apply-restore`**: the real `Runner` for `apsis_core::restore::apply::apply`: the
       link check (`readlink`, compared with the state folder), `udevadm wait --timeout=60`,
       the read-only mount and the delete's path checks, `find_snapshot`, the copy (rsync in

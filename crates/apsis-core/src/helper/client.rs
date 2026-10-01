@@ -9,10 +9,10 @@ use std::future::Future;
 
 use super::names::{
     BUS_NAME, ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
-    ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CHECK_RESTORE, METHOD_CREATE, METHOD_DELETE,
-    METHOD_DELETE_MANY, METHOD_JOB, METHOD_LIST, METHOD_READ_CONFIG, METHOD_RESTART_TO_RESTORE,
-    METHOD_RESTORE, METHOD_STOP, METHOD_WRITE_CONFIG, OBJECT_PATH, OP_CREATE, OP_DELETE,
-    OP_DELETE_MANY, OP_RESTORE, SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
+    ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CANCEL_RESTORE, METHOD_CHECK_RESTORE, METHOD_CREATE,
+    METHOD_DELETE, METHOD_DELETE_MANY, METHOD_JOB, METHOD_LIST, METHOD_READ_CONFIG,
+    METHOD_RESTART_TO_RESTORE, METHOD_RESTORE, METHOD_STOP, METHOD_WRITE_CONFIG, OBJECT_PATH,
+    OP_CREATE, OP_DELETE, OP_DELETE_MANY, OP_RESTORE, SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
 };
 use super::{
     WireCheckRestore, WireConfigInfo, WireListWithUsage3, check_delete_many, config_info_from_wire,
@@ -128,6 +128,21 @@ impl HelperClient {
         self.proxy()
             .await?
             .call::<_, _, ()>(METHOD_RESTART_TO_RESTORE, &(name,))
+            .await
+            .map_err(from_zbus)
+    }
+
+    /// "Cancel restore" at the ready prompt: the helper removes the plan (nothing is armed
+    /// yet; a finished safety snapshot stays). No password for the uid that prepared it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInput`] with `restore::plan::GONE` when there's no plan, or what the
+    /// helper reported.
+    pub async fn cancel_restore(&self) -> Result<()> {
+        self.proxy()
+            .await?
+            .call::<_, _, ()>(METHOD_CANCEL_RESTORE, &())
             .await
             .map_err(from_zbus)
     }

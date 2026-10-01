@@ -3692,3 +3692,40 @@ real `/` and talks to logind, so its run is apsis-test's (check 1).
   or use in item 7.
 
 Gate: workspace tests, clippy `-D warnings` on all targets, fmt check: all clean.
+
+## 2026-10-02 - 6b helper slice: `CancelRestore`, the stale plan, the window that leaves (step 3 item 7)
+
+Built tests first (`arm::tests::at_start_a_plan_without_the_link_is_a_leftover`, the
+introspection with `CancelRestore`). The bus-watching part can't run in the tests; its
+`State` half (`starter_left`) has had its test since item 2.
+
+- **`CancelRestore()`**: no argument (the ready plan is the one there is). No password for
+  the plan's starter uid, polkit `restore` for anyone else; `take_ready`, then
+  `remove_plan`: `prepare::clear_leftovers` on the state folder (the plan, the filter, the
+  log, `state.json`, the ESP backup, a helper copy; **`result.json` stays**), a journal line
+  (`plan removed (cancelled)`), and the job ends `stopped` before the method returns. A
+  finished safety snapshot stays (6b.5). No plan: `InvalidInput` with `plan::GONE`.
+- **The starter's window leaves the bus** (6b.9): `service::watch_starters`, spawned at
+  start next to `announce_jobs`, follows `NameOwnerChanged` on the system bus
+  (`DBusProxy::receive_name_owner_changed`, zbus 5.19; `futures-util` added to the helper's
+  dependencies, already in the tree for core). A unique name (`:1.42`) whose new owner is
+  none is a connection gone; `State::starter_left(name)` hands back the plan if that
+  connection prepared it, and `remove_plan` ends it (`plan removed (its window left the
+  bus)`). The helper's own name is skipped. If the watch can't be set up, the helper logs
+  that a plan would outlive a closed window and goes on: the plan is still bounded by
+  "too old" at the next "Restart now".
+- **Leftovers at the helper's start** (6b.5): `arm::clean_at_start`, run in `serve()` before
+  the bus name is taken. With Apsis's link (an arm about to be applied, the helper restarted
+  by activation in between): nothing. Without it: the arm files **and `request.json`** go,
+  logged. A window still at its prompt then gets `GONE` from `RestartToRestore`.
+- **`State` lost its own age** (`READY_MAX_AGE`, `ReadyInfo::is_too_old`, `prepared`): the
+  one freshness rule is `Plan::is_too_old` on `request.json`'s `prepared_at` at "Restart now"
+  (6b.5; DECISIONS 2026-10-01). Two clocks for one rule would have been one too many. With
+  that and `starter_left` in use, the last dead-code expectations of item 2 are gone.
+- **Client**: `HelperClient::cancel_restore()`.
+- Twelve methods on `Helper3` now: the five of 6b.9's table are all there. Left of step 3:
+  item 8 (`--apply-restore`), item 9 (`RestoreResult`), item 10 (packaging: the bus policy
+  already names `Helper3`, the polkit action is in; `postrm purge` is left), item 11 (the
+  gate and summary).
+
+Gate: workspace tests, clippy `-D warnings` on all targets, fmt check: all clean.

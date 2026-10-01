@@ -60,16 +60,6 @@ impl Announced {
 /// second or two (mount, a few `info.json` files, `statvfs`, unmount).
 pub const WRITE_WAIT: Duration = Duration::from_secs(15);
 
-/// A plan left at the ready prompt longer than this is too old to restart with (6b.5).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
-    )
-)]
-pub const READY_MAX_AGE: Duration = Duration::from_secs(30 * 60);
-
 /// The job holding the lock, and what `Stop` needs about it.
 struct Active {
     job: Job,
@@ -85,11 +75,10 @@ struct ReadyPlan {
     job: Job,
     starter: u32,
     starter_name: String,
-    prepared: tokio::time::Instant,
 }
 
-/// What's known about the ready plan: who may restart or cancel it without a password, and
-/// how old it is.
+/// What's known about the ready plan: who may restart or cancel it without a password. Its
+/// age is `request.json`'s to say (`Plan::is_too_old`, PLAN 6b.5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadyInfo {
     pub snapshot: String,
@@ -98,22 +87,6 @@ pub struct ReadyInfo {
     /// The unique bus name of the connection that prepared it: when it leaves the bus, the
     /// plan goes ([`State::starter_left`]).
     pub starter_name: String,
-    pub prepared: tokio::time::Instant,
-}
-
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
-    )
-)]
-impl ReadyInfo {
-    /// Older than [`READY_MAX_AGE`]: "The preparation is too old. Start the restore again."
-    #[must_use]
-    pub fn is_too_old(&self) -> bool {
-        self.prepared.elapsed() > READY_MAX_AGE
-    }
 }
 
 impl ReadyPlan {
@@ -122,7 +95,6 @@ impl ReadyPlan {
             snapshot: self.job.snapshot.clone(),
             starter: self.starter,
             starter_name: self.starter_name.clone(),
-            prepared: self.prepared,
         }
     }
 }
@@ -332,13 +304,6 @@ impl State {
     /// The connection `name` left the bus: if it prepared the ready plan, the plan is taken
     /// out (the window is gone without an answer) for the caller to clean up and end
     /// `stopped`. `None` for any other name, or no plan.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
-        )
-    )]
     pub fn starter_left(self: &Arc<Self>, name: &str) -> Option<Ready> {
         {
             let ready = self.lock_ready();
@@ -527,7 +492,6 @@ impl Running {
                 job,
                 starter,
                 starter_name: starter_name.to_owned(),
-                prepared: tokio::time::Instant::now(),
             }
         });
         self.ended = true;
@@ -547,13 +511,6 @@ pub struct Ready {
     plan: ReadyPlan,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the restore methods (PLAN 6b.13 step 3, items 5 to 7) use it"
-    )
-)]
 impl Ready {
     #[must_use]
     pub fn info(&self) -> ReadyInfo {
@@ -993,16 +950,6 @@ mod ready_tests {
         assert_eq!(ready.info().starter_name, STARTER);
         ready.end(JobState::Stopped);
         assert!(!state.is_ready());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_ready_plan_is_too_old_after_half_an_hour() {
-        let (state, _changes) = state();
-        ready_plan(&state).await;
-        tokio::time::sleep(READY_MAX_AGE - Duration::from_secs(1)).await;
-        assert!(!state.ready().unwrap().is_too_old());
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        assert!(state.ready().unwrap().is_too_old());
     }
 
     #[tokio::test(start_paused = true)]

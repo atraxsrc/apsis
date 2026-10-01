@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 apsis-core.workspace = true
+futures-util.workspace = true
 rustix.workspace = true
 tokio.workspace = true
 zbus.workspace = true

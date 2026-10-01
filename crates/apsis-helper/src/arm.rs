@@ -143,6 +143,25 @@ pub fn clean_leftovers(paths: &Paths) -> io::Result<Vec<&'static str>> {
     remove_arm_files(paths)
 }
 
+/// The helper's start (PLAN 6b.5, 6b.9): with Apsis's link, an arm about to be applied, kept
+/// whole. Without it, the arm files are leftovers, and so is a plan (`request.json`): the
+/// helper that held it ready is gone, and a window still at its prompt gets "the preparation
+/// is gone" from `RestartToRestore`.
+///
+/// # Errors
+///
+/// A leftover couldn't be removed.
+pub fn clean_at_start(paths: &Paths) -> io::Result<Vec<&'static str>> {
+    if is_armed(paths) {
+        return Ok(Vec::new());
+    }
+    let mut removed = remove_arm_files(paths)?;
+    if remove_if_there(&paths.state_dir.join(plan::FILE))? {
+        removed.push("request.json");
+    }
+    Ok(removed)
+}
+
 /// The unit, its wants link, the drop-in, the helper copy and `state.json`.
 fn remove_arm_files(paths: &Paths) -> io::Result<Vec<&'static str>> {
     let mut removed = Vec::new();
@@ -386,6 +405,25 @@ mod tests {
         }
         assert!(fs::symlink_metadata(paths.state_dir.join("state.json")).is_err());
         assert!(paths.state_dir.join("request.json").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The helper's start (PLAN 6b.5, 6b.9): a plan with no link is a leftover of a helper
+    /// that died while it was ready, and goes with the other leftovers; an arm stays whole.
+    #[test]
+    fn at_start_a_plan_without_the_link_is_a_leftover() {
+        let (root, paths, exe) = lab();
+        arm(&paths, &exe).unwrap();
+        assert_eq!(clean_at_start(&paths).unwrap(), Vec::<&str>::new());
+        assert!(is_armed(&paths) && paths.state_dir.join("request.json").exists());
+        fs::remove_file(&paths.link).unwrap();
+        let cleaned = clean_at_start(&paths).unwrap();
+        assert!(cleaned.contains(&"request.json"), "{cleaned:?}");
+        assert_eq!(cleaned.len(), 6, "{cleaned:?}");
+        assert!(!paths.state_dir.join("request.json").exists());
+        assert!(!paths.unit.exists());
+        // Nothing at all: nothing to say.
+        assert_eq!(clean_at_start(&paths).unwrap(), Vec::<&str>::new());
         fs::remove_dir_all(&root).unwrap();
     }
 

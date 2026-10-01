@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use apsis_core::helper::names::{BUS_NAME, OBJECT_PATH};
 
-use crate::service::{Helper, announce_jobs};
+use crate::service::{Helper, announce_jobs, watch_starters};
 use crate::state::State;
 
 /// Exit after this long with nothing to do. Never while a job runs.
@@ -56,6 +56,17 @@ async fn main() -> ExitCode {
 }
 
 async fn serve() -> zbus::Result<()> {
+    // Leftovers of an arm or a plan with no link arm nothing and go (PLAN 6b.5).
+    match arm::clean_at_start(&arm::Paths::system()) {
+        Ok(removed) if !removed.is_empty() => {
+            eprintln!(
+                "apsis-helper: leftovers removed at start: {}",
+                removed.join(", ")
+            );
+        }
+        Ok(_) => {}
+        Err(error) => eprintln!("apsis-helper: couldn't remove leftovers at start: {error}"),
+    }
     let (state, changes) = State::new();
     // Only root may own the name (the bus policy says so), so this fails for anyone else.
     let connection = zbus::connection::Builder::system()?
@@ -64,6 +75,7 @@ async fn serve() -> zbus::Result<()> {
         .build()
         .await?;
     tokio::spawn(announce_jobs(connection.clone(), changes));
+    tokio::spawn(watch_starters(connection.clone(), Arc::clone(&state)));
     state.idle_for(IDLE).await;
     Ok(())
 }

@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use apsis_core::helper::names::{
     ACTION_CONFIGURE, ACTION_CREATE, ACTION_DELETE, ACTION_LIST, ACTION_RESTORE, ACTION_STOP,
-    OBJECT_PATH, OP_CREATE, OP_DELETE, OP_DELETE_MANY, OP_RESTORE,
+    BUS_NAME, OBJECT_PATH, OP_CREATE, OP_DELETE, OP_DELETE_MANY, OP_RESTORE,
 };
 use apsis_core::helper::{
     WireCheckRestore, WireConfig, WireConfigInfo, WireListWithUsage3, check_delete_many,
@@ -338,6 +338,42 @@ impl Helper {
         .await;
         if let Err(error) = &result {
             log(&format!("{label}: {}", describe_error(error)));
+        }
+        Ok(result?)
+    }
+
+    /// "Cancel restore" at the ready prompt (PLAN 6b.5, 6b.9): removes the plan (nothing is
+    /// armed yet; a finished safety snapshot stays) and the job ends `stopped`. No password
+    /// for the uid that prepared the plan; polkit `restore` for anyone else. With no plan:
+    /// `InvalidInput` with [`plan::GONE`].
+    async fn cancel_restore(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+    ) -> Result<(), HelperError> {
+        let _call = self.state.call();
+        let caller = caller(&header)?;
+        let label = format!("cancel-restore for {caller}");
+        let result = async {
+            let info = self
+                .state
+                .ready()
+                .ok_or_else(|| Error::InvalidInput(plan::GONE.to_owned()))?;
+            let uid = unix_user(connection, &caller).await?;
+            if uid != info.starter {
+                authorize(connection, &caller, ACTION_RESTORE, true).await?;
+            }
+            let ready = self
+                .state
+                .take_ready()
+                .ok_or_else(|| Error::InvalidInput(plan::GONE.to_owned()))?;
+            remove_plan(ready, "cancelled").await;
+            Ok(())
+        }
+        .await;
+        match &result {
+            Ok(()) => log(&format!("{label}: cancelled")),
+            Err(error) => log(&format!("{label}: {}", describe_error(error))),
         }
         Ok(result?)
     }
@@ -849,6 +885,54 @@ async fn reboot(connection: &Connection) -> apsis_core::Result<()> {
         .map_err(|e| Error::Helper(format!("logind refused the restart: {e}")))
 }
 
+/// Ends a ready plan that isn't going to be restarted with (PLAN 6b.5, 6b.9): its files in
+/// the state folder go (the last `result.json` stays), the journal says `why`, and the job
+/// ends `stopped`, announced before this returns.
+async fn remove_plan(ready: crate::state::Ready, why: &str) {
+    let info = ready.info();
+    let removed = blocking(|| {
+        prepare::clear_leftovers(Path::new(apsis_core::restore::file::DIR)).map_err(Error::Io)
+    })
+    .await;
+    match removed {
+        Ok(()) => log(&format!(
+            "restore {:?} for {}: plan removed ({why})",
+            info.snapshot, info.starter_name
+        )),
+        Err(error) => log(&format!(
+            "restore {:?} for {}: plan removal failed ({why}): {error}",
+            info.snapshot, info.starter_name
+        )),
+    }
+    ready.end(JobState::Stopped).wait().await;
+}
+
+/// Watches the bus for the connection that prepared the ready plan leaving it (the window
+/// closed, crashed or logged out without answering the prompt): the plan is removed at once
+/// (PLAN 6b.9). Runs as long as the helper does.
+pub async fn watch_starters(connection: Connection, state: Arc<State>) {
+    let Ok(bus) = DBusProxy::new(&connection).await else {
+        log("couldn't watch the bus for the plan's window; a plan outlives a closed window");
+        return;
+    };
+    let Ok(mut changed) = bus.receive_name_owner_changed().await else {
+        log("couldn't watch the bus for the plan's window; a plan outlives a closed window");
+        return;
+    };
+    use futures_util::StreamExt;
+    while let Some(signal) = changed.next().await {
+        let Ok(args) = signal.args() else { continue };
+        // A unique name whose owner is gone: that connection left the bus.
+        let left = args.new_owner().is_none() && args.name().as_str().starts_with(':');
+        if !left || args.name().as_str() == BUS_NAME {
+            continue;
+        }
+        if let Some(ready) = state.starter_left(args.name().as_str()) {
+            remove_plan(ready, "its window left the bus").await;
+        }
+    }
+}
+
 /// How a job that succeeds ends (see [`Helper::start`]).
 enum Ending {
     /// `done`, the lock free.
@@ -1049,9 +1133,10 @@ mod tests {
     use apsis_core::helper::decode_error;
     use apsis_core::helper::names::{
         ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
-        ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CHECK_RESTORE, METHOD_CREATE, METHOD_DELETE,
-        METHOD_DELETE_MANY, METHOD_JOB, METHOD_LIST, METHOD_READ_CONFIG, METHOD_RESTART_TO_RESTORE,
-        METHOD_RESTORE, METHOD_STOP, METHOD_WRITE_CONFIG, SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
+        ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CANCEL_RESTORE, METHOD_CHECK_RESTORE,
+        METHOD_CREATE, METHOD_DELETE, METHOD_DELETE_MANY, METHOD_JOB, METHOD_LIST,
+        METHOD_READ_CONFIG, METHOD_RESTART_TO_RESTORE, METHOD_RESTORE, METHOD_STOP,
+        METHOD_WRITE_CONFIG, SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
     };
     use zbus::object_server::Interface;
 
@@ -1074,6 +1159,7 @@ mod tests {
             METHOD_CHECK_RESTORE,
             METHOD_RESTORE,
             METHOD_RESTART_TO_RESTORE,
+            METHOD_CANCEL_RESTORE,
         ] {
             assert!(
                 xml.contains(&format!("<method name=\"{method}\">")),
@@ -1086,8 +1172,13 @@ mod tests {
                 "{signal}\n{xml}"
             );
         }
-        // Nothing else: exactly eleven methods and two signals.
-        assert_eq!(xml.matches("<method ").count(), 11, "{xml}");
+        // Nothing else: exactly twelve methods and two signals.
+        assert_eq!(xml.matches("<method ").count(), 12, "{xml}");
+        // `CancelRestore()` takes nothing: the ready plan is the one there is.
+        assert!(
+            xml.contains("<method name=\"CancelRestore\">\n  </method>"),
+            "{xml}"
+        );
         // `Restore(s snapshot, b restore_home, b safety_snapshot)`.
         assert!(
             xml.contains("<arg name=\"restore_home\" type=\"b\" direction=\"in\"/>"),
