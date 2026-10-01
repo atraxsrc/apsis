@@ -1944,6 +1944,9 @@ Checks:
       check 0.3; **if that call fails, exit 1 so `FailureAction=reboot` reboots**, 6b.6). A
       panic or an error outside `apply` removes the link before exiting. `CheckRestore` and
       `List` share the read mount of 0.4.2.
+      **Status (2026-10-02): done** (`apply.rs` in the helper: `apply_restore`, `RealRunner`;
+      `native::mount_by_uuid`). Plymouth's progress bar is sent after the copy, not during
+      (DECISIONS 2026-10-02 "--apply-restore"); the rest is as listed. Check 1 is its run.
    9. **`RestoreResult`**, read from `result.json` through core; `""` and `0` for `null`.
    10. **Packaging**: the polkit file's sixth action; the bus policy names `Helper3`; `postrm
        purge` removes the drop-in and its folder when empty, `/var/lib/apsis/` and a leftover

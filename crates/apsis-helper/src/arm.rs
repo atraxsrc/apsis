@@ -162,8 +162,9 @@ pub fn clean_at_start(paths: &Paths) -> io::Result<Vec<&'static str>> {
     Ok(removed)
 }
 
-/// The unit, its wants link, the drop-in, the helper copy and `state.json`.
-fn remove_arm_files(paths: &Paths) -> io::Result<Vec<&'static str>> {
+/// The unit, its wants link, the drop-in, the helper copy and `state.json`. The apply calls
+/// it once Apsis's link is gone, or when the link was never Apsis's.
+pub fn remove_arm_files(paths: &Paths) -> io::Result<Vec<&'static str>> {
     let mut removed = Vec::new();
     for (path, name) in [
         (&paths.unit, "the unit"),

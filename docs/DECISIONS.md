@@ -3729,3 +3729,57 @@ introspection with `CancelRestore`). The bus-watching part can't run in the test
   gate and summary).
 
 Gate: workspace tests, clippy `-D warnings` on all targets, fmt check: all clean.
+
+## 2026-10-02 - 6b helper slice: `--apply-restore`, the real runner (step 3 item 8)
+
+Built tests first (`apply::tests`, six tests: the tools' argv, the arm and the link on a temp
+root, the snapshot on a mount point, the protected kernel, `say`/`restart` and `copy` through
+a fake tools runner). The state machine itself is core's and has its own tests; the real run
+is apsis-test check 1.
+
+- **`apsis-helper --apply-restore`** (`main.rs`, before tokio: no D-Bus): `apply::apply_restore`
+  builds `RealRunner::system()` and runs `apsis_core::restore::apply::apply` with
+  `Paths { state_dir: file::DIR, esp: /boot/efi, root: / }`, logs the `End`, and exits with
+  `apply::exit_code(end, restart_failed)`. **A panic hook removes Apsis's link** (only when
+  the link points at the state folder) before the process dies, so a restart can't come
+  straight back to the apply; the rest is left for the next start's cleanup.
+- **`RealRunner<R: Runner>`** (`apply.rs`): `arm::Paths`, the root, the ESP, the mount point
+  and `tools` (the helper's `QuietRunner` with its fixed `PATH` and cleared environment; a
+  fake in the tests). Per contract of core's `Runner`:
+  - `is_armed`: `arm::is_armed`.
+  - `open_backup`: `udevadm wait --timeout=60 /dev/disk/by-uuid/<uuid>` (a wait that times
+    out is "never started", before any mount), `native::mount_by_uuid` read-only
+    (`ro,nosuid,nodev,noexec`, the guard held until the runner drops), then the 6b.7 checks
+    once more through `check::SnapshotFiles`, `check::Live` and `refusal::check`
+    (`check_pending` not at apply, as 6b.7 says; the ESP check is step 6's), and the separate
+    `/home` rule of 6b.6 step 2 (mounted, and `findmnt`'s UUID the plan's).
+  - `find_snapshot`: `localhost/` a folder by its own name, `info.json`'s text with
+    `O_NOFOLLOW` (`check::read_nofollow`, now crate-visible).
+  - `copy`: says the boot screen's line ("Restoring the system. Don't turn off the
+    computer."), runs `argv::rsync` through `run_streaming`: every segment is kept (so
+    `Copied::new` sees the whole standard output, 6b.10's "skipping file deletion" line
+    anywhere in it), and each new percent from `parse_rsync` goes to `plymouth system-update
+    --progress=N`; the last twenty lines of standard error are the tail; then `syncfs` on `/`
+    and on a restored separate `/home` before returning. rsync not starting at all is
+    `Copied::new(None, "", why)`: a broken copy.
+  - `back_up_esp` / `put_back_esp`: `esp::back_up` / `esp::put_back` on `/boot/efi`.
+  - `refresh_boot`: `kernelstub --verbose --preserve-live-mode`, its output line by line to
+    the journal; a non-zero exit is the error with the tail.
+  - `remove_protected_kernel`: if the snapshot's `localhost/usr/lib/modules/<running>` is
+    there, `Ok(false)`; else the four `/boot/<name>-<version>` files (a missing one is fine)
+    and the modules folder with `prune::remove_at` (one filesystem, no links followed), `Ok(true)`.
+  - `remove_link`: only Apsis's link, and an error if it's still there after; another
+    tool's link is never touched. `remove_arm_files`: `arm::remove_arm_files` (now pub).
+  - `say`: the journal, and `plymouth display-message --text=<line>`; after plymouth's first
+    failure it isn't asked again (no splash: the journal has everything). `restart`:
+    `systemctl reboot --no-block`; `restart_failed` records a call that didn't go through,
+    which `exit_code` turns into exit 1 for `FailureAction=reboot`.
+- **Plymouth's progress is sent after rsync ends, not during**: `run_streaming`'s callback
+  borrows the runner's tools, so the percents are collected in the callback and sent in
+  order once rsync returns. That shows the bar only at the end of the copy. **For the UI
+  slice / check 1**: if a live bar matters, the tools need a second runner for plymouth (or
+  the callback a channel). The journal lines and the final result are unaffected.
+- `native::mount_by_uuid` (pub) is `mount` without a `Device`: the apply has only the plan's
+  UUID. `mount` now calls it.
+
+Gate: workspace tests, clippy `-D warnings` on all targets, fmt check: all clean.

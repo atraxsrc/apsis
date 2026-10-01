@@ -330,11 +330,27 @@ fn mount<R: Runner + Clone>(
     access: Access,
     mount_point: &Path,
 ) -> Result<Mounted<R>> {
+    mount_by_uuid(runner, &device.uuid, access, mount_point)
+}
+
+/// Mounts the filesystem `uuid` at `mount_point` until the guard drops: the apply's read-only
+/// mount of the backup disk in the offline boot (PLAN 6b.6 step 2), where there's no config
+/// to read the device from, only the plan's UUID.
+///
+/// # Errors
+///
+/// `mount` failed.
+pub fn mount_by_uuid<R: Runner + Clone>(
+    runner: &R,
+    uuid: &str,
+    access: Access,
+    mount_point: &Path,
+) -> Result<Mounted<R>> {
     fs::create_dir_all(mount_point)?;
     // Timeshift unmounts whatever is at its mount point first; one left by a crashed helper
     // would be ours. Not mounted is fine.
     let _ = run(runner, &["umount", &mount_point.to_string_lossy()]);
-    let argv = mount_argv(&device.uuid, access, mount_point);
+    let argv = mount_argv(uuid, access, mount_point);
     let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
     run(runner, &argv)?;
     Ok(Mounted {

@@ -78,7 +78,7 @@ impl Live {
         })
     }
 
-    fn as_system(&self) -> refusal::System<'_> {
+    pub(crate) fn as_system(&self) -> refusal::System<'_> {
         refusal::System {
             uefi: self.uefi,
             kernelstub_config: self.kernelstub_config,
@@ -151,7 +151,7 @@ impl SnapshotFiles {
         }
     }
 
-    fn as_snapshot(&self) -> refusal::Snapshot<'_> {
+    pub(crate) fn as_snapshot(&self) -> refusal::Snapshot<'_> {
         refusal::Snapshot {
             info: self.info.as_ref(),
             has_localhost: self.has_localhost,
@@ -196,7 +196,7 @@ pub fn snapshot_dir(repo: &Path, name: &str) -> PathBuf {
 }
 
 /// `path` is a folder by its own name (a link isn't).
-fn is_dir(path: &Path) -> bool {
+pub(crate) fn is_dir(path: &Path) -> bool {
     path.symlink_metadata().is_ok_and(|meta| meta.is_dir())
 }
 
@@ -219,7 +219,7 @@ fn names_in(path: &Path) -> Vec<String> {
 
 /// The text of the regular file at `path`, opened with `O_NOFOLLOW`; `None` if it's a link,
 /// missing, not a file or can't be read.
-fn read_nofollow(path: &Path) -> Option<String> {
+pub(crate) fn read_nofollow(path: &Path) -> Option<String> {
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
     let mut file = File::from(rustix::fs::open(path, flags, Mode::empty()).ok()?);
     if !file.metadata().ok()?.is_file() {
