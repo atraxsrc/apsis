@@ -1702,3 +1702,32 @@ This resolves the two open items of the entry above.
   scratch folder (the registry linked read-only, the git cache copied). The pinned libcosmic
   commit was fetched once from github.com, as PRIVACY.md allows. The owner's own builds are
   unaffected.
+
+## 2026-10-01 - 0.4.1 core: ACLs and xattrs in snapshots, the format key
+
+Done as planned (PLAN, 0.4.1): create's rsync gets `-A -X --numeric-ids`, no `-H`; `info.json`
+ends with `"apsis-rsync-flags" : "-aAX --numeric-ids"`. What the plan didn't say:
+
+- **The format is read from the flags, not from the key being there.** A snapshot is new format
+  only when the recorded short flags include both `A` and `X` (`-aAX` or `-a -A -X`; a long
+  option like `--AX` doesn't count). A later Apsis that records other flags is then judged by
+  what it kept, not by having written a key.
+- **An odd value doesn't make the snapshot invalid.** The nine Timeshift members are still
+  strict (a non-string one makes the snapshot invalid, as in Timeshift). Timeshift never reads
+  Apsis's key, so a missing, empty or non-string value there only means the old format.
+- **The xattr and ACL test** runs real rsync on temp trees: a `user.*` xattr set with
+  `setxattr`, an ACL set with `setfacl` for the test's own uid. `u:0` was tried first and is
+  refused with "Invalid argument" in a user namespace where uid 0 isn't mapped. Each part skips
+  with a message where the filesystem or `setfacl` is missing. It also checks `--link-dest`:
+  an unchanged file with an xattr or ACL is linked in the next snapshot, and a changed xattr
+  alone makes rsync copy the file again.
+- **No UI in 0.4.1 (owner).** The row tooltip needs the format in `List`. A snapshot on the bus
+  is `(sss)`, and a 0.4.0 panel rejects an unknown tag letter, mode or name, so every way to
+  add it to `List` breaks a running 0.4.0 panel, which by `names.rs` means a new interface.
+  Options were: `Helper3` now, an extra method on `Helper2` (a second read-only mount per
+  refresh), or wait. The owner chose to wait: 0.4.1 changes no interface and needs no log out,
+  and nothing in 0.4.1 can act on the mark. The carrier is decided in 6b's helper slice, with
+  `CheckRestore`'s `old_format` for the dialog.
+- **Building in Claude's sandbox, simpler:** a temporary `HOME` with the real `CARGO_HOME` and
+  `RUSTUP_HOME` is enough. git needs `GIT_CONFIG_GLOBAL=/dev/null`. Claude can't commit there
+  (no identity, and it must not set one), so the owner runs the commit commands.

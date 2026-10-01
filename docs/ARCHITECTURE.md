@@ -57,6 +57,9 @@ built-in `/root/**` and `/home/*/**`).
   else there is a warning and is never touched).
 - `create`: `plan` works out the name (local time), the `--link-dest` snapshot (newest valid
   one with this `sys-uuid`), `exclude.list`, the rsync argv and `info.json` (tag `ondemand`).
+  Since 0.4.1 the argv has `-A -X --numeric-ids` (ACLs, extended attributes, owners by number;
+  no `-H`), and `info.json` ends with `"apsis-rsync-flags" : "-aAX --numeric-ids"`. A snapshot
+  without that key (Timeshift's, Apsis 0.4.0 and older) is the old format.
   It's built in `timeshift/apsis-staging/<name>/` (rsync through `QuietRunner`: fixed `PATH`,
   `ionice -c 3 nice -n <to 19>`, `--info=progress2` for the progress), checked like Timeshift
   checks it (a total size in `rsync-log`), renamed into `snapshots/`, and the

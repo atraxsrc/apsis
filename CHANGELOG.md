@@ -4,6 +4,21 @@ All notable changes to Apsis are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - Unreleased
+
+Snapshots now hold everything a full restore (0.5.0) needs.
+
+### Changed
+
+- Snapshots keep POSIX ACLs and extended attributes, including file capabilities (for example
+  on `ping`). rsync gets `-A -X --numeric-ids`. Hard links between files (`-H`) are still not
+  kept, as in Timeshift.
+- `info.json` gets one more entry at the end, `"apsis-rsync-flags"`. Timeshift ignores it.
+  Snapshots without it (Timeshift's, and Apsis 0.4.0 and older) keep working; they are the
+  older format, made without ACLs and extended attributes.
+- The first snapshot after the upgrade copies again the few files that have ACLs or extended
+  attributes, instead of linking them to the previous snapshot. Later snapshots link as before.
+
 ## [0.4.0] - 2026-09-30
 
 Apsis does four things: snapshot the system (with `/root` and `/home` as choices), a filter

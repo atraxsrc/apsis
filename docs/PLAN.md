@@ -364,7 +364,8 @@ original, and the journal shows each call.
 
 ## 0.4.1 - Snapshot format: ACLs and extended attributes (before 6b)
 
-**Status: design, approved in principle 2026-09-30 (review of 6b, item d). No code yet.**
+**Status: core done 2026-10-01 (argv, `info.json` key, format detection, tests). Left: the
+owner's four checks on apsis-test, then the version. The row tooltip moved to 0.5.0 (see UI).**
 A small release of its own, so 0.5.0's restore starts from snapshots that hold everything a
 restore needs.
 
@@ -403,6 +404,10 @@ restore can't bring back what the snapshot doesn't have.
 - **UI:** old-format snapshots are marked in the Restore dialog (the main place) and in the
   list row's tooltip, "Older format: made without ACLs and extended attributes". No glyph or
   column, no details area (owner, 2026-09-30; 6b.8).
+  **Both come with 0.5.0, none in 0.4.1** (owner, 2026-10-01): `List` sends a snapshot as
+  `(sss)` and a 0.4.0 panel checks every field, so carrying the format in the list is a
+  breaking wire change. How the list carries it is settled in 6b's helper slice (6b.13 step
+  3), and the tooltip is built in its UI slice (step 4). 0.4.1 changes no interface.
 - **Tests (no root):** argv (exact, with `-A -X --numeric-ids`, without `-H`); `info.json`
   writer and reader with and without the key; format detection; real rsync on temp trees
   keeps a `user.*` xattr and an ACL (both settable without root on the test's own files, where
@@ -1162,7 +1167,8 @@ Checks:
 2. The owner runs checks 0.1 to 0.3 and sets up the baseline. Revise here if 0.1 or 0.3
    surprise.
 3. **Helper**: methods, polkit action, the unit, `--apply-restore`, plymouth, logind reboot,
-   journal.
+   journal. Also decide how the list carries a snapshot's format for the row tooltip (moved
+   here from 0.4.1; step 4 builds the tooltip).
 4. **UI**, rebuilt from the preview (6b.8) in the real code: the toolbar's Restore (no key, no
    tooltip), the dialog, refusals, preparing status, ready prompt, results in the status line. The preview branch stays unmerged.
 5. Docs: README (experimental; "If a restore goes wrong"; how it differs from Timeshift, never
