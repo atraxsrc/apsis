@@ -317,7 +317,7 @@ enum Listing {
 }
 
 /// A `Clone`able summary of [`apsis_core::Error`] for messages and the view.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliError {
     /// `apsis-helper` isn't installed (or the system bus can't be reached): nothing works
     /// without it.
@@ -357,6 +357,10 @@ impl From<apsis_core::Error> for CliError {
             apsis_core::Error::Busy => Self::Busy,
             apsis_core::Error::DeviceRemoved { reason, .. } => Self::DiskRemoved { reason },
             apsis_core::Error::Stopped => Self::Stopped,
+            // The helper's own words (or what the bus said), without the crate's
+            // `apsis-helper: ` prefix: the status line, the tooltip and the dialogs show
+            // them as they are. The journal keeps its prefix (that's the helper's `log`).
+            apsis_core::Error::Helper(message) => Self::Other(message),
             apsis_core::Error::DeleteManyStopped {
                 deleted,
                 failed,
@@ -484,7 +488,7 @@ pub enum Message {
     Back,
     StopClicked,
     /// The helper answered a stop: `None` when it's stopping, else why not (the create goes on).
-    StopAnswered(Option<String>),
+    StopAnswered(Option<CliError>),
     /// Esc in the popup or the menu.
     Escape,
     /// Dialog input and buttons.
@@ -850,7 +854,8 @@ impl AppModel {
             Message::SettingsClicked => return self.open_settings(),
             Message::AboutClicked => self.page = Page::About,
             Message::Back => return self.leave_page(),
-            Message::StopAnswered(Some(reason)) => {
+            Message::StopAnswered(Some(error)) => {
+                let reason = self.error_text(&error);
                 self.status = Some(Status::Error(fl!("stop-failed", reason = reason), None));
             }
             Message::StopAnswered(None) => {}
@@ -1425,7 +1430,7 @@ impl AppModel {
                 self.status = Some(Status::Info(fl!("stopping")));
                 let link = self.helper.clone();
                 cosmic::task::future(async move {
-                    Message::StopAnswered(stop(link, &snapshot).await.err().map(|e| e.to_string()))
+                    Message::StopAnswered(stop(link, &snapshot).await.err())
                 })
             }
             Some(Dialog::AddPattern { text, .. }) => {
@@ -1931,11 +1936,12 @@ fn job_events(source: &JobSource) -> impl Stream<Item = Message> + Send + use<> 
 }
 
 /// Asks the helper to stop the create making `snapshot`.
-async fn stop(link: Link, snapshot: &str) -> apsis_core::Result<()> {
-    match helper(link).await {
-        Ok(helper) => helper.stop(snapshot).await,
-        Err(_) => Err(apsis_core::Error::Helper(fl!("need-helper"))),
-    }
+async fn stop(link: Link, snapshot: &str) -> Result<(), CliError> {
+    helper(link)
+        .await?
+        .stop(snapshot)
+        .await
+        .map_err(CliError::from)
 }
 
 /// Creates or deletes through `apsis-helper`; returns when its `Finished` signal arrives,

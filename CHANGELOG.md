@@ -11,6 +11,12 @@ each other's way.
 
 ### Fixed
 
+- A window no longer reports its own failed operation as another window's: the helper's end
+  announcement could reach the window after its own result and was shown as "A delete
+  started elsewhere failed" over the real line. The helper now puts the end on the bus
+  before the result, and the window knows its own job's end in either order.
+- The helper's reasons are shown as it said them: the status line, the tooltip and the
+  dialogs no longer carry an `apsis-helper:` prefix (the journal keeps it).
 - Deleting several snapshots at once: the second one was refused as busy on a machine with
   two monitors (each display runs its own panel applet, and every applet listed the moment
   the first delete ended, holding the helper's lock). Now the window sends the whole

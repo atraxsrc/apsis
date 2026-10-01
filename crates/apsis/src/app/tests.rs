@@ -660,6 +660,72 @@ fn a_waited_for_end_is_dropped_when_something_else_comes() {
     assert!(app.loading && app.own_end.is_none());
 }
 
+/// What the helper said reaches the status line, the tooltip and the dialogs as it was
+/// said: `Error::Helper`'s own `apsis-helper: ` prefix (the journal's) is dropped on the way
+/// into [`CliError`], the one place every shown reason goes through.
+#[test]
+fn a_helper_reason_is_shown_without_the_crates_prefix() {
+    let said = "no snapshot called \"2026-10-01_20-21-45\" on the backup device";
+    let error = apsis_core::Error::Helper(said.to_owned());
+    assert!(
+        error.to_string().starts_with("apsis-helper: "),
+        "the journal's form"
+    );
+    assert_eq!(CliError::from(error), CliError::Other(said.to_owned()));
+    assert_eq!(error_summary(&CliError::Other(said.to_owned()), None), said);
+    // Inside a stopped delete of several: the reason is the helper's words too.
+    let stopped = CliError::from(apsis_core::Error::DeleteManyStopped {
+        deleted: vec![NEWEST.to_owned()],
+        failed: SECOND.to_owned(),
+        left: Vec::new(),
+        reason: Box::new(apsis_core::Error::Helper(said.to_owned())),
+    });
+    let line = error_summary(&stopped, None);
+    assert!(
+        line.contains(said) && !line.contains("apsis-helper"),
+        "{line}"
+    );
+    let mut app = window();
+    app.running = Some(Operation::DeleteMany(vec![
+        NEWEST.to_owned(),
+        SECOND.to_owned(),
+    ]));
+    send(
+        &mut app,
+        Message::Finished(
+            Operation::DeleteMany(vec![NEWEST.to_owned(), SECOND.to_owned()]),
+            Err(stopped),
+        ),
+    );
+    let Some(Status::Error(line, Some(details))) = &app.status else {
+        panic!("{:?}", app.status)
+    };
+    assert!(
+        !line.contains("apsis-helper") && line.contains(said),
+        "{line}"
+    );
+    assert!(!details.contains("apsis-helper"), "{details}");
+    // A stop that the helper refused, the same way.
+    send(
+        &mut app,
+        Message::StopAnswered(Some(CliError::Other(said.to_owned()))),
+    );
+    let Some(Status::Error(line, None)) = &app.status else {
+        panic!("{:?}", app.status)
+    };
+    assert!(
+        !line.contains("apsis-helper") && line.contains(said),
+        "{line}"
+    );
+    // Other kinds keep their own text.
+    assert_eq!(
+        CliError::from(apsis_core::Error::Native(
+            "rsync exited with code 11".to_owned()
+        )),
+        CliError::Other("rsync exited with code 11".to_owned())
+    );
+}
+
 #[test]
 fn create_asks_for_an_optional_comment_and_checks_it_first() {
     let mut app = window();
@@ -727,7 +793,7 @@ fn stop_needs_a_named_running_create_and_a_confirm() {
     // The helper refused (too late): the create goes on, the line says why.
     send(
         &mut app,
-        Message::StopAnswered(Some("being put in place".to_owned())),
+        Message::StopAnswered(Some(CliError::Other("being put in place".to_owned()))),
     );
     assert!(matches!(&app.status, Some(Status::Error(line, None)) if line.contains("being put")));
     assert!(app.running.is_some());
