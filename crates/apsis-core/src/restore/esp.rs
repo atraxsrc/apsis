@@ -582,10 +582,15 @@ pub fn check(esp: &Path, root: &Path, root_uuid: &str) -> Result<Checked, CheckF
 ///
 /// # Errors
 ///
-/// [`Refusal::BootFiles`] for a current pair that fails the check. The previous pair never
-/// refuses.
+/// [`Refusal::BootFiles`] for a current pair that fails the check, and for only part of the
+/// previous pair and the oldkern entry: [`back_up`] would fail on that in the apply, after
+/// the copy. A whole previous pair that isn't the `.old` links' never refuses.
 pub fn check_before_arming(esp: &Path, root: &Path, root_uuid: &str) -> Result<Checked, Refusal> {
-    check(esp, root, root_uuid).map_err(Refusal::BootFiles)
+    let checked = check(esp, root, root_uuid).map_err(Refusal::BootFiles)?;
+    if checked.previous == Previous::Wrong(CheckFailure::PreviousIncomplete) {
+        return Err(Refusal::BootFiles(CheckFailure::PreviousIncomplete));
+    }
+    Ok(checked)
 }
 
 /// One kernel pair of the ESP against `root`'s `/boot/vmlinuz<link_suffix>` and
@@ -1417,7 +1422,7 @@ mod tests {
     /// PLAN 6b.7: before arming, the same check runs against the live system. A current pair
     /// that isn't `/boot`'s refuses; a previous pair that isn't doesn't.
     #[test]
-    fn before_arming_only_the_current_pair_refuses() {
+    fn before_arming_a_previous_pair_that_differs_doesnt_refuse() {
         let lab = lab("esp-check-live");
         fs::write(lab.esp_file(BootFile::PreviousKernel), kernel(OLDER)).unwrap();
         assert_eq!(
@@ -1431,6 +1436,41 @@ mod tests {
         assert_eq!(
             check_before_arming(&lab.esp, &lab.root, UUID),
             Err(Refusal::BootFiles(CheckFailure::InitrdDiffers))
+        );
+    }
+
+    /// Only part of the optional three would fail the backup in the apply, after the copy.
+    /// So it refuses before arming.
+    #[test]
+    fn part_of_the_previous_kernel_is_refused_before_arming() {
+        for (index, gone) in PREVIOUS.into_iter().enumerate() {
+            let lab = lab(&format!("esp-arm-part-previous-{index}"));
+            fs::remove_file(lab.esp_file(gone)).unwrap();
+            assert_eq!(
+                check_before_arming(&lab.esp, &lab.root, UUID),
+                Err(Refusal::BootFiles(CheckFailure::PreviousIncomplete)),
+                "{gone:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_whole_previous_kernel_or_none_passes_before_arming() {
+        let lab = lab("esp-arm-previous");
+        assert_eq!(
+            check_before_arming(&lab.esp, &lab.root, UUID),
+            Ok(Checked {
+                version: NEW.to_owned(),
+                previous: good(OLD)
+            })
+        );
+        lab.one_kernel();
+        assert_eq!(
+            check_before_arming(&lab.esp, &lab.root, UUID),
+            Ok(Checked {
+                version: NEW.to_owned(),
+                previous: Previous::Absent
+            })
         );
     }
 

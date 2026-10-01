@@ -712,9 +712,12 @@ written by this restore), both fsynced before the step that depends on them.
      apply, against the restored tree** (`/` after pass 1 and the boot refresh of step 5).
    - **The previous pair**: if `vmlinuz-previous.efi` and `initrd.img-previous` are on the
      ESP, they must equal the files `/boot/vmlinuz.old` and `/boot/initrd.img.old` point to,
-     and that version's modules folder must exist. A mismatch there (or only part of the
-     optional three) is **reported, never a failure**: not a refusal before arming, and no
-     put-back here. The current pair still boots. It goes to the journal and the result.
+     and that version's modules folder must exist. A mismatch there is **reported, never a
+     failure**: not a refusal before arming, and no put-back here. The current pair still
+     boots. It goes to the journal and the result.
+     **Only part of the optional three** (step 4) is different before arming: it **refuses**
+     (6b.7; owner, 2026-10-01), because the apply's backup would fail on it after the copy.
+     Here, after the boot refresh, it's only reported.
    - **Passes:** go on.
    - **Fails** (or a command failed): **boot files failed**. Put the backed-up files back
      on the ESP (each written to a temporary name in the same folder, fsynced, renamed), then
@@ -774,7 +777,8 @@ line on what to do, and Close (wording in 6b.8's string table). The lines below 
 | `/system-update` already exists (a pending system update) | "A system update is waiting for a restart. Restart first, then restore." |
 | not enough space (6b.4) | the space line |
 | the ESP is short for the boot refresh and a put-back (`esp::esp_needs`; added 2026-10-01, core). Not in `request.json`: re-checked at "Restart now" from a live `statvfs` (6b.4) | wording in the UI slice |
-| on the live system, the ESP's `vmlinuz.efi` and `initrd.img` aren't the files `/boot/vmlinuz` and `/boot/initrd.img` point to, or that kernel has no modules, or there's no current entry (`esp::check_before_arming`, 6b.6 step 6; added 2026-10-01, core). The previous pair never refuses | wording in the UI slice |
+| on the live system, the ESP's `vmlinuz.efi` and `initrd.img` aren't the files `/boot/vmlinuz` and `/boot/initrd.img` point to, or that kernel has no modules, or there's no current entry (`esp::check_before_arming`, 6b.6 step 6; added 2026-10-01, core). A whole previous pair that isn't the `.old` links' never refuses | wording in the UI slice |
+| on the live system, the ESP has some but not all of `vmlinuz-previous.efi`, `initrd.img-previous` and `Pop_OS-oldkern.conf` (`esp::check_before_arming`, `Refusal::BootFiles(PreviousIncomplete)`; owner, 2026-10-01). All three or none pass. Checked at arming and again at "Restart now"; the apply's backup keeps failing on it as the backstop (6b.6 step 4) | wording in the UI slice |
 | Timeshift's lock is held; another Apsis job runs | the existing Busy wording |
 
 The checks are pure functions on text that has already been read (mountinfo, lsblk JSON,

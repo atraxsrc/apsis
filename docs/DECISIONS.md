@@ -2299,3 +2299,23 @@ changes `restore::esp`.
   seen failing as compile errors on the missing API. The put-back test for the untouched
   files was then broken on purpose (a put-back that rewrites `loader/random-seed` with the
   same bytes) and failed on the assertion; undone.
+
+## 2026-10-01 - 6b: a partial previous set refuses before arming (owner; follow-up)
+
+- **`check_before_arming` refuses a partial optional set**: some but not all of
+  `vmlinuz-previous.efi`, `initrd.img-previous` and `Pop_OS-oldkern.conf` on the live ESP.
+  All three or none pass. So it's caught at arming and again at "Restart now" (the helper
+  runs the same function at both), before anything is copied, instead of ending `boot-kept`
+  in the apply.
+- **The apply keeps its backstop**: `back_up` still fails with `EspError::PreviousIncomplete`
+  (an ESP that changed between "Restart now" and the apply).
+- **No new variant**: `Refusal::BootFiles(CheckFailure::PreviousIncomplete)`. `BootFiles`
+  already carries which thing is wrong, and the UI slice words each `CheckFailure` anyway.
+- **Unchanged**: `check` itself still only reports it (`Previous::Wrong(PreviousIncomplete)`),
+  so after the boot refresh in the apply it's no failure and no put-back. A whole previous
+  pair that isn't the `.old` links' still doesn't refuse.
+- PLAN: a new 6b.7 row, and 6b.6 step 6's "previous pair" point.
+- **Verified** with apsis-core's tests (258 unit) and clippy `-D warnings` through the
+  scratch workspace; the workspace run is the owner's. The partial-set test was seen failing
+  first (`Ok(.. Wrong(PreviousIncomplete))` where the refusal was expected); the full and
+  empty set test passed from the start, as it holds what was already so.
