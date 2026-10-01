@@ -867,6 +867,15 @@ pub(in crate::restore) mod tests {
         "loader/entries.srel",
     ];
 
+    /// What kernel-install leaves on a Pop!_OS ESP (apsis-test, check 0.1): a folder per
+    /// kernel under the machine id (a placeholder here) and `EFI/Linux`, all empty. Never
+    /// read, backed up or written, and never an error.
+    const KERNEL_INSTALL: [&str; 3] = [
+        "0123456789abcdef0123456789abcdef/6.9.3-76060903-generic",
+        "0123456789abcdef0123456789abcdef/6.8.0-76060800-generic",
+        "EFI/Linux",
+    ];
+
     /// A machine as apsis-test: the ESP boots copies of the kernel and initrd, and `/boot`
     /// links to the files they were copied from.
     pub(in crate::restore) struct Lab {
@@ -992,6 +1001,9 @@ pub(in crate::restore) mod tests {
             let path = lab.esp.join(path);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, format!("not ours: {}\n", path.display())).unwrap();
+        }
+        for path in KERNEL_INSTALL {
+            fs::create_dir_all(lab.esp.join(path)).unwrap();
         }
         lab
     }
@@ -1804,6 +1816,56 @@ pub(in crate::restore) mod tests {
         for (path, was) in folders.iter().zip(folders_before) {
             assert_eq!(stat(path), was, "{path}");
         }
+    }
+
+    /// Check 0.1 on apsis-test: the ESP also holds kernel-install's `<machine-id>/<version>/`
+    /// folders and `EFI/Linux/`, all empty. They aren't in the list: the check, the backup,
+    /// the put-back and the clearing all pass with them there, nothing of them is backed up,
+    /// and they're the same empty folders afterwards.
+    #[test]
+    fn kernel_installs_empty_folders_are_ignored_and_left_alone() {
+        use std::os::unix::fs::MetadataExt;
+
+        let lab = lab("esp-kernel-install");
+        let folders = || -> Vec<_> {
+            KERNEL_INSTALL
+                .iter()
+                .map(|path| {
+                    let path = lab.esp.join(path);
+                    let meta = fs::symlink_metadata(&path).unwrap();
+                    assert!(meta.is_dir(), "{path:?}");
+                    let empty = fs::read_dir(&path).unwrap().next().is_none();
+                    (path, meta.ino(), meta.mtime(), meta.mtime_nsec(), empty)
+                })
+                .collect()
+        };
+        let before = folders();
+        assert!(before.iter().all(|folder| folder.4), "{before:?}");
+
+        assert_eq!(
+            check_before_arming(&lab.esp, &lab.root, UUID),
+            Ok(Checked {
+                version: NEW.to_owned(),
+                previous: good(OLD),
+            })
+        );
+        back_up(&lab.esp, &lab.state, UUID).unwrap();
+        verify(&lab.state).unwrap();
+        // The seven and the manifest: no folder of the ESP came along.
+        assert_eq!(
+            fs::read_dir(lab.state.join(BACKUP_DIR)).unwrap().count(),
+            BootFile::COUNT + 1
+        );
+        assert_eq!(folders(), before);
+
+        // The boot refresh, checked, and then put back.
+        lab.link_kernel(OLD);
+        lab.kernelstub(OLD);
+        assert_eq!(check(&lab.esp, &lab.root, UUID), checked(OLD, good(OLD)));
+        put_back(&lab.esp, &lab.state, UUID).unwrap();
+        clear_temporaries(&lab.esp, UUID).unwrap();
+        assert_eq!(folders(), before);
+        assert!(boots_kernel(&lab.esp, &lab.root, UUID, NEW));
     }
 
     #[test]

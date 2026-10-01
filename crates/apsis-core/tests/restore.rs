@@ -712,6 +712,79 @@ fn the_fixed_exclusions_hold_without_any_mount() {
     assert!(!exists(&lab.live, "srv/data/on-another-disk"));
 }
 
+/// A machine id as kernel-install names its ESP folder. A placeholder.
+const MACHINE_ID: &str = "0123456789abcdef0123456789abcdef";
+
+/// Check 0.1 on apsis-test: the snapshot's `boot/efi` is a full copy of the ESP as it was
+/// (the kernels, kernel-install's empty `<machine-id>/<version>/` and `EFI/Linux/`), and the
+/// live ESP has moved on since. Nothing of the snapshot's copy is transferred, and nothing
+/// the snapshot lacks is deleted, on the ESP or in `/recovery`: with the two mounted, and
+/// with neither (the fixed rules alone).
+#[test]
+fn the_snapshots_esp_copy_is_neither_transferred_nor_deleted_against() {
+    let no_mounts = "24 1 259:3 / / rw,relatime shared:1 - ext4 /dev/sdX3 rw\n";
+    for (name, mountinfo) in [("esp-mounted", MOUNTINFO), ("esp-not-mounted", no_mounts)] {
+        let Some(lab) = lab(name) else { return };
+        let (s, l) = (&lab.snapshot, &lab.live);
+        let folder = format!("boot/efi/EFI/Pop_OS-{ROOT_UUID}");
+        // The snapshot's copy: the kernels of then, and what the live ESP doesn't have.
+        write(s, &format!("{folder}/vmlinuz.efi"), "the kernel of then\n");
+        write(s, &format!("{folder}/initrd.img"), "the initrd of then\n");
+        write(s, "boot/efi/loader/entries/Pop_OS-current.conf", "then\n");
+        write(s, "boot/efi/loader/entries/Gone-since.conf", "then\n");
+        fs::create_dir_all(s.join(format!("boot/efi/{MACHINE_ID}/{OLD}"))).unwrap();
+        fs::create_dir_all(s.join("boot/efi/EFI/Linux")).unwrap();
+        write(s, "recovery/casper/vmlinuz.efi", "the recovery of then\n");
+        age(s);
+        // The live ESP: other kernels, and files and folders the snapshot never had.
+        write(l, &format!("{folder}/vmlinuz.efi"), "the live kernel\n");
+        write(l, &format!("{folder}/initrd.img"), "the live initrd\n");
+        write(l, &format!("{folder}/vmlinuz-previous.efi"), "previous\n");
+        write(l, "boot/efi/loader/entries/Pop_OS-current.conf", "live\n");
+        write(l, "boot/efi/loader/entries/Recovery-ABCD-1234.conf", "x\n");
+        fs::create_dir_all(l.join(format!("boot/efi/{MACHINE_ID}/{NEW}"))).unwrap();
+        write(l, "recovery/casper/initrd.gz", "only on the live one\n");
+
+        let paths = ["boot/efi", "recovery"];
+        let before = nodes_of(l, &paths);
+        lab.restore_ok(Run {
+            mountinfo,
+            ..Run::default()
+        });
+
+        assert_eq!(nodes_of(l, &paths), before, "{name}");
+        // Said once more by name: not transferred,
+        for path in [
+            "boot/efi/loader/entries/Gone-since.conf".to_owned(),
+            format!("boot/efi/{MACHINE_ID}/{OLD}"),
+            "boot/efi/EFI/Linux".to_owned(),
+            "recovery/from-snapshot".to_owned(),
+        ] {
+            assert!(!exists(l, &path), "{name}: {path}");
+        }
+        assert_eq!(
+            read(l, &format!("{folder}/vmlinuz.efi")),
+            "the live kernel\n"
+        );
+        assert_eq!(
+            read(l, "recovery/casper/vmlinuz.efi"),
+            "recovery\n",
+            "{name}"
+        );
+        // and not deleted.
+        for path in [
+            format!("{folder}/vmlinuz-previous.efi"),
+            "boot/efi/loader/entries/Recovery-ABCD-1234.conf".to_owned(),
+            format!("boot/efi/{MACHINE_ID}/{NEW}"),
+            "recovery/casper/initrd.gz".to_owned(),
+        ] {
+            assert!(exists(l, &path), "{name}: {path}");
+        }
+        // The rest of the restore ran.
+        assert_eq!(read(l, "etc/hostname"), "snapshot\n", "{name}");
+    }
+}
+
 /// The snapshot's own `exclude.list` (rule 11): what it didn't save isn't deleted.
 #[test]
 fn what_the_snapshot_didnt_save_stays() {

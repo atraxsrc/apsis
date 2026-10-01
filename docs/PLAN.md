@@ -438,8 +438,8 @@ same day: the seven-file set, the previous pair, the check before arming), the a
 machine over a runner trait, tested with a fake runner (`apsis_core::restore::apply`). Format
 detection is 0.4.1's `Info::is_old_format`, unchanged.
 The last part of the core slice, the real-rsync temp-tree tests, is done (2026-10-01,
-`crates/apsis-core/tests/restore.rs`): **the core slice is complete.** Next is step 2 of
-6b.13 (the owner's checks 0.1 to 0.3).
+`crates/apsis-core/tests/restore.rs`): **the core slice is complete.** Step 2 of 6b.13 (the
+owner's checks 0.1 to 0.3) passed on apsis-test, 2026-10-01. Next is step 3, the helper.
 
 Goal: pick a snapshot, click Restore, and after a restart the system is back to that state.
 One person at the keyboard. The copy is rsync over `/` with excludes, like Timeshift's. When
@@ -1450,6 +1450,14 @@ Checks:
    there, before 0.5.0).
 2. The owner runs checks 0.1 to 0.3 and sets up the baseline. Revise here if 0.1 or 0.3
    surprise.
+   **Status: 0.1, 0.2 and 0.3 pass (apsis-test, 2026-10-01; Apsis 0.4.1, kernel 7.1.5).**
+   6b.1's condition holds: the apply stays at the next boot. 0.1's findings (the ESP also
+   holds kernel-install's empty `<machine-id>/<version>/` and `EFI/Linux/`; snapshots hold
+   an ESP copy; ESP file times are off by the time zone and are never used) are in the
+   core's tests, with no production code changed. For step 3: the unit's
+   `StandardOutput=journal`, and `udevadm wait` with a timeout for the backup device. Open
+   for the owner: what the boot refresh runs (6b.6 step 5). All in DECISIONS.md,
+   2026-10-01, "checks 0.1 to 0.3". The baseline isn't recorded here yet.
 3. **Helper**: methods, polkit action, the unit, `--apply-restore`, plymouth, logind reboot,
    journal. Also decide how the list carries a snapshot's format for the row tooltip (moved
    here from 0.4.1; step 4 builds the tooltip). Carried over from the core slice:

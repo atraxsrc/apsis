@@ -2759,3 +2759,129 @@ The pinned tests, updated:
   new tests failed first as compile errors on the missing API. Three deliberate breakages
   then failed on assertions in both suites and were undone: the 23 rule switched off, the
   check's result ignored, the creation time not compared.
+
+## 2026-10-01 - 6b: checks 0.1 to 0.3 on apsis-test (owner), and what they changed in the core
+
+The owner ran PLAN 6b.12's checks 0.1 to 0.3 on apsis-test (Apsis 0.4.1, Pop!_OS 24.04,
+kernel 7.1.5, hardware clock in UTC, time zone AEST). All three pass. 6b.1's condition holds:
+the apply runs at the next boot (B), and nothing goes back for review.
+
+**0.1, facts: pass, with findings.**
+
+- **The ESP**: 1020M, 359M free. `esp::SET` is complete there: the current four, the previous
+  pair and the oldkern entry. The sizes match the files `/boot`'s links point to (7.1.5
+  current; 7.0.11 previous, through the `.old` links), and both kernels' modules are there.
+  This settles "apsis-test to confirm" (PLAN 6b.0, and the ESP file set entry above).
+- **The ESP holds more than `esp::SET`**: `<machine-id>/<version>/` folders, empty, and an
+  empty `EFI/Linux/`. They're kernel-install's.
+- **Who writes the ESP.** `/usr/lib/kernel/install.d` has `50-depmod`, `55-initrd`,
+  `90-kernelstub` and `90-uki-copy`, and no `90-loaderentry`: so kernel-install puts no files
+  into `<machine-id>/`, only makes the folders. `/etc/initramfs/post-update.d` has
+  `systemd-boot` (`kernel-install add`, only if `bootctl is-installed`) and `zz-kernelstub`
+  (`kernelstub --verbose --preserve-live-mode`). **So one `update-initramfs` run reaches
+  kernelstub twice**: through kernel-install's `90-kernelstub`, and through `zz-kernelstub`.
+- **Snapshots**: `localhost/boot/efi` is **not** empty. Create copies the ESP, the machine-id
+  folder included, as PLAN 6b.0 read from the code. `localhost/recovery` is empty.
+- **Never use ESP modification times.** FAT stores local time with no zone, and the times
+  read on the ESP were off by the zone's offset (+10 h seen). Nothing in Apsis may compare,
+  order or trust an ESP file's time: not the check, not the backup, not a "did the refresh
+  write it" test. The core already doesn't (`esp` compares bytes, sizes and SHA-256 only);
+  the helper slice keeps it so. The only place a test reads an ESP mtime is the put-back's
+  bystander test, on a temp folder, as "the same file, not a rewritten one".
+- `systemd-system-update-generator` is installed, and plymouth has `system-update`.
+
+**0.2, the recovery partition boots: pass.** systemd-boot's menu (Space) lists current,
+oldkern and recovery. Recovery boots to a desktop, and the real root (`nvme0n1p3`) mounts
+there by hand. PLAN 6b.11's way back exists.
+
+**0.3, the offline-mode spike: pass.** A unit armed by hand (`DefaultDependencies=no`,
+`After=sysinit.target system-update-pre.target`, `FailureAction=reboot`,
+`WantedBy=system-update.target`) ran 5.6 s into the boot. It checked that `/system-update`
+pointed to its own folder, removed it, and logged what it found:
+
+- `/` ext4, read-write (`errors=remount-ro`); `/boot/efi` vfat, read-write;
+- the display manager inactive, `network-online` inactive;
+- the backup USB disk there at once (`udevadm wait`), and a read-only mount of it worked;
+- `systemctl reboot --no-block` from inside the unit worked; the next boot was normal, with
+  no failed units.
+- `StandardOutput=journal+console` printed the unit's text over the boot splash.
+
+**For the helper slice** (decided here, built there; PLAN 6b.6's unit text and step 2 still
+show the earlier wording until then):
+
+- **The unit gets `StandardOutput=journal`**, not `journal+console`. What the person sees
+  during the apply goes through plymouth only.
+- **Keep `udevadm wait` for the backup device, with a timeout.** The disk was there at once
+  on apsis-test, but a slower USB disk isn't promised to be. A wait that times out is
+  "never started" (PLAN 6b.10), before rsync runs.
+
+**What changed in the core** (tests only; no production code changed):
+
+- **The filter was already right**: `/boot/efi` and `/recovery` are excluded from the
+  transfer by their own rules (2 and 3) and again as mount points (rule 5), and the argv
+  never has `--delete-excluded`, so they're protected from `--delete` too. Two tests held
+  that already (`excluded_paths_are_neither_copied_nor_deleted`,
+  `the_fixed_exclusions_hold_without_any_mount`).
+- **New test, shaped like 0.1**:
+  `the_snapshots_esp_copy_is_neither_transferred_nor_deleted_against` (`tests/restore.rs`,
+  real rsync). The snapshot has an ESP copy with other kernels, an entry that's gone since,
+  a `<machine-id>/<version>/` folder and `EFI/Linux/`, and its own recovery file. The live
+  ESP has other bytes, a previous kernel, a recovery entry and its own machine-id folder.
+  After the restore both trees are the same nodes (inode, time, bytes), with the ESP and
+  `/recovery` mounted and with neither mounted. It passed at once, as the behaviour was
+  there, so it was broken on purpose three times, each failing on an assertion and undone:
+  the ESP rule taken out (fails unmounted), the recovery rule taken out (fails unmounted),
+  `--delete-excluded` added to the argv (fails mounted: the live ESP is emptied).
+- **The ESP fixture now has what 0.1 found**: `esp::tests::lab` makes two
+  `<machine-id>/<version>/` folders (a placeholder id) and `EFI/Linux/`, all empty, so every
+  ESP test and every apply test runs with them.
+  `kernel_installs_empty_folders_are_ignored_and_left_alone` holds that the check before
+  arming, the backup, the check after a refresh, the put-back and the clearing all pass
+  with them there, that the backup folder holds the seven and the manifest only, and that
+  the folders are the same empty folders afterwards. It failed first on the fixture (no
+  such folder). With the fixture it passed, as `esp` only ever opens the seven paths of
+  `SET`; two breakages then failed on assertions and were undone: a backup that refuses a
+  top folder it doesn't know (30 tests fail), and a put-back that removes an empty
+  `EFI/Linux` (this test and the bystander test fail).
+- **Verified** with apsis-core's tests (337 unit, 28 in `tests/restore.rs`, 3 ignored),
+  `cargo fmt --check` and clippy `-D warnings` through the scratch workspace; the workspace
+  run is the owner's.
+
+**Open, for the owner: what the boot refresh runs.** PLAN 6b.6 step 5 says
+`update-initramfs -u -k all`, then `kernelstub --verbose`; `Runner::refresh_boot`'s comment
+says the same. Not changed here. Proposed: plain `kernelstub --verbose
+--preserve-live-mode`, and no `update-initramfs`.
+
+- For it:
+  - With 0.1's hooks, `update-initramfs -u -k all` runs kernelstub twice per kernel it
+    rebuilds, before Apsis's own call: five writes of the ESP for two kernels where one is
+    wanted, each a chance to be cut by the power with the ESP half written.
+  - It also runs `kernel-install add`, whose plugins Apsis doesn't know (`90-uki-copy`), on
+    an ESP with 359M free.
+  - `-k all` includes the protected kernel (rule 10 kept its modules), and rewrites
+    `/boot/initrd.img-<running>`, a file rule 10 is there to keep as it was.
+  - The restored `/boot/initrd.img-*` are the snapshot's, byte for byte, built on that
+    system from the modules and configuration that are now back. Rebuilding them makes
+    `/boot` differ from the snapshot and takes minutes of the boot screen.
+  - `esp_needs`' growth term becomes exact (the snapshot's initrd is the one copied), and
+    the hook's flags are the ones Pop itself uses, so it's the call the restored system
+    was tested with.
+  - PLAN 6b.6 step 4's reason for the backup's place ("before `update-initramfs`, because
+    Pop's hook runs kernelstub itself") goes away: one command writes the ESP.
+- Against it, to settle first:
+  - **The initrd is no longer rebuilt against the live `crypttab` and `fstab`** (rule 4
+    keeps the live ones; PLAN step 5's comment gives that as the rebuild's purpose). A
+    snapshot's initrd carries the snapshot's `crypttab` entries for the devices unlocked
+    in the initramfs. On apsis-test that's none (the root isn't encrypted, cryptswap has a
+    random key), but an encrypted root whose `crypttab` changed since the snapshot would
+    get a stale one. A way to keep both: compare the snapshot's `etc/crypttab` and
+    `etc/fstab` with the live ones when preparing, and rebuild only when they differ (or
+    refuse).
+  - **The flag must exist in the snapshot's kernelstub**: the tools are the restored
+    system's own. Not checked from here what `--preserve-live-mode` does or since which
+    version; `kernelstub --help` on apsis-test says. A snapshot whose own
+    `etc/initramfs/post-update.d/zz-kernelstub` has the flag has a kernelstub that takes
+    it.
+  - The refusal "the snapshot has no `update-initramfs`" (PLAN 6b.7) would go, and PLAN
+    6b.11's recovery steps keep their `update-initramfs` (a chroot from recovery is
+    another case).
