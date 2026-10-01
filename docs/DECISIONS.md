@@ -3783,3 +3783,26 @@ is apsis-test check 1.
   UUID. `mount` now calls it.
 
 Gate: workspace tests, clippy `-D warnings` on all targets, fmt check: all clean.
+
+## 2026-10-02 - 6b helper slice: `RestoreResult` (step 3 item 9)
+
+Built tests first (core's `state::tests::the_restore_result_survives_the_bus` over every
+outcome, with and without a snapshot and a time; the introspection with the thirteenth method).
+
+- **`restore::state::RestoreResult`** (core): `state: ResultState` (`None`, `Ready`,
+  `Ended(Outcome)`), `snapshot`, `message`, `when`; `none()`, `ready(snapshot)`,
+  `of(&Report)` (the safety snapshot and the home choice stay in the file), `to_wire` /
+  `from_wire` for `(sssx)` with `""` and `0` for a `null` snapshot or time (6b.10). An unknown
+  state word is a bad reply. `WireRestoreResult` is re-exported from `helper`.
+- **`RestoreResult()`** on `Helper3`: polkit `list`, not interactive; `ready` with the
+  snapshot while `State::ready()` holds a plan, else `Report::load` of `result.json` (a
+  missing file is nothing; an unreadable one is logged and answered as nothing, since the
+  apply's own minimal report is what guards against that), else nothing. A read of one file:
+  never a job, never refused, no mount.
+- **When `result.json` is replaced**: only by the next apply (core writes it) and by `postrm
+  purge` (item 10). The preparation, a cancel and a disarm all keep it, so the window can
+  show the last restore's outcome after login whatever happened since. Settled here, as item
+  5 left it.
+- **Client**: `HelperClient::restore_result()`.
+
+Gate: workspace tests, clippy `-D warnings` on all targets, fmt check: all clean.

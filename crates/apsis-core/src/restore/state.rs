@@ -374,8 +374,140 @@ fn cut(message: &str) -> Cow<'_, str> {
     Cow::Owned(format!("{CUT_MARK}{}", &message[start..]))
 }
 
+/// `RestoreResult` on the bus, D-Bus type `(sssx)`: `(state, snapshot, message, when)`.
+/// `state` is `ready`, an [`Outcome`]'s word, or `""` for nothing; `""` and `0` stand for a
+/// `null` snapshot or time.
+pub type WireRestoreResult = (String, String, String, i64);
+
+/// Where the restore stands, as `RestoreResult` tells it (PLAN 6b.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultState {
+    /// No plan is ready and there's no result.
+    None,
+    /// A plan waits at the ready prompt.
+    Ready,
+    /// The last `result.json`.
+    Ended(Outcome),
+}
+
+/// What `RestoreResult` answers: the window asks when it opens (PLAN 6b.8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreResult {
+    pub state: ResultState,
+    pub snapshot: Option<String>,
+    pub message: String,
+    pub when: Option<i64>,
+}
+
+impl RestoreResult {
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            state: ResultState::None,
+            snapshot: None,
+            message: String::new(),
+            when: None,
+        }
+    }
+
+    #[must_use]
+    pub fn ready(snapshot: &str) -> Self {
+        Self {
+            state: ResultState::Ready,
+            snapshot: Some(snapshot.to_owned()),
+            message: String::new(),
+            when: None,
+        }
+    }
+
+    /// The last result as the wire carries it: its outcome, snapshot, message and time (the
+    /// safety snapshot and the home choice stay in the file).
+    #[must_use]
+    pub fn of(report: &Report) -> Self {
+        Self {
+            state: ResultState::Ended(report.outcome),
+            snapshot: report.snapshot.clone(),
+            message: report.message.clone(),
+            when: report.when,
+        }
+    }
+
+    #[must_use]
+    pub fn to_wire(&self) -> WireRestoreResult {
+        let state = match self.state {
+            ResultState::None => "",
+            ResultState::Ready => "ready",
+            ResultState::Ended(outcome) => outcome.word(),
+        };
+        (
+            state.to_owned(),
+            self.snapshot.clone().unwrap_or_default(),
+            self.message.clone(),
+            self.when.unwrap_or(0),
+        )
+    }
+
+    /// What the helper sent.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Helper`] for a state word this version doesn't know.
+    pub fn from_wire(wire: WireRestoreResult) -> crate::Result<Self> {
+        let (state, snapshot, message, when) = wire;
+        let state = match state.as_str() {
+            "" => ResultState::None,
+            "ready" => ResultState::Ready,
+            word => Outcome::from_word(word)
+                .map(ResultState::Ended)
+                .ok_or_else(|| crate::Error::Helper(format!("unknown restore state {word:?}")))?,
+        };
+        Ok(Self {
+            state,
+            snapshot: (!snapshot.is_empty()).then_some(snapshot),
+            message,
+            when: (when != 0).then_some(when),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// `RestoreResult`'s answer (PLAN 6b.9): a ready plan, the last `result.json`, or nothing;
+    /// `""` and `0` stand for a `null` snapshot or time on the wire.
+    #[test]
+    fn the_restore_result_survives_the_bus() {
+        let none = RestoreResult::none();
+        assert_eq!(
+            none.to_wire(),
+            (String::new(), String::new(), String::new(), 0)
+        );
+        assert_eq!(RestoreResult::from_wire(none.to_wire()).unwrap(), none);
+        let ready = RestoreResult::ready("2026-09-25_11-28-53");
+        assert_eq!(ready.to_wire().0, "ready");
+        assert_eq!(RestoreResult::from_wire(ready.to_wire()).unwrap(), ready);
+        for outcome in Outcome::ALL {
+            let report = Report {
+                outcome,
+                snapshot: (outcome != Outcome::Failed).then(|| "2026-09-25_11-28-53".to_owned()),
+                safety_snapshot: Some("2026-10-02_07-00-00".to_owned()),
+                home: Home::Restore,
+                message: "some words\nand more".to_owned(),
+                when: (outcome != Outcome::NotStarted).then_some(1_790_000_000),
+            };
+            let result = RestoreResult::of(&report);
+            assert_eq!(result.state, ResultState::Ended(outcome));
+            let wire = result.to_wire();
+            assert_eq!(wire.0, outcome.word());
+            assert_eq!(wire.1.is_empty(), report.snapshot.is_none());
+            assert_eq!(wire.3 == 0, report.when.is_none());
+            assert_eq!(RestoreResult::from_wire(wire).unwrap(), result);
+        }
+        // A state this version doesn't know.
+        assert!(
+            RestoreResult::from_wire(("moon".to_owned(), String::new(), String::new(), 0)).is_err()
+        );
+    }
     use super::super::file::tests::temp_dir;
     use super::*;
 

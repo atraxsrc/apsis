@@ -18,8 +18,8 @@ use apsis_core::helper::names::{
     BUS_NAME, OBJECT_PATH, OP_CREATE, OP_DELETE, OP_DELETE_MANY, OP_RESTORE,
 };
 use apsis_core::helper::{
-    WireCheckRestore, WireConfig, WireConfigInfo, WireListWithUsage3, check_delete_many,
-    config_from_wire, encode_error, to_wire_with_usage3,
+    WireCheckRestore, WireConfig, WireConfigInfo, WireListWithUsage3, WireRestoreResult,
+    check_delete_many, config_from_wire, encode_error, to_wire_with_usage3,
 };
 use apsis_core::job::{self, JobKind, JobState, WireJob};
 use apsis_core::native::{Cancel, TooLate};
@@ -27,6 +27,7 @@ use apsis_core::restore::dialog;
 use apsis_core::restore::filter::Home;
 use apsis_core::restore::plan::{self, Plan};
 use apsis_core::restore::refusal::{self, Refusal};
+use apsis_core::restore::state::{Report, RestoreResult};
 use apsis_core::restore::{esp, space};
 use apsis_core::status::BY_UUID;
 use apsis_core::usage::fstype_at;
@@ -376,6 +377,41 @@ impl Helper {
             Err(error) => log(&format!("{label}: {}", describe_error(error))),
         }
         Ok(result?)
+    }
+
+    /// How the restore stands (PLAN 6b.9; polkit: `list`, no password): `ready` while a plan
+    /// waits at the prompt, else the last `result.json`'s outcome, snapshot, message and time
+    /// (`""` and `0` for a `null` snapshot or time), else nothing. A read of a file, never a
+    /// job and never refused.
+    async fn restore_result(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+    ) -> Result<WireRestoreResult, HelperError> {
+        let _call = self.state.call();
+        let caller = caller(&header)?;
+        authorize(connection, &caller, ACTION_LIST, false).await?;
+        if let Some(info) = self.state.ready() {
+            return Ok(RestoreResult::ready(&info.snapshot).to_wire());
+        }
+        let result = blocking(|| {
+            Ok(
+                match Report::load(Path::new(apsis_core::restore::file::DIR)) {
+                    Ok(report) => RestoreResult::of(&report),
+                    Err(apsis_core::restore::file::FileError::Io(error))
+                        if error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        RestoreResult::none()
+                    }
+                    Err(error) => {
+                        log(&format!("result.json: {error}"));
+                        RestoreResult::none()
+                    }
+                },
+            )
+        })
+        .await?;
+        Ok(result.to_wire())
     }
 
     /// Starts a snapshot (polkit: `create`) and returns; `Finished("create", ..)` follows.
@@ -1135,8 +1171,8 @@ mod tests {
         ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
         ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CANCEL_RESTORE, METHOD_CHECK_RESTORE,
         METHOD_CREATE, METHOD_DELETE, METHOD_DELETE_MANY, METHOD_JOB, METHOD_LIST,
-        METHOD_READ_CONFIG, METHOD_RESTART_TO_RESTORE, METHOD_RESTORE, METHOD_STOP,
-        METHOD_WRITE_CONFIG, SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
+        METHOD_READ_CONFIG, METHOD_RESTART_TO_RESTORE, METHOD_RESTORE, METHOD_RESTORE_RESULT,
+        METHOD_STOP, METHOD_WRITE_CONFIG, SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
     };
     use zbus::object_server::Interface;
 
@@ -1160,6 +1196,7 @@ mod tests {
             METHOD_RESTORE,
             METHOD_RESTART_TO_RESTORE,
             METHOD_CANCEL_RESTORE,
+            METHOD_RESTORE_RESULT,
         ] {
             assert!(
                 xml.contains(&format!("<method name=\"{method}\">")),
@@ -1172,8 +1209,10 @@ mod tests {
                 "{signal}\n{xml}"
             );
         }
-        // Nothing else: exactly twelve methods and two signals.
-        assert_eq!(xml.matches("<method ").count(), 12, "{xml}");
+        // Nothing else: exactly thirteen methods and two signals.
+        assert_eq!(xml.matches("<method ").count(), 13, "{xml}");
+        // `RestoreResult() -> (sssx)`.
+        assert!(xml.contains("type=\"(sssx)\""), "{xml}");
         // `CancelRestore()` takes nothing: the ready plan is the one there is.
         assert!(
             xml.contains("<method name=\"CancelRestore\">\n  </method>"),

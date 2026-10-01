@@ -1948,6 +1948,9 @@ Checks:
       `native::mount_by_uuid`). Plymouth's progress bar is sent after the copy, not during
       (DECISIONS 2026-10-02 "--apply-restore"); the rest is as listed. Check 1 is its run.
    9. **`RestoreResult`**, read from `result.json` through core; `""` and `0` for `null`.
+      **Status (2026-10-02): done** (`restore::state::RestoreResult` and its wire in core,
+      `restore_result` in `service.rs`, `HelperClient::restore_result`; `ready` from the
+      helper's ready plan). DECISIONS 2026-10-02 "RestoreResult".
    10. **Packaging**: the polkit file's sixth action; the bus policy names `Helper3`; `postrm
        purge` removes the drop-in and its folder when empty, `/var/lib/apsis/` and a leftover
        unit; nothing new is installed. `just deb-install`'s re-login note stays.

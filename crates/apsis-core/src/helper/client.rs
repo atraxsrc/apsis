@@ -11,12 +11,13 @@ use super::names::{
     BUS_NAME, ERROR_BUSY, ERROR_CHANGED, ERROR_DEVICE_NOT_FOUND, ERROR_FAILED, ERROR_INVALID_INPUT,
     ERROR_NOT_AUTHORIZED, INTERFACE, METHOD_CANCEL_RESTORE, METHOD_CHECK_RESTORE, METHOD_CREATE,
     METHOD_DELETE, METHOD_DELETE_MANY, METHOD_JOB, METHOD_LIST, METHOD_READ_CONFIG,
-    METHOD_RESTART_TO_RESTORE, METHOD_RESTORE, METHOD_STOP, METHOD_WRITE_CONFIG, OBJECT_PATH,
-    OP_CREATE, OP_DELETE, OP_DELETE_MANY, OP_RESTORE, SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
+    METHOD_RESTART_TO_RESTORE, METHOD_RESTORE, METHOD_RESTORE_RESULT, METHOD_STOP,
+    METHOD_WRITE_CONFIG, OBJECT_PATH, OP_CREATE, OP_DELETE, OP_DELETE_MANY, OP_RESTORE,
+    SIGNAL_FINISHED, SIGNAL_JOB_CHANGED,
 };
 use super::{
-    WireCheckRestore, WireConfigInfo, WireListWithUsage3, check_delete_many, config_info_from_wire,
-    config_to_wire, decode_error, from_wire_with_usage3,
+    WireCheckRestore, WireConfigInfo, WireListWithUsage3, WireRestoreResult, check_delete_many,
+    config_info_from_wire, config_to_wire, decode_error, from_wire_with_usage3,
 };
 use crate::config::{Config, ConfigInfo};
 use crate::error::{Error, Result};
@@ -24,6 +25,7 @@ use crate::job::{self, Job, WireJob};
 use crate::model::SnapshotList;
 use crate::progress::Progress;
 use crate::restore::dialog::{self, Dialog};
+use crate::restore::state::RestoreResult;
 
 /// The applet's side of `apsis-helper`, on the system bus.
 ///
@@ -145,6 +147,22 @@ impl HelperClient {
             .call::<_, _, ()>(METHOD_CANCEL_RESTORE, &())
             .await
             .map_err(from_zbus)
+    }
+
+    /// Where the restore stands: a plan ready at the prompt, the last result, or nothing.
+    /// No password. The window asks when it opens.
+    ///
+    /// # Errors
+    ///
+    /// What the helper reported, or a bad reply.
+    pub async fn restore_result(&self) -> Result<RestoreResult> {
+        let wire: WireRestoreResult = self
+            .proxy()
+            .await?
+            .call(METHOD_RESTORE_RESULT, &())
+            .await
+            .map_err(from_zbus)?;
+        RestoreResult::from_wire(wire)
     }
 
     /// Creates a snapshot and waits until it's done (this can take minutes).
