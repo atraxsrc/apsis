@@ -4299,3 +4299,45 @@ when" list asked for:
 Not done from the list: launching one Flatpak app after the restore (the owner, before check
 3). Six fixes came out of the three runs, all committed today. Next: check 2, the kernel
 rollback, with its own runbook from check 1's.
+
+## 2026-10-02 - check 2's setup (owner): kernelstub picks the newest kernel, so the apply now names it
+
+**Getting a kernel the snapshot lacks**, on apsis-test (Pop!_OS 24.04, 7.1.5 running, 7.0.11
+installed):
+- Route A, a Pop kernel update: none offered, after `apt update`.
+- Route B, remove 7.1.5 and snapshot on 7.0.11: apt refuses twice. `linux-system76` holds the
+  image, `pop-server` holds `linux-system76`, `pop-desktop` holds `pop-server`. Not done to
+  the test machine. Nothing was removed; a snapshot taken meanwhile while booted on 7.0.11
+  (with 7.1.5 still installed and linked) was deleted as unusable.
+- **Route C, taken**: an Ubuntu mainline build as kernel B (`v7.2.6`, image and modules .debs
+  from kernel.ubuntu.com, into the test account's home), the baseline `2026-10-02_10-50-46`
+  as the snapshot. The image's maintainer scripts hand `run-parts` two directories
+  (`/etc/kernel/<step>.d /usr/share/kernel/<step>.d`), which 24.04's `run-parts` refuses
+  ("missing operand"), so the .deb was repacked with the second directory dropped from its
+  four scripts (`dpkg-deb -R`, `sed`, `dpkg-deb -b`) and installed. Two things the repack
+  left: the kernel file owned by the test account (`chown root:root`), and no
+  `linux-update-symlinks` run (done by hand, so the links name 7.2.6). Pop's packages and
+  metapackages were never touched; the restore removes all of B.
+
+**The finding**: with the links still at 7.1.5, kernelstub's hook put 7.2.6 on the ESP. Its
+source (`application.py:167`): `latest_option, previous_option =
+KernelOption.latest_option(boot_path)`, the newest `vmlinuz-*` in `/boot` by version; a given
+`--kernel-path`/`--initrd-path` wins (lines 171-193), the `/boot/vmlinuz` link is the last
+fallback (lines 179-181), and the given path isn't saved (the configuration holds only the
+options and ESP settings, as the journal's dump shows). PLAN 6b.6 had "newest by version"
+right; the 2026-10-02 runbook's "follows the links" reading was wrong, and PLAN's "they
+agree on Pop!_OS" holds for a live system, never at apply in a rollback: after pass 1,
+`/boot` has the snapshot's kernels and the protected running kernel (rule 10), the newest.
+Left alone, kernelstub would put the running kernel on the ESP, the check would fail against
+the linked snapshot kernel, and **every kernel rollback would end `boot-kept`**: safe, never
+the rollback. Found before any restore ran.
+
+**The fix**: `RealRunner::refresh_boot` names the kernel: `kernelstub --verbose
+--preserve-live-mode --kernel-path /boot/<target of /boot/vmlinuz> --initrd-path /boot/<target
+of /boot/initrd.img>`, the targets read from the restored tree's links (relative targets
+under `/boot`, absolute ones as they are). Without both links the plain call runs and the
+check decides. The "previous" pair stays kernelstub's choice (after the copy, the second
+newest is the snapshot's own newest, so kernelstub skips or duplicates it; reported, never a
+failure; the next kernel update rewrites it). Test
+`the_boot_refresh_names_the_kernel_the_links_point_to`; PLAN 6b.6 step 5 and the README's
+limitation line say it. Check 2 runs against this build.

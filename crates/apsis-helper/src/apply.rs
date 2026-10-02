@@ -173,10 +173,39 @@ pub fn udevadm_argv(uuid: &str) -> [String; 4] {
     ]
 }
 
-/// The boot refresh (PLAN 6b.6 step 5): exactly what Pop!_OS's hooks run.
+/// The boot refresh (PLAN 6b.6 step 5): exactly what Pop!_OS's hooks run. Used as it is
+/// only when the restored tree has no `/boot/vmlinuz` or `/boot/initrd.img` link.
 #[must_use]
 pub fn kernelstub_argv() -> [String; 3] {
     ["kernelstub", "--verbose", "--preserve-live-mode"].map(str::to_owned)
+}
+
+/// The boot refresh naming the snapshot's kernel. kernelstub left alone takes the newest
+/// kernel in `/boot` by version (`KernelOption.latest_option`, `application.py:167`), and
+/// after a rollback's copy that is the protected running kernel (rule 10), so every rollback
+/// would end `boot-kept` (check 2, 2026-10-02). `--kernel-path` and `--initrd-path` win over
+/// it (`application.py:171-193`) and aren't saved in its configuration. The two paths are
+/// what the restored `/boot/vmlinuz` and `/boot/initrd.img` point to: the kernel the check
+/// (`esp::check`) compares the ESP with.
+#[must_use]
+pub fn kernelstub_argv_for(kernel: &Path, initrd: &Path) -> Vec<String> {
+    let mut argv = kernelstub_argv().to_vec();
+    argv.push("--kernel-path".to_owned());
+    argv.push(kernel.to_string_lossy().into_owned());
+    argv.push("--initrd-path".to_owned());
+    argv.push(initrd.to_string_lossy().into_owned());
+    argv
+}
+
+/// Where `/boot/<name>` points under `root`, as a path on the live system (`/boot/<target>`
+/// for a relative target, the target itself for an absolute one). `None` if it isn't a link.
+fn linked_in_boot(root: &Path, name: &str) -> Option<PathBuf> {
+    let target = fs::read_link(root.join("boot").join(name)).ok()?;
+    Some(if target.is_absolute() {
+        target
+    } else {
+        Path::new("/boot").join(target)
+    })
 }
 
 #[must_use]
@@ -326,7 +355,14 @@ impl<R: Runner> apply::Runner for RealRunner<R> {
     }
 
     fn refresh_boot(&mut self) -> Result<(), String> {
-        let output = self.tool(&kernelstub_argv())?;
+        let argv = match (
+            linked_in_boot(&self.root, "vmlinuz"),
+            linked_in_boot(&self.root, "initrd.img"),
+        ) {
+            (Some(kernel), Some(initrd)) => kernelstub_argv_for(&kernel, &initrd),
+            _ => kernelstub_argv().to_vec(),
+        };
+        let output = self.tool(&argv)?;
         for line in output.stdout.lines().chain(output.stderr.lines()) {
             eprintln!("apsis-helper: kernelstub: {line}");
         }
@@ -687,6 +723,43 @@ mod tests {
         );
         let output = streamed.tool(&["echo".to_owned()]).unwrap();
         assert_eq!(output.stdout, "one\ntwo\n");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// kernelstub left alone takes the newest kernel in `/boot` by version (its
+    /// `KernelOption.latest_option`), and after a rollback's copy that is the protected
+    /// running kernel, not the snapshot's: every rollback would end `boot-kept` (check 2,
+    /// 2026-10-02). So the refresh names the kernel and initrd the restored tree's links
+    /// point to, with the options kernelstub has for it. Without the links: the plain call,
+    /// and the check decides.
+    #[test]
+    fn the_boot_refresh_names_the_kernel_the_links_point_to() {
+        let root = temp("root");
+        fs::create_dir_all(root.join("boot")).unwrap();
+        symlink("vmlinuz-7.1.5-generic", root.join("boot/vmlinuz")).unwrap();
+        symlink("initrd.img-7.1.5-generic", root.join("boot/initrd.img")).unwrap();
+        let mut runner = RealRunner::under(&root, &temp("mount"), FakeTools::default());
+        assert_eq!(runner.refresh_boot(), Ok(()));
+        assert_eq!(
+            runner.tools.calls()[0],
+            [
+                "kernelstub",
+                "--verbose",
+                "--preserve-live-mode",
+                "--kernel-path",
+                "/boot/vmlinuz-7.1.5-generic",
+                "--initrd-path",
+                "/boot/initrd.img-7.1.5-generic",
+            ]
+        );
+        // An absolute link target is taken as it is; a missing link means the plain call.
+        fs::remove_file(root.join("boot/vmlinuz")).unwrap();
+        symlink("/boot/vmlinuz-7.0.11-generic", root.join("boot/vmlinuz")).unwrap();
+        runner.refresh_boot().unwrap();
+        assert_eq!(runner.tools.calls()[1][4], "/boot/vmlinuz-7.0.11-generic");
+        fs::remove_file(root.join("boot/initrd.img")).unwrap();
+        runner.refresh_boot().unwrap();
+        assert_eq!(runner.tools.calls()[2], kernelstub_argv());
         fs::remove_dir_all(&root).unwrap();
     }
 

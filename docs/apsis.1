@@ -97,8 +97,9 @@ At the next start the restore runs with the desktop stopped (plymouth shows its 
 rsync puts the system files back (the live
 .IR /etc/fstab " and " /etc/crypttab ,
 the boot partition, the recovery partition, other mounts and the kernel the computer started
-with are kept), the boot partition's files are backed up, kernelstub refreshes them exactly as
-Pop!_OS's kernel hooks do, and the result is checked byte for byte.
+with are kept), the boot partition's files are backed up, kernelstub refreshes them as
+Pop!_OS's kernel hooks do, told which kernel the snapshot boots, and the result is checked
+byte for byte.
 If it doesn't check out, the old boot files are put back and the computer keeps the kernel it
 started with.
 A copy that breaks (the backup disk gone, an I/O error) is tried again at the next start, three

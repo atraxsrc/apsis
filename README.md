@@ -163,8 +163,9 @@ A restore asks every time.
 - **The live `/etc/fstab` and `/etc/crypttab` are kept**, not the snapshot's: they describe
   the disks as they are now. A snapshot whose `crypttab` differs from the current one is
   refused.
-- **The boot files are refreshed with kernelstub only**, as Pop!_OS's own kernel hooks do; the
-  snapshot's initrds are used as they are, not rebuilt. If the new boot files don't check
+- **The boot files are refreshed with kernelstub only**, as Pop!_OS's own kernel hooks do,
+  told which kernel the snapshot boots; the snapshot's initrds are used as they are, not
+  rebuilt. If the new boot files don't check
   out, the ones from before are put back and the computer keeps the kernel it started with
   ("still boots the previous kernel"); the next kernel update sets that right.
 - `/root` is restored with the system if the snapshot has it (with content); otherwise it's

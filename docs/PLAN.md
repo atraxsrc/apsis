@@ -773,6 +773,17 @@ the saved step** (6b.10).
    kernelstub picks the newest `/boot/vmlinuz-*` by version; the check below reads the
    `/boot/vmlinuz` link. On Pop!_OS the link is to the newest (`linux-update-symlinks`), so
    they agree; a snapshot where they don't ends `boot-kept`, which is the right outcome.
+   **At apply they never agree in a rollback** (check 2's setup, 2026-10-02): after pass 1,
+   `/boot` holds the snapshot's kernels and the protected running kernel (rule 10), which is
+   the newest, while the links are the snapshot's. Left alone, kernelstub would put the
+   running kernel on the ESP and every rollback would end `boot-kept`. **So the apply's call
+   names the kernel**: `kernelstub --verbose --preserve-live-mode --kernel-path /boot/<what
+   /boot/vmlinuz points to> --initrd-path /boot/<what /boot/initrd.img points to>`. Both
+   options win over the newest-by-version choice (`application.py:167-193`) and aren't saved
+   in kernelstub's configuration (read on apsis-test). Without the two links the plain call
+   runs and the check decides. The "previous" pair stays kernelstub's own choice (the second
+   newest in `/boot`, the protected kernel's neighbour until step 7 removes it); a mismatch
+   there is reported, never a failure, and the next kernel update rewrites it.
 6. **Check, byte for byte**: the ESP's `vmlinuz.efi` and `initrd.img` equal the files
    `/boot/vmlinuz` and `/boot/initrd.img` point to; `/usr/lib/modules/<that version>/` exists;
    `Pop_OS-current.conf` exists. kernelstub exited 0.
