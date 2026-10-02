@@ -403,6 +403,10 @@ impl<R: Runner> apply::Runner for RealRunner<R> {
     }
 
     fn restart(&mut self) {
+        // The backup disk first: `systemctl reboot --no-block` starts the shutdown at once,
+        // and systemd stops this unit with TERM while it's still unmounting (check 1,
+        // 2026-10-02: "Failed with result 'signal'").
+        self.mounted = None;
         self.restart_failed = match self.tool(&reboot_argv()) {
             Ok(output) => !output.success,
             Err(error) => {

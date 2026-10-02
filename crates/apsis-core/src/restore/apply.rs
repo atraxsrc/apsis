@@ -426,6 +426,12 @@ fn run(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
             state.attempts
         ));
         let copied = runner.copy(&plan);
+        runner.say(&format!(
+            "the copy ended: rsync {}",
+            copied
+                .exit
+                .map_or_else(|| "didn't exit".to_owned(), |code| format!("exited {code}"))
+        ));
         let problems = match copied.end() {
             CopyEnd::Ended { problems } => problems,
             CopyEnd::Broke if state.attempts >= MAX_ATTEMPTS => {
@@ -1327,6 +1333,15 @@ mod tests {
         // The plan went with the arm: `result.json` has what the window needs, and nothing
         // is left for the helper's next start to remove (check 1, 2026-10-02).
         assert!(!lab.state.join(plan::FILE).exists());
+        // The journal says how the copy ended (check 1, 2026-10-02: the step's timestamps
+        // were all it had).
+        assert!(
+            fake.said
+                .iter()
+                .any(|l| l == "the copy ended: rsync exited 0"),
+            "{:?}",
+            fake.said
+        );
 
         let steps: Vec<_> = fake
             .calls

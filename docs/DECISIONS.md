@@ -4200,3 +4200,51 @@ expected every line on the screen.
 minute) and the missing bar are right for a same-day baseline, from the unit's journal: the
 time between `copying, attempt 1 of 3` and rsync's summary, and whether the bar's call failed
 (no line about it in this build; the next build logs it).
+
+## 2026-10-02 - check 1, run 2, steps 1g and 1h (owner): the restore worked, on the wrong row
+
+**The restore went through end to end**: `copying, attempt 1 of 3` at +1 s, `refreshing the
+boot files` 54 s later, kernelstub's lines (the kernel and initrd copied to the ESP, the
+previous pair backed up, both entries written), `the restore ended: done`, `Finished(Done)`,
+the restart 56 s after the unit started. `pop-upgrade-init` skipped on the condition; no
+`upgrade.sh` or `apt-get`. `tools/restore-check.sh`: every line ok (the arm gone, the drop-in
+folder gone, no disarm timer, `result.json` done, no ESP backup left, the ESP byte for byte
+`/boot`'s, modules for the running kernel, both loader entries, dpkg clean, 0 failed units,
+no Pop leftovers). `/home`'s mode, cryptswap, ping's capability, the Flatpak list and size,
+the two units and the kernel as in 1c. The state folder: `result.json`, `restore.filter`,
+`rsync-log`, nothing else, and no "leftovers removed at start" line. The window: `System
+restored to ...`.
+
+**But the marker and cowsay were still there**, because `result.json` and the helper's
+journal name the snapshot restored as `2026-10-02_11-29-34`: run 1's safety snapshot ("Before
+restoring 2026-10-02 10:50"), taken at 11:29, after 1d's changes at 11:05. The baseline
+`2026-10-02_10-50-46` wasn't the row selected. The restore did exactly what was asked; the
+test's expectation about the files holds only for the baseline. **Check 1 needs run 3 with
+the baseline selected**: the Ready dialog names the date of the snapshot being restored
+(`ready-body`), which is the place to read before Restart now.
+
+**A thing for the owner to decide** from this: the safety snapshot's comment names the
+baseline's date ("Before restoring 2026-10-02 10:50"), and a row carrying that date is easy
+to take for the baseline. Options: the comment reads "Safety snapshot, before restoring
+<date>"; the Restore dialog shows the snapshot's comment under its date; both; or neither.
+Not changed.
+
+**Two small changes from the journal**, gate green:
+- The journal said nothing between `copying` and `refreshing the boot files`; rsync's exit
+  wasn't in it (the runbook expected a summary). Core now says `the copy ended: rsync exited
+  <code>` (or `didn't exit`) right after the copy. Tested in the done path.
+- `apsis-restore.service: Main process exited, code=killed, status=15/TERM`, `Failed with
+  result 'signal'`. `systemctl reboot --no-block` starts the shutdown at once, and systemd
+  stopped the unit while the helper was still unmounting the backup disk (`Mounted`'s drop,
+  after `run` returned). `restart` now drops the mount before the reboot call, so the process
+  has only its last journal line and the exit left. The window can't be closed entirely: the
+  restart is asked from inside the unit, by design (6b.6). A `FailureAction=reboot` that fires
+  into a shutdown already under way is harmless, and was. No unit test reaches the real
+  mount; run 3's unit end ("Deactivated successfully" or still 'signal') is the check.
+
+Not a defect: no "ESP backup", "check passed" or "kernel kept" lines; core says those only
+when something is off, and the runbook's expectation list was written from the plan, not the
+code. The runbook's 1h is corrected to what the journal says on a clean run.
+
+Snapshots on the USB now: the two from 0.4, the baseline, and two safety snapshots
+(`11-29-34`, `11-55-27`). Run 3 makes a third; they can go after check 3.
