@@ -68,7 +68,10 @@ isn't touched at all) or restore them too (then files created or changed since t
 deleted or put back), and a safety snapshot of the current system first (on by default; it
 includes
 .I /home
-when the home folders are restored).
+when the home folders are restored). The safety snapshot is the way back: the system as it
+was right before the restore, listed as "Before restoring <date>", costing only the files that
+differ from the newest snapshot. To undo the restore, restore it like any other snapshot.
+Without it there is no way back.
 .B Restore
 then prepares, with the password asked every time: the space on each disk is measured with a
 dry run, the safety snapshot is taken (Stop ends it like any snapshot), the plan is written to

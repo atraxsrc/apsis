@@ -130,9 +130,11 @@ fails, the rest are left alone and the status line says which were deleted. A di
 4. **Restore the system** (0.5.0, experimental): select one snapshot, **Restore**. Apsis checks
    that the snapshot fits this computer (same installation, UEFI, Pop!_OS with systemd-boot,
    a plain ext4 system disk) and shows the choices: keep your home folders as they are now
-   (default) or restore them too, and take a safety snapshot first (on by default, so you can
-   come back). **Restore** then prepares: it measures the space, takes the safety snapshot and
-   writes the plan. **Ready to restore** is the last word: **Restart now** restarts the
+   (default) or restore them too, and take a safety snapshot first (on by default). The safety
+   snapshot is the way back: the system as it was right before the restore, listed as "Before
+   restoring <date>", costing only the files that differ from the newest snapshot. To undo the
+   restore, restore it like any other snapshot; without it there is no way back. **Restore**
+   then prepares: it measures the space, takes the safety snapshot and writes the plan. **Ready to restore** is the last word: **Restart now** restarts the
    computer, restores the system with the desktop stopped, and restarts once more; **Cancel
    restore** (or Esc, or closing the window) drops the plan and keeps the safety snapshot.
    Once it restarts, the restore can't be stopped: don't turn off the computer until it's
