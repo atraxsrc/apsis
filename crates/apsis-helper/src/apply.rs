@@ -221,7 +221,7 @@ impl<R: Runner> apply::Runner for RealRunner<R> {
             .map_err(|error| format!("mountinfo couldn't be read: {error}"))?;
         let live = Live::read(&self.root, &DirectRunner, &mountinfo)
             .map_err(|error| format!("the system couldn't be read: {error}"))?;
-        if let Err(refusal) = refusal::check(&live.as_system(), &files.as_snapshot()) {
+        if let Err(refusal) = refusal::check(&live.as_system_at_apply(), &files.as_snapshot()) {
             return Err(format!("the restore was refused: {}", refusal.to_wire()));
         }
         // A separate /home being restored must be the plan's partition, mounted (6b.6).

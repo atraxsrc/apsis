@@ -31,6 +31,9 @@ pub struct Live {
     pub esp_folders: Vec<String>,
     /// `system-update` or `etc/system-update` exists (not followed).
     pub pending_update: bool,
+    /// `etc/system-update` alone exists (not followed): what counts at apply, where
+    /// `system-update` is Apsis's own link.
+    pub etc_system_update: bool,
     pub pop_upgrade_found: Vec<&'static str>,
     /// `etc/crypttab`, empty if there's none.
     pub crypttab: String,
@@ -72,10 +75,21 @@ impl Live {
             root_uuid,
             esp_folders: names_in(&root.join("boot/efi/EFI")),
             pending_update: exists("system-update") || exists("etc/system-update"),
+            etc_system_update: exists("etc/system-update"),
             pop_upgrade_found: pop_upgrade_found(root),
             crypttab: read_nofollow(&root.join("etc/crypttab")).unwrap_or_default(),
             boot_files,
         })
+    }
+
+    /// The same view in the offline boot: `/system-update` is Apsis's own link there (the
+    /// apply's step 1 checked it), so only `/etc/system-update` is another update's
+    /// (check 1, 2026-10-02; `refusal::check_pending`'s note).
+    pub(crate) fn as_system_at_apply(&self) -> refusal::System<'_> {
+        refusal::System {
+            pending_update: self.etc_system_update,
+            ..self.as_system()
+        }
     }
 
     pub(crate) fn as_system(&self) -> refusal::System<'_> {
@@ -439,6 +453,14 @@ mod tests {
         fs::remove_file(root.join("etc/crypttab")).unwrap();
         let system = Live::read(&root, &FakeSystem, MOUNTINFO).unwrap();
         assert!(system.pending_update);
+        // In the offline boot `/system-update` is Apsis's own link (the apply's step 1
+        // checked), so only `/etc/system-update` counts there (check 1, 2026-10-02).
+        assert!(!system.etc_system_update);
+        assert!(!system.as_system_at_apply().pending_update);
+        write(root.join("etc/system-update"), "");
+        let both = Live::read(&root, &FakeSystem, MOUNTINFO).unwrap();
+        assert!(both.etc_system_update && both.as_system_at_apply().pending_update);
+        fs::remove_file(root.join("etc/system-update")).unwrap();
         assert_eq!(system.pop_upgrade_found, ["/pop-upgrade"]);
         assert_eq!(
             system.boot_files,

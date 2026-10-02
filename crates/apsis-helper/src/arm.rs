@@ -177,6 +177,19 @@ pub fn remove_arm_files(paths: &Paths) -> io::Result<Vec<&'static str>> {
             removed.push(name);
         }
     }
+    // The drop-in's folder is Apsis's too: Pop's unit ships none (check 1, 2026-10-02). It
+    // stays if another drop-in is in it.
+    if let Some(folder) = paths.drop_in.parent() {
+        match fs::remove_dir(folder) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
     Ok(removed)
 }
 
@@ -369,6 +382,8 @@ mod tests {
             &paths.helper_copy,
             &paths.state_dir.join("state.json"),
             &paths.state_dir.join("request.json"),
+            // The drop-in's folder too: Pop's unit has none of its own (check 1, 2026-10-02).
+            paths.drop_in.parent().unwrap(),
         ] {
             assert!(fs::symlink_metadata(path).is_err(), "{}", path.display());
         }

@@ -4130,3 +4130,51 @@ what `--link-dest` can't link. That is the safety snapshot's cost on the backup 
 
 The test-only polkit rule on apsis-test is also recorded above as the reason for the missing
 password prompt. Next: rebuild, reinstall, re-run 1e from the Restore click. Nothing to undo.
+
+## 2026-10-02 - check 1, steps 1f to 1h (owner): the offline boot refused its own arm
+
+The first full run on apsis-test. 1e passed as designed: `started`, the restore's dry run
+(31 s), the safety snapshot's dry run, the create (77 s, `created .../2026-10-02_11-29-34`),
+`ready` 2.5 min after the click; the Ready dialog, Restart now, `armed; restarting`. The
+offline boot (2 s) ran `apsis-restore.service`: the plymouth line first, `pop-upgrade-init`
+skipped on `ConditionPathExists=!/system-update/apsis-helper` (check 12's first part passed),
+no `upgrade.sh` or `apt-get` in that boot. Then, one second in:
+
+    the restore ended: not-started: the restore was refused: pending-update
+    apply-restore ended: Finished(NotStarted)
+
+The machine restarted on its own into a normal boot; the window said "The restore didn't
+start · nothing was changed"; `result.json` said `not-started` with the baseline, the safety
+snapshot and `home: keep`. Nothing on the disk was touched. The splash wasn't observed
+(the owner's back was to the screen); check 2 will.
+
+**Cause**: `check::Live::read` sets `pending_update` when `/system-update` or
+`/etc/system-update` exists. In the offline boot `/system-update` is Apsis's own link, so the
+apply's step 2 (the 6b.7 checks once more, `refusal::check`) refused itself. The dialog, the
+preparation and the arming check were right to look at the name; the apply wasn't.
+`refusal::check_pending`'s own note says it must not run at apply for this reason, but the
+pending flag reached `refusal::check` by another path.
+
+**Fix**: `Live` also records `etc_system_update` alone, and `Live::as_system_at_apply()` is
+the view the apply checks: `/system-update` is Apsis's (step 1 verified the link), so only
+`/etc/system-update` counts as another update's there. The test for `Live::read` covers a
+dangling `/system-update` (pending for the dialog, not for the apply) and `/etc/system-update`
+(pending for both).
+
+**Two more things from `tools/restore-check.sh` and the helper's journal**:
+- `FAIL drop-in folder left: /etc/systemd/system/pop-upgrade-init.service.d`:
+  `arm::remove_arm_files` removed the drop-in but not its folder, which is Apsis's too (Pop's
+  unit ships none). It now removes the folder when empty and leaves it when another drop-in
+  is in it. `postrm` already did this on purge.
+- `leftovers removed at start: request.json` after the restart: the apply's cleanup removed
+  the arm but left the plan, and the helper's first start did the apply's job. The core's
+  step 8 cleanup now removes `request.json` after `result.json` is saved and the link and arm
+  files are gone (the plan's names are in the result). Nothing changes for a link whose
+  removal failed: the cleanup stops before the plan, so a later boot that finds the saved
+  end still reads it; the core test for that boot puts the plan back with the link.
+
+Not changed: `tools/restore-check.sh` (its FAIL was right) and the runbook. Next: rebuild,
+reinstall, and check 1 again from 1d (the marker, cowsay and the kept file are as 1d left
+them, so 1d is a look, not a redo), then 1e with a fresh preparation, 1f with the screen
+watched, 1g, 1h. The safety snapshot from this run stays on the USB; the next preparation
+makes another.

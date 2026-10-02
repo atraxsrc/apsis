@@ -13,12 +13,13 @@
 //! result.
 
 use std::fs;
+use std::io;
 use std::path::Path;
 
 use super::esp::{self, Checked, EspError, Manifest, Previous};
 use super::file::FileError;
 use super::filter::Home;
-use super::plan::Plan;
+use super::plan::{self, Plan};
 use super::state::{MAX_ATTEMPTS, MAX_BOOTS, Outcome, Report, State, Step};
 use crate::native::Info;
 
@@ -845,6 +846,13 @@ fn clean_up(paths: &Paths<'_>, runner: &mut impl Runner) -> bool {
             "the restore's unit files weren't removed: {error}"
         ));
     }
+    // The plan went into `result.json`; what's left of it is a leftover for the helper's
+    // next start (check 1, 2026-10-02).
+    match fs::remove_file(paths.state_dir.join(plan::FILE)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => runner.say(&format!("request.json wasn't removed: {error}")),
+    }
     if let Err(error) = esp::remove(paths.state_dir) {
         runner.say(&format!("the ESP backup wasn't removed: {error}"));
     }
@@ -1316,6 +1324,9 @@ mod tests {
         let lab = armed("apply-done");
         let mut fake = Fake::new(&lab);
         assert_eq!(boot(&mut fake), End::Finished(Outcome::Done));
+        // The plan went with the arm: `result.json` has what the window needs, and nothing
+        // is left for the helper's next start to remove (check 1, 2026-10-02).
+        assert!(!lab.state.join(plan::FILE).exists());
 
         let steps: Vec<_> = fake
             .calls
@@ -1639,8 +1650,13 @@ mod tests {
         assert_eq!(fake.0.count_of("put_back_esp"), 0);
     }
 
+    /// The link back after an end: for real, only a link whose removal failed is still
+    /// there, and the cleanup stops before the plan then, so the plan is there too.
     fn arm_again(lab: &Lab) {
         let _ = fs::remove_file(lab.root.join("system-update"));
+        if !lab.state.join(plan::FILE).exists() {
+            plan().save(&lab.state).unwrap();
+        }
         std::os::unix::fs::symlink(&lab.state, lab.root.join("system-update")).unwrap();
     }
 
