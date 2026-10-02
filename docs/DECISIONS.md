@@ -4178,3 +4178,25 @@ reinstall, and check 1 again from 1d (the marker, cowsay and the kept file are a
 them, so 1d is a look, not a redo), then 1e with a fresh preparation, 1f with the screen
 watched, 1g, 1h. The safety snapshot from this run stays on the USB; the next preparation
 makes another.
+
+## 2026-10-02 - check 1, run 2, step 1f (owner): the boot screen showed the journal's lines
+
+Seen on the screen: "Restoring the system. Don't turn off the computer." for a moment, then
+"copying, attempt 1 of 3" over the Pop logo; no progress bar; the restart in under a minute.
+
+**Cause**: `RealRunner::say` wrote each line to the journal and to `plymouth display-message`,
+so every step's line replaced the one before. That was the 6b.11 build; the owner's answer 3
+(above, one message at the start) moved the first line into `apply::run` but left `say` as it
+was.
+
+**Fix**: `say` is the journal only. `run` writes the start line to the journal and sends it to
+plymouth once, through `splash`. `progress` and `splash` share one `plymouth` call: after the
+first failure plymouth isn't asked again, and the journal now says so with plymouth's stderr
+("plymouth isn't answering (...)"), so a missing bar can be told from a bar too quick to see.
+The test `say_goes_to_the_journal_only_and_restart_through_the_tools` replaces the one that
+expected every line on the screen.
+
+**Open from this run, pending 1h**: whether the copy's length (the restart came in under a
+minute) and the missing bar are right for a same-day baseline, from the unit's journal: the
+time between `copying, attempt 1 of 3` and rsync's summary, and whether the bar's call failed
+(no line about it in this build; the next build logs it).

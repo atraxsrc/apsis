@@ -59,6 +59,7 @@ pub fn apply_restore() -> ExitCode {
 pub fn run<R: Runner>(runner: &mut RealRunner<R>) -> apply::End {
     use apply::Runner as _;
     runner.say(COPYING);
+    runner.splash(COPYING);
     let paths = Paths {
         state_dir: &runner.paths.state_dir.clone(),
         esp: &runner.esp.clone(),
@@ -135,12 +136,28 @@ impl<R: Runner> RealRunner<R> {
     }
 
     fn progress(&mut self, percent: u8) {
-        if self.plymouth
-            && self
-                .tool(&plymouth_progress_argv(percent))
-                .is_ok_and(|o| !o.success)
+        self.plymouth(&plymouth_progress_argv(percent));
+    }
+
+    /// The boot screen's line, once (owner, 2026-10-02).
+    fn splash(&mut self, text: &str) {
+        self.plymouth(&plymouth_message_argv(text));
+    }
+
+    /// One plymouth call; after the first failure plymouth isn't asked again (no splash: the
+    /// journal has everything), and the journal says why.
+    fn plymouth(&mut self, argv: &[String]) {
+        if !self.plymouth {
+            return;
+        }
+        if let Ok(output) = self.tool(argv)
+            && !output.success
         {
             self.plymouth = false;
+            eprintln!(
+                "apsis-helper: plymouth isn't answering ({}): the boot screen stays as it is",
+                output.stderr.trim()
+            );
         }
     }
 }
@@ -379,15 +396,10 @@ impl<R: Runner> apply::Runner for RealRunner<R> {
             .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
     }
 
+    /// The journal only: the boot screen keeps the start line (`run`), and the lines of the
+    /// steps would replace it (check 1, 2026-10-02).
     fn say(&mut self, line: &str) {
         eprintln!("apsis-helper: {line}");
-        if self.plymouth
-            && self
-                .tool(&plymouth_message_argv(line))
-                .is_ok_and(|o| !o.success)
-        {
-            self.plymouth = false;
-        }
     }
 
     fn restart(&mut self) {
@@ -674,25 +686,19 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    /// The journal's lines stay in the journal: only the start line reaches the boot screen
+    /// (owner, 2026-10-02; check 1 saw "copying, attempt 1 of 3" replace it).
     #[test]
-    fn say_and_restart_go_through_the_tools() {
+    fn say_goes_to_the_journal_only_and_restart_through_the_tools() {
         let root = temp("root");
-        let tools = FakeTools::default()
-            .answer(true, 0, "", "")
-            .answer(false, 1, "", "no plymouth")
-            .answer(false, 1, "", "Failed to reboot");
+        let tools = FakeTools::default().answer(false, 1, "", "Failed to reboot");
         let mut runner = RealRunner::under(&root, &temp("mount"), tools);
         runner.say("one");
         runner.say("two");
-        runner.say("three");
         runner.restart();
         assert!(runner.restart_failed);
         let calls = runner.tools.calls();
-        assert_eq!(calls[0], plymouth_message_argv("one"));
-        assert_eq!(calls[1], plymouth_message_argv("two"));
-        // plymouth failed on "two": not asked again, "three" goes to the journal only.
-        assert_eq!(calls[2], reboot_argv());
-        assert_eq!(calls.len(), 3);
+        assert_eq!(calls, [reboot_argv().to_vec()]);
         let mut ok = RealRunner::under(&root, &temp("mount"), FakeTools::default());
         ok.restart();
         assert!(!ok.restart_failed);
