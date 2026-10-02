@@ -1804,6 +1804,15 @@ Checks:
 - 2. **Kernel rollback** (the central risk): snapshot, kernel update, restart on the new kernel,
   restore. `uname -r` is the snapshot's kernel, the ESP hashes match `/boot`, and the new
   kernel's modules are gone.
+  **Passed (apsis-test, 2026-10-02; DECISIONS "check 2 passed").** The setup itself found the
+  bug: kernelstub takes the newest kernel in `/boot`, which after the copy is the protected
+  running one, so the apply now names the snapshot's kernel (step 5 above). With that build:
+  a mainline 7.2.6 as the new kernel (no Pop kernel was on offer, and 7.1.5 can't be removed
+  without `pop-desktop`), the baseline restored, `uname -r` 7.1.5, the ESP byte for byte
+  `/boot`'s, `removed kernel 7.2.6...`, 7.2.6's modules and packages gone, `done` in 62 s,
+  `Deactivated successfully`. The result carries the designed report about the previous
+  pair (kernelstub skipped it as the same kernel; the ESP's old previous stays until the
+  next kernel update); the window shows a plain `System restored to`.
 - 3. Restore home too: the `~` file is gone, and it's in the safety snapshot. **Flatpak** as in
   check 1: `flatpak --user list`, launch one app, `du -sh ~/.local/share/flatpak` before and
   after.
@@ -2100,8 +2109,9 @@ Checks:
    **Status (2026-10-02): the docs are done** (DECISIONS 2026-10-02 "step 5"); left for the
    owner at release: the version bump, the Debian changelog entry, the man page's `.TH`
    line, the metainfo's release. Check 0.4 passed 2026-10-01; **check 1 passed 2026-10-02**
-   (third run, after six fixes found by the first two; DECISIONS "check 1 passed"); checks 2
-   to 13 are next, check 2 (the kernel rollback) first.
+   (third run, after six fixes found by the first two; DECISIONS "check 1 passed"); **check 2
+   passed 2026-10-02** (after the kernelstub fix its setup found; DECISIONS "check 2
+   passed"); checks 3 to 13 are next, check 3 (home restored too) first.
 
 Each slice ends with `cargo test --workspace`, clippy `-D warnings`, `cargo fmt` and a summary.
 

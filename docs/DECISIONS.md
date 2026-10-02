@@ -4341,3 +4341,44 @@ newest is the snapshot's own newest, so kernelstub skips or duplicates it; repor
 failure; the next kernel update rewrites it). Test
 `the_boot_refresh_names_the_kernel_the_links_point_to`; PLAN 6b.6 step 5 and the README's
 limitation line say it. Check 2 runs against this build.
+
+## 2026-10-02 - check 2 passed (owner, apsis-test): the kernel rollback
+
+Route C (above): the baseline `2026-10-02_10-50-46` (kernels 7.1.5 and 7.0.11, links to
+7.1.5) restored from a system running a mainline 7.2.6, with the build that names the kernel.
+
+- **Before**: 7.2.6 running, three modules folders, the links and the ESP at 7.2.6; the
+  marker, cowsay and the kept file as in check 1.
+- **The preparation**: `check-restore ... ok`; the restore's dry run 36 s; the safety
+  snapshot's dry run 35 s; the create 5 min 15 s (a whole kernel's modules to copy, linked to
+  the run 2 safety snapshot); `ready` 7 min after the click; `armed; restarting`.
+- **The offline boot** (64 s of journal): the start line; `copying, attempt 1 of 3`; `the copy
+  ended: rsync exited 0` 58 s later; `refreshing the boot files`; kernelstub: "Manually
+  specified kernel path: /boot/vmlinuz-7.1.5...", the same initrd, "Copying Kernel into ESP",
+  "Backing up old kernel: No old kernel found, skipping"; `removed kernel
+  7.2.6-070206-generic: not in the snapshot`; `the restore ended: done: the previous kernel's
+  boot files: the kernel on the ESP isn't the one /boot links to`; `Finished(Done)`;
+  `Deactivated successfully`. `pop-upgrade-init` skipped on the condition; nothing of the
+  upgrade ran.
+- **After**: `uname -r` 7.1.5; modules 7.0.11 and 7.1.5 only; `/boot` the snapshot's files
+  and links, dated as the snapshot's; no 7.2.6 package in dpkg. `tools/restore-check.sh`:
+  every line ok, the ESP byte for byte `/boot`'s 7.1.5 pair. The marker and cowsay gone, the
+  kept file there, the other numbers as before. The state folder: `result.json`,
+  `restore.filter`, `rsync-log`.
+
+**The previous-pair report, explained**: kernelstub's "previous" is the second-newest kernel
+in `/boot`, and at refresh time that was 7.1.5 itself (7.2.6 still protected, removed only
+in step 7), the same file as the named kernel, so `installer.py:65-66` skipped the backup
+and the ESP kept its earlier previous pair: 7.1.5, written when 7.2.6 was installed. The
+snapshot's `/boot/vmlinuz.old` names 7.0.11, hence the report. The ESP's second entry boots
+7.1.5 as well; nothing is broken, and the next kernel update rewrites the pair. As PLAN 6b.6
+says: reported in the journal and the result, never a failure. **The window shows `System
+restored to <date>`** and drops the message for a `done`; the owner leaves it so (the
+journal and `result.json` have it).
+
+Without the fix of the same day, this run would have ended `boot-kept` on 7.2.6. Check 2 is
+the run that proved the fix on the machine.
+
+Left on apsis-test: the 1a build of Apsis once more (the baseline's), `~/kernel-b`, the kept
+file. Still open from check 1: launching one Flatpak app after a restore. Next: check 3,
+home restored too, against the same baseline, with its runbook from check 1's.
