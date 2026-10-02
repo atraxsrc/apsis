@@ -116,12 +116,22 @@ impl<R: Runner> RealRunner<R> {
             .join(&plan.snapshot)
     }
 
-    /// Runs one of the tools; its output, or why it couldn't run.
+    /// Runs one of the tools; its output, or why it couldn't run. The standard output is
+    /// collected from the stream: the helper's runner hands it over piece by piece and keeps
+    /// none of it in `RunOutput::stdout` (found in check 1, 2026-10-02).
     fn tool(&self, argv: &[String]) -> Result<apsis_core::RunOutput, String> {
         let argv: Vec<OsString> = argv.iter().map(Into::into).collect();
-        self.tools
-            .run(&argv)
-            .map_err(|error| format!("{} couldn't be run: {error}", argv[0].to_string_lossy()))
+        let mut stdout = String::new();
+        let mut output = self
+            .tools
+            .run_streaming(&argv, &mut |segment| {
+                stdout.push_str(segment);
+                stdout.push('\n');
+                false
+            })
+            .map_err(|error| format!("{} couldn't be run: {error}", argv[0].to_string_lossy()))?;
+        output.stdout = stdout;
+        Ok(output)
     }
 
     fn progress(&mut self, percent: u8) {
@@ -253,7 +263,12 @@ impl<R: Runner> apply::Runner for RealRunner<R> {
         );
         let mut last_percent: Option<u8> = None;
         let mut shown: Vec<u8> = Vec::new();
+        // All of rsync's standard output, collected from the stream (the runner keeps none):
+        // `Copied::new` looks for the "skipping file deletion" line anywhere in it.
+        let mut stdout = String::new();
         let output = self.tools.run_streaming(&argv, &mut |segment| {
+            stdout.push_str(segment);
+            stdout.push('\n');
             if let Some(progress) = parse_rsync(segment)
                 && let Some(percent) = progress.percent
             {
@@ -275,7 +290,7 @@ impl<R: Runner> apply::Runner for RealRunner<R> {
             self.progress(percent);
         }
         let copied = match output {
-            Ok(output) => Copied::new(output.code, &output.stdout, tail(&output.stderr)),
+            Ok(output) => Copied::new(output.code, &stdout, tail(&output.stderr)),
             Err(error) => Copied::new(None, "", format!("rsync couldn't be run: {error}")),
         };
         // What rsync wrote is on disk before the state says the copy ended.
@@ -462,6 +477,21 @@ mod tests {
                 stderr: String::new(),
             }))
         }
+
+        /// Like the helper's `QuietRunner`: the scripted stdout goes to the callback line by
+        /// line and `RunOutput::stdout` stays empty (found in check 1, 2026-10-02).
+        fn run_streaming(
+            &self,
+            argv: &[OsString],
+            on_segment: &mut dyn FnMut(&str) -> bool,
+        ) -> io::Result<RunOutput> {
+            let mut output = self.run(argv)?;
+            for line in output.stdout.lines() {
+                on_segment(line);
+            }
+            output.stdout = String::new();
+            Ok(output)
+        }
     }
 
     fn plan() -> Plan {
@@ -612,6 +642,35 @@ mod tests {
             !calls.iter().any(|c| c == &reboot_argv()),
             "no restart when not armed"
         );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The tools' output is read from the stream (the quiet runner keeps none): kernelstub's
+    /// lines reach the journal, and a failure carries its code and the end of its errors.
+    #[test]
+    fn the_boot_refresh_reads_kernelstub_and_reports_a_failure() {
+        let root = temp("root");
+        let tools = FakeTools::default()
+            .answer(true, 0, "kernelstub: Making entry\n", "")
+            .answer(false, 1, "", "kernelstub: no ESP\n");
+        let mut runner = RealRunner::under(&root, &temp("mount"), tools);
+        assert_eq!(runner.refresh_boot(), Ok(()));
+        let error = runner.refresh_boot().unwrap_err();
+        assert!(
+            error.contains("code 1") && error.contains("no ESP"),
+            "{error}"
+        );
+        let calls = runner.tools.calls();
+        assert_eq!(calls[0], kernelstub_argv());
+        assert_eq!(calls.len(), 2);
+        // What `tool` hands back has the streamed output in it.
+        let streamed = RealRunner::under(
+            &root,
+            &temp("mount"),
+            FakeTools::default().answer(true, 0, "one\ntwo\n", ""),
+        );
+        let output = streamed.tool(&["echo".to_owned()]).unwrap();
+        assert_eq!(output.stdout, "one\ntwo\n");
         fs::remove_dir_all(&root).unwrap();
     }
 

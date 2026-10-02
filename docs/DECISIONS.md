@@ -4054,3 +4054,50 @@ baseline on 0.5.0, check 1's runbook (next), checks 1 to 13, the version and the
   snapshot's dpkg database says 0.4.2 and the restore dialog will show the "This snapshot has
   Apsis 0.4.2" line for it, by its rule (6b.2). Expected for check 1 (the binary is the
   0.5.0 build either way); the bump comes before check 9. The runbook's 1e says so.
+- **1c, the "before" numbers, and 1d** (owner, 2026-10-02 11:05): `/home` is 755 root:root;
+  `swapon` shows cryptswap (`dm-0`, 4G) and a zram swap; `getcap /usr/bin/ping` is
+  `cap_net_raw=ep`; seven user Flatpak entries (an app, runtimes and extensions), 1.9G (decision
+  6's figure); `acpid` and `pop-upgrade` `disabled`; kernel 7.1.5-76070105-generic; no cowsay,
+  no marker. 1d: the marker, cowsay `ii`, the kept file in the home folder. Saved to the
+  owner's `check-1c-before.txt`. Next: 1e.
+
+## 2026-10-02 - check 1, step 1e (owner): the dry run refused as `size-unknown`; the fix
+
+**What happened** (apsis-test, 11:07 to 11:09): `check-restore ... ok; home yes, root no,
+current format, apsis no-restore:0.4.2` (the dialog as expected, with the Apsis 0.4.2 line);
+`restore "<baseline>" keep-home safety ... started`; the restore's dry run ran
+(`rsync -a -A -X --numeric-ids --delete --force --sparse --stats --dry-run
+--no-human-readable --exclude-from=... localhost/ /`, 39 s); then `failed: can't restore this
+snapshot: size-unknown`. The window showed "Can't restore" with the size line. No safety
+snapshot was made, nothing was armed, the state folder holds only `restore.filter`.
+
+**Cause** (in the code, reproduced with rsync 3.2.7 locally: the stats line parses with and
+without `--no-human-readable`): the helper's `QuietRunner` reads rsync's standard output only
+to hand it to the callback, and its `run`, `run_streaming` and `run_cancellable` all return
+`RunOutput::stdout` **empty** (by design, since 0.4.0: a create keeps nothing of rsync's
+output). `prepare::dry_run` and the real runner's `copy` read `output.stdout`: always nothing,
+so every dry run was `SizeUnknown`, and the apply's copy would have handed core an empty
+output (6b.10's "skipping file deletion" line never seen). My tests used a fake runner that
+returned stdout in `RunOutput`, which hid it: the fakes didn't behave like the real runner.
+
+**Fix** (tests first; the fakes now stream like `QuietRunner` and keep no stdout):
+- `prepare::dry_run` takes any `Runner` and collects the stream in the callback
+  (`the_dry_run_reads_the_size_from_the_stream`: the size, and `SizeUnknown` without the line).
+- `RealRunner::copy` collects the whole stream for `Copied::new` (the existing copy test now
+  runs against a streaming fake).
+- `RealRunner::tool` runs through `run_streaming` and collects the output: kernelstub's lines
+  reach the journal (`the_boot_refresh_reads_kernelstub_and_reports_a_failure`), and the
+  `findmnt` for a separate `/home` in `open_backup` gets its answer (it would have refused
+  every separate home as "isn't the partition the plan was made with").
+- `mount_uuid` in `prepare.rs` and `service.rs` uses `DirectRunner`, which captures output,
+  and was never affected. `native.rs`'s lsblk and findmnt likewise.
+
+**Also seen**: no password prompt after Restore, although the `restore` action is
+`auth_admin` everywhere (`pkaction`, 1b) and the helper calls polkit with
+`AllowUserInteraction`. The likely reason is the test-only polkit rule on apsis-test (it lets
+the SSH session's account call the helper) if it covers every `io.github.atraxsrc.Apsis.*`
+action; to confirm from its scope, not from its content here. If the rule covers only `list`,
+this is a bug to find.
+
+**Next**: rebuild the .deb, reinstall on apsis-test, re-run 1e from the Restore click. The
+failed preparation left nothing to undo.

@@ -291,9 +291,10 @@ pub fn prepare(request: &Request, state: &Arc<State>, cancel: Arc<Cancel>) -> Re
 }
 
 /// Runs an rsync dry run (`--stats`) and reads its size: `Ok(Err(SizeUnknown))` when the
-/// output has no readable size.
+/// output has no readable size. The output is collected from the stream: the helper's runner
+/// hands it over piece by piece and keeps none of it in `RunOutput::stdout`.
 fn dry_run(
-    runner: &QuietRunner,
+    runner: &impl Runner,
     argv: &[OsString],
     cancel: &Arc<Cancel>,
 ) -> Result<Result<u64, Refusal>> {
@@ -301,7 +302,17 @@ fn dry_run(
         "running {}",
         apsis_core::native::shell_words(argv)
     ));
-    let output = match runner.run_cancellable(argv, &mut |_| false, cancel) {
+    let mut stdout = String::new();
+    let streamed = runner.run_cancellable(
+        argv,
+        &mut |segment| {
+            stdout.push_str(segment);
+            stdout.push('\n');
+            false
+        },
+        cancel,
+    );
+    let output = match streamed {
         Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(Error::Stopped),
         other => other?,
     };
@@ -316,7 +327,7 @@ fn dry_run(
             output.stderr.trim()
         )));
     }
-    Ok(space::dry_run_size(&output.stdout))
+    Ok(space::dry_run_size(&stdout))
 }
 
 /// The filesystem UUID of what's mounted at `point` (`findmnt`).
@@ -355,6 +366,51 @@ mod tests {
     use super::*;
 
     const GIB: u64 = 1 << 30;
+
+    /// Behaves like the helper's `QuietRunner`: rsync's standard output is handed to the
+    /// callback piece by piece and `RunOutput::stdout` stays empty.
+    struct Streaming(&'static str);
+
+    impl apsis_core::Runner for Streaming {
+        fn run(&self, _argv: &[std::ffi::OsString]) -> std::io::Result<apsis_core::RunOutput> {
+            unreachable!("a dry run streams")
+        }
+
+        fn run_streaming(
+            &self,
+            _argv: &[std::ffi::OsString],
+            on_segment: &mut dyn FnMut(&str) -> bool,
+        ) -> std::io::Result<apsis_core::RunOutput> {
+            for line in self.0.lines() {
+                on_segment(line);
+            }
+            Ok(apsis_core::RunOutput {
+                success: true,
+                code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    /// Found in check 1 (2026-10-02): the quiet runner keeps no stdout, so the size must be
+    /// read from the stream, or every restore is refused as `size-unknown`.
+    #[test]
+    fn the_dry_run_reads_the_size_from_the_stream() {
+        let stats = "Number of files: 5 (reg: 2, dir: 3)\n\
+Total file size: 1228800 bytes\n\
+Total transferred file size: 1228800 bytes\n\
+sent 1,228,900 bytes  received 50 bytes\n";
+        let runner = Streaming(stats);
+        let argv: Vec<std::ffi::OsString> = vec!["rsync".into(), "--dry-run".into()];
+        let cancel = apsis_core::native::Cancel::new();
+        assert_eq!(dry_run(&runner, &argv, &cancel).unwrap(), Ok(1_228_800));
+        let none = Streaming("Number of files: 5\n");
+        assert_eq!(
+            dry_run(&none, &argv, &cancel).unwrap(),
+            Err(Refusal::SizeUnknown)
+        );
+    }
 
     #[test]
     fn the_safety_snapshots_comment_names_the_date() {
