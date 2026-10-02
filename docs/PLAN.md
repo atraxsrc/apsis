@@ -1816,6 +1816,12 @@ Checks:
 - 3. Restore home too: the `~` file is gone, and it's in the safety snapshot. **Flatpak** as in
   check 1: `flatpak --user list`, launch one app, `du -sh ~/.local/share/flatpak` before and
   after.
+  **Passed (apsis-test, 2026-10-02; DECISIONS "check 3 passed").** The baseline with "Restore
+  them too": two home files and a `.bashrc` line made after it gone and in the safety
+  snapshot; the Flatpak list and size the same before and after (1.9G), the app starts; the
+  copy 67 s, `done`, `home: restore`. apsis-test's snapshot settings include home, so the
+  "home added to the safety snapshot" branch wasn't exercised by it (the earlier safety
+  snapshots had home too).
 - 4. Stop during the safety snapshot; Cancel at the ready prompt; after a cancel, a normal
   restart doesn't restore. Fill the system disk between ready and Restart now: refused with
   the one line.
@@ -2111,7 +2117,8 @@ Checks:
    line, the metainfo's release. Check 0.4 passed 2026-10-01; **check 1 passed 2026-10-02**
    (third run, after six fixes found by the first two; DECISIONS "check 1 passed"); **check 2
    passed 2026-10-02** (after the kernelstub fix its setup found; DECISIONS "check 2
-   passed"); checks 3 to 13 are next, check 3 (home restored too) first.
+   passed"); **check 3 passed 2026-10-02**; checks 4 to 13 are next, check 4 (Stop, Cancel,
+   a filled disk) first.
 
 Each slice ends with `cargo test --workspace`, clippy `-D warnings`, `cargo fmt` and a summary.
 

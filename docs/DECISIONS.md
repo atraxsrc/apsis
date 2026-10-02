@@ -4382,3 +4382,41 @@ the run that proved the fix on the machine.
 Left on apsis-test: the 1a build of Apsis once more (the baseline's), `~/kernel-b`, the kept
 file. Still open from check 1: launching one Flatpak app after a restore. Next: check 3,
 home restored too, against the same baseline, with its runbook from check 1's.
+
+## 2026-10-02 - check 3 passed (owner, apsis-test): home restored too
+
+The baseline `2026-10-02_10-50-46`, **Restore them too**, safety snapshot on. apsis-test has
+no separate `/home`.
+
+- **Before**: two files in the test account's home made after the baseline (13:46 and
+  14:06), a test line appended to `.bashrc`, the marker and cowsay back; `/home` 755, the home
+  folder 750; seven Flatpak rows in the user install, 1.9G, the home 2.2G.
+- **The preparation**: `check-restore ... ok`; `restore ... restore-home safety ...: started`;
+  the restore's dry run 48 s; the safety snapshot's dry run 33 s; its create 2 min 2 s (home
+  linked to the previous safety snapshot, which had it already: the kept file's link count 2
+  in the new one); `ready` 3 min 53 s after the click.
+- **The offline boot** (73 s of journal): `copying, attempt 1 of 3`; `the copy ended: rsync
+  exited 0` 67 s later (home entered); kernelstub naming 7.1.5, and this time backing up
+  7.0.11 as the previous pair (7.2.6 gone since check 2), so check 2's previous-pair report
+  is cleared by this restore, not by a kernel update; `the restore ended: done`;
+  `Deactivated successfully`; `pop-upgrade-init` skipped on the condition.
+- **After**: both home files "No such file", `.bashrc` ending in the baseline's `fi`, the
+  marker and cowsay gone; the safety snapshot `2026-10-02_14-12-19` has the account's home
+  folder with both files and the test line. `/home` 755 and the home folder 750 as before;
+  the same seven Flatpak rows, 1.9G and 2.2G as before (unchanged files skipped, hard links
+  kept); **Proton VPN, the one app in the user install, starts**. `tools/restore-check.sh`:
+  every line ok. `result.json`: `done`, the baseline, the safety snapshot, `"home":
+  "restore"`. The state folder: `result.json`, `restore.filter`, `rsync-log`.
+
+**Noted**: apsis-test's snapshot settings include home (the earlier safety snapshots carried
+it, as the link count shows), so `prepare`'s "add `/home` to the safety snapshot when home is
+restored" branch wasn't exercised by this check; the core tests cover it. The exclude list's
+`/home` lines weren't listed (the `$uuid` variable wasn't set in that shell); the home folder
+in the snapshot is the proof that matters.
+
+The window's line and tooltip: to be confirmed by the owner (expected `System restored to
+<date>` and "Home folders were restored too."). Left on apsis-test: the 1a build of Apsis once
+more; five safety snapshots on the USB (`11-29-34`, `11-55-27`, `12-57-08`, `13-49-04`,
+`14-12-19`), which can go, one at a time, before or during check 4. Next: check 4 (Stop
+during the safety snapshot; Cancel at the prompt; after a cancel a normal restart doesn't
+restore; a filled system disk between ready and Restart now).
