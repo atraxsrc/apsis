@@ -4256,3 +4256,46 @@ reads "Safety snapshot, before restoring <date>" (`prepare::safety_comment`), an
 dialog shows the snapshot's date and comment in its muted line, as the Restore dialog already
 did, so the row is clear at the last click. README, the man page and UI.md say the new
 wording. Older safety snapshots keep the comment they were made with.
+
+## 2026-10-02 - check 1 passed (owner, apsis-test, run 3)
+
+The baseline `2026-10-02_10-50-46` restored, keep home, safety snapshot on. What the "Passes
+when" list asked for:
+
+- **The dialog**: `home yes, root no, current format, apsis no-restore:0.4.2`; the home radios
+  shown (the snapshot has `/home`), the Apsis 0.4.2 line (expected until the version bump).
+- **The helper's lines**: `restore ... keep-home safety ...: started` 12:55:54; the restore's
+  dry run 40 s; the safety snapshot's dry run 34 s; the create 2 min 45 s (linked to the
+  newest snapshot, the run 2 safety snapshot); `ready` 13:00:14, 4 min 20 s after the click;
+  `restart-to-restore ...: armed; restarting` 13:00:18. Nothing was armed before Restart now.
+- **The offline boot** (`-1`, 59 s of journal): the unit started 1 s into the boot; the start
+  line; `copying, attempt 1 of 3` at +1 s; `the copy ended: rsync exited 0` 53 s later;
+  `refreshing the boot files` 3 s after that (the ESP backup, unlogged on success);
+  kernelstub's lines and the helper's summary of them; `the restore ended: done`;
+  `Finished(Done)`; **`Deactivated successfully`** (run 2's TERM is gone, so the unmount
+  before the reboot call did it); the restart 58 s after the unit started.
+- **`pop-upgrade-init`** skipped on `ConditionPathExists=!/system-update/apsis-helper`; no
+  `upgrade.sh`, `apt-get` or cleanup in that boot. The warnings in that boot are the HP's
+  ACPI ones, present in every boot.
+- **The screen** (owner looked): the Pop logo with "Restoring the system. Don't turn off the
+  computer." alone, for the whole offline boot (one to two minutes as seen), then a normal
+  restart to the greeter. No progress bar was noticed: the one call comes after the copy,
+  3 s before the restart, and the new "plymouth isn't answering" line didn't appear, so
+  plymouth took it. A live bar is 0.5.x's.
+- **`tools/restore-check.sh`**: every line ok; `result.json` `done`, the baseline, the safety
+  snapshot `2026-10-02_12-57-08`, `home: keep`.
+- **The test files**: the marker gone, cowsay gone (`no packages found`), the kept file there
+  with its 11:05 time.
+- **Before and after**: `/home` 755 root:root; cryptswap on (`/dev/dm-0`); `ping`
+  `cap_net_raw=ep`; the same seven Flatpak rows and 1.9G; acpid and pop-upgrade disabled;
+  kernel 7.1.5. Identical to 1c.
+- **The state folder**: `result.json`, `restore.filter`, `rsync-log`; no leftovers line at
+  the helper's start.
+- **The window**: `System restored to <the baseline's date>`; the list has the baseline, three
+  safety snapshots (`11-29-34`, `11-55-27`, `12-57-08`) and the two 0.4 snapshots.
+- **Check 10's `pkaction`**: `auth_admin` everywhere (1b). The prompt itself is shown only
+  without the test rule: on the owner's main machine, at release.
+
+Not done from the list: launching one Flatpak app after the restore (the owner, before check
+3). Six fixes came out of the three runs, all committed today. Next: check 2, the kernel
+rollback, with its own runbook from check 1's.
