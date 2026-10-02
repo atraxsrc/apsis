@@ -734,13 +734,22 @@ impl AppModel {
                 )
                 .into(),
             // Two answers; nothing is armed until Restart now (PLAN 6b.5). Esc cancels.
+            // The date and comment first: the last place to see which row this is (owner,
+            // 2026-10-02, after check 1 restored a safety snapshot by mistake).
             Dialog::Ready { snapshot } => widget::dialog()
                 .title(fl!("ready-title"))
-                .body(format!(
-                    "{}\n\n{}",
-                    fl!("ready-lead"),
-                    fl!("ready-body", date = super::date_of(snapshot))
-                ))
+                .control(
+                    widget::column::with_children(vec![
+                        self.muted_line(snapshot),
+                        body(format!(
+                            "{}\n\n{}",
+                            fl!("ready-lead"),
+                            fl!("ready-body", date = super::date_of(snapshot))
+                        ))
+                        .into(),
+                    ])
+                    .spacing(12),
+                )
                 .primary_action(
                     widget::button::suggested(fl!("restart-now")).on_press(Message::RestartNow),
                 )

@@ -4248,3 +4248,11 @@ code. The runbook's 1h is corrected to what the journal says on a clean run.
 
 Snapshots on the USB now: the two from 0.4, the baseline, and two safety snapshots
 (`11-29-34`, `11-55-27`). Run 3 makes a third; they can go after check 3.
+
+## 2026-10-02 - the safety snapshot's row (owner): both options
+
+After run 2 restored a safety snapshot by mistake (above), the owner chose both: the comment
+reads "Safety snapshot, before restoring <date>" (`prepare::safety_comment`), and the Ready
+dialog shows the snapshot's date and comment in its muted line, as the Restore dialog already
+did, so the row is clear at the last click. README, the man page and UI.md say the new
+wording. Older safety snapshots keep the comment they were made with.

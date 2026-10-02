@@ -34,15 +34,15 @@ pub struct Request {
     pub starter_uid: u32,
 }
 
-/// The safety snapshot's comment: "Before restoring <the snapshot's date as the list shows
-/// it>" (PLAN 6b.4).
+/// The safety snapshot's comment: "Safety snapshot, before restoring <the snapshot's date as
+/// the list shows it>" (PLAN 6b.4; the first words say what the row is, owner 2026-10-02).
 #[must_use]
 pub fn safety_comment(snapshot: &str) -> String {
     let date = parse_snapshot_name(snapshot).map_or_else(
         || snapshot.to_owned(),
         |t| t.strftime("%Y-%m-%d %H:%M").to_string(),
     );
-    format!("Before restoring {date}")
+    format!("Safety snapshot, before restoring {date}")
 }
 
 /// What each destination partition must have free, margin included (`request.json`'s
@@ -428,7 +428,7 @@ sent 1,228,900 bytes  received 50 bytes\n";
     fn the_safety_snapshots_comment_names_the_date() {
         assert_eq!(
             safety_comment("2026-09-25_11-28-53"),
-            "Before restoring 2026-09-25 11:28"
+            "Safety snapshot, before restoring 2026-09-25 11:28"
         );
     }
 

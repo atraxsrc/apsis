@@ -98,7 +98,7 @@ terminal; that design is in git history and DECISIONS.md.
 | Restore the system? | the date and comment (muted); "Puts system files back to this snapshot and restarts twice."; Home folders radios (keep, default; restore them too, with "Files changed after {date} are lost for good." when the safety snapshot is off); the safety snapshot checkbox (on); lines for no home in the snapshot, the old format, which Apsis the snapshot holds; "Experimental · …" (muted). The body scrolls within the window so the buttons always show | Restore (destructive), Cancel |
 | Can't restore this snapshot | the date and comment; the reason in the destructive colour; what to do; after a refused Restart now, "The preparation was dropped. Restore again to measure afresh." | Close |
 | Stop the restore? | "The safety snapshot being made is deleted. Nothing on the system has changed." | Stop (destructive), Keep Going |
-| Ready to restore | "Save your work and close your apps first." and what happens next | Restart now (suggested), Cancel restore |
+| Ready to restore | the date and comment (muted), so the row is clear before the last click; "Save your work and close your apps first." and what happens next | Restart now (suggested), Cancel restore |
 
 A comment the helper would refuse, or a bad pattern, keeps its dialog open with the reason.
 Every dialog opens with libcosmic's default focus (none), so Enter does nothing until Tab
