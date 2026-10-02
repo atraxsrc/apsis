@@ -2004,7 +2004,7 @@ Checks:
    | The baseline snapshot's two kernelstub hooks contain `--preserve-live-mode` | verified | owner, `grep -c` 1 each |
    | `/boot/vmlinuz` is a link to the newest installed kernel on Pop!_OS, so the check and kernelstub agree | verified | owner, 2026-10-01: `/boot/vmlinuz` -> `vmlinuz-7.1.5-76070105-generic`, `/boot/vmlinuz.old` -> 7.0.11; the same for `initrd.img` and `initrd.img.old` |
    | `udevadm wait --timeout` exists | verified | systemd 255.4 |
-   | `C.UTF-8` exists on the HP and in the offline boot (the dry runs and the real restore both run rsync under `LC_ALL=C.UTF-8`) | **unverified** | `ssh apsis-test 'LC_ALL=C.UTF-8 locale charmap'` (expect `UTF-8`) |
+   | `C.UTF-8` exists on the HP (the dry runs and the real restore both run rsync under `LC_ALL=C.UTF-8`) | verified | owner, 2026-10-02: `LC_ALL=C.UTF-8 locale charmap` printed `UTF-8` on apsis-test. In the offline boot: the same system, the same locale files; check 1's rsync lines are the look |
    | Flatpak's ostree repositories are hard-link heavy; `/usr` has few | verified | owner: user repo 1.9G `du` vs 4.1G `du -l`; `/usr` 28 multiply-linked files; system repo empty on apsis-test (decision 6) |
    | Every `List` from the applet opens a new system-bus connection, so each call has its own unique name | verified | `HelperClient::connect` runs `Connection::system()` per call; `list_snapshots`, `background_list`, `poll_job` each connect |
    | A process told Busy lists again on any job's end, and a `List` is itself a job that announces its end: three processes make 3 + 2 + 1 = 6 lists with 3 refusals | verified in the code; the count matches the journal | `app.rs` `on_job` (`changed \|\| self.helper_busy`), `service.rs` `list` (`begin(JobKind::List)`) |

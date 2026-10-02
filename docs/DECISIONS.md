@@ -4028,3 +4028,29 @@ baseline on 0.5.0, check 1's runbook (next), checks 1 to 13, the version and the
   `pop-upgrade`'s `is-enabled`, Pop's upgrade leftovers, and prints the previous boot's
   journal for `apsis-restore.service` and `pop-upgrade-init.service`. `FAIL` lines are what to
   look at; it changes nothing. POSIX sh, `sh -n` clean.
+
+## 2026-10-02 - check 1, steps 1a to 1c (owner, apsis-test); check 10 passed
+
+- **1a**: the 0.5.0 build installed; the policy file has the `restore` action (1), the bus
+  policy names `Helper3` (2).
+- **1b, the locale**: `LC_ALL=C.UTF-8 locale charmap` printed `UTF-8` on apsis-test. The claim
+  in PLAN 6b.13's table is verified for the installed system; the offline boot runs the same
+  system with the same locale files.
+- **1b, check 10**: `pkaction --verbose --action-id io.github.atraxsrc.Apsis.restore` shows
+  the description, the message, vendor Apsis, the icon, and `implicit any`, `inactive` and
+  `active` all `auth_admin`. **Check 10 passed.**
+- **1c, the baseline on 0.5.0**: `2026-10-02_10-50-46`, comment "baseline 0.5.0", created in
+  2m 22s with `--link-dest` of the 2026-10-01 snapshot (the helper's `create ... done`; the
+  list then had 3 snapshots, about 12.0 GB free of 30.1). The journal shows the 0.5.0
+  helper's create path unchanged from 0.4.2.
+- **The runbook's placeholder**: the mount command in 1c was run with `<backup-uuid>` as
+  written, and the shell took it for a redirect ("backup-uuid: No such file"); nothing on the
+  machine was touched (the mount never happened, `umount` said not mounted). The runbook now
+  reads the UUID from `/etc/apsis/config.toml` (`backup_device_uuid`) into `$uuid` once, and
+  every command uses it. The 1c mount step is still to run.
+- **1c, the mount step** (with `$uuid`): three snapshots on the USB (09-30, 10-01, the
+  baseline); the baseline's `info.json` has `"apsis-rsync-flags": "-aAX --numeric-ids"` (the
+  new format) and `"app-version": "apsis 0.4.2"`: **the version isn't bumped yet**, so the
+  snapshot's dpkg database says 0.4.2 and the restore dialog will show the "This snapshot has
+  Apsis 0.4.2" line for it, by its rule (6b.2). Expected for check 1 (the binary is the
+  0.5.0 build either way); the bump comes before check 9. The runbook's 1e says so.
