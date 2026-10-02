@@ -102,6 +102,7 @@ pub fn clear_leftovers(dir: &Path) -> io::Result<()> {
         apsis_core::restore::plan::FILE,
         filter::FILE,
         HOME_FILTER_FILE,
+        SAFETY_EXCLUDE_FILE,
         argv::LOG_FILE,
         restore_state::STATE_FILE,
         "apsis-helper",
@@ -121,6 +122,10 @@ pub fn clear_leftovers(dir: &Path) -> io::Result<()> {
 
 /// The second dry run's filter, written next to the real one while it runs and removed after.
 const HOME_FILTER_FILE: &str = "restore-home.filter";
+
+/// The safety snapshot's exclude list for its dry run, written while it runs and removed
+/// after; the create writes its own copy in the staging folder.
+const SAFETY_EXCLUDE_FILE: &str = "safety.exclude";
 
 /// The whole preparation (PLAN 6b.4's order: the refusals, both dry runs and space, the
 /// safety snapshot, the plan). Runs under the write lock as the `restore` job; `cancel` stops
@@ -227,9 +232,16 @@ pub fn prepare(request: &Request, state: &Arc<State>, cancel: Arc<Cancel>) -> Re
     let safety_snapshot = if request.safety_snapshot {
         let comment = safety_comment(&request.snapshot);
         let create = backend.plan(&comment)?;
-        let mut dry = create.argv.clone();
-        dry.extend(["--dry-run", "--no-human-readable"].map(OsString::from));
-        let size = dry_run(&runner, &dry, &cancel)?.map_err(refused)?;
+        // The create writes its exclude list in the staging folder, which isn't there yet.
+        let safety_exclude = dir.join(SAFETY_EXCLUDE_FILE);
+        fs::write(&safety_exclude, &create.exclude)?;
+        let measured = dry_run(
+            &runner,
+            &apsis_core::native::dry_run_argv(&create.argv, &safety_exclude),
+            &cancel,
+        );
+        let _ = fs::remove_file(&safety_exclude);
+        let size = measured?.map_err(refused)?;
         let backup_usage = usage::of_mount_point(Path::new(MOUNT_POINT))
             .ok_or_else(|| Error::Helper("statvfs of the backup disk failed".to_owned()))?;
         space::check_backup(space::backup_needs(size), backup_usage.free).map_err(refused)?;
@@ -489,6 +501,8 @@ sent 1,228,900 bytes  received 50 bytes\n";
             "request.json",
             "restore.filter",
             "rsync-log",
+            "restore-home.filter",
+            "safety.exclude",
             "state.json",
             "result.json",
             "apsis-helper",

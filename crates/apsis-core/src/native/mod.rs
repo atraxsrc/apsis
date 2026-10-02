@@ -848,6 +848,30 @@ pub fn rsync_argv(source: &Path, snapshot: &Path, link_from: Option<&Path>) -> V
     argv
 }
 
+/// `rsync_argv`'s command as a dry run that can go before the staging folder exists: the
+/// exclude list is read from `exclude_file` instead of the staging copy, no log file is
+/// written, and `--dry-run --no-human-readable` come last. rsync's dry run accepts a
+/// destination that isn't there yet and creates nothing; its "Total transferred file size"
+/// is what a `--link-dest` copy would add to the backup disk.
+#[must_use]
+pub fn dry_run_argv(argv: &[OsString], exclude_file: &Path) -> Vec<OsString> {
+    let mut dry: Vec<OsString> = argv
+        .iter()
+        .filter(|arg| !arg.as_encoded_bytes().starts_with(b"--log-file="))
+        .map(|arg| {
+            if arg.as_encoded_bytes().starts_with(b"--exclude-from=") {
+                let mut replaced = OsString::from("--exclude-from=");
+                replaced.push(exclude_file);
+                replaced
+            } else {
+                arg.clone()
+            }
+        })
+        .collect();
+    dry.extend(["--dry-run", "--no-human-readable"].map(OsString::from));
+    dry
+}
+
 /// The last `total size is N  speedup is X` in rsync's output (Timeshift's `TotalSize` regex,
 /// `RsyncTask.vala:140-141`, `:534-535`), commas removed.
 fn total_size(log: &str) -> Option<u64> {
@@ -926,6 +950,39 @@ mod tests {
                 &format!("--exclude-from={s}/exclude.list"),
                 "/",
                 &format!("{s}/localhost/"),
+            ]
+            .map(OsString::from)
+        );
+    }
+
+    /// The safety snapshot's dry run before the staging folder exists: the exclude list is
+    /// read from elsewhere, nothing is logged, and nothing is written.
+    #[test]
+    fn dry_run_argv_reads_the_given_exclude_list_and_writes_no_log() {
+        let argv = rsync_argv(Path::new("/"), Path::new("/s/x"), Some(Path::new("/s/w")));
+        let dry = dry_run_argv(&argv, Path::new("/var/lib/apsis/restore/safety.exclude"));
+        assert_eq!(
+            dry,
+            [
+                "rsync",
+                "-aii",
+                "-A",
+                "-X",
+                "--numeric-ids",
+                "--recursive",
+                "--verbose",
+                "--delete",
+                "--force",
+                "--stats",
+                "--sparse",
+                "--delete-excluded",
+                "--info=progress2",
+                "--link-dest=/s/w/",
+                "--exclude-from=/var/lib/apsis/restore/safety.exclude",
+                "/",
+                "/s/x/localhost/",
+                "--dry-run",
+                "--no-human-readable",
             ]
             .map(OsString::from)
         );

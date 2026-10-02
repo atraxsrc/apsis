@@ -4101,3 +4101,32 @@ this is a bug to find.
 
 **Next**: rebuild the .deb, reinstall on apsis-test, re-run 1e from the Restore click. The
 failed preparation left nothing to undo.
+
+**Resolved (owner, the same day)**: the test-only rule in `/etc/polkit-1/rules.d/` matches the
+action prefix `io.github.atraxsrc.Apsis.`, so it covers the `restore` action too. The missing
+prompt is the rule's doing, not a bug; the folder is root-only, which is why the first look at
+it found nothing. The runbook's 1e now says so, and check 10 (the prompt on a machine without
+the rule) stays with the owner's main machine.
+
+## 2026-10-02 - check 1, step 1e again (owner): the safety snapshot's dry run had no exclude list
+
+With the stream fix in, the first dry run measured the restore in 31 s. The next step failed:
+
+    rsync: [client] failed to open exclude file .../apsis-staging/<name>/exclude.list
+
+**Cause**: the safety snapshot's dry run reused the create plan's argv unchanged. That argv
+reads `--exclude-from` and writes `--log-file` inside the staging folder, which the create
+makes only when it runs (`execute` -> `build`). The old `size-unknown` bug stopped every run
+before this point, so it never showed.
+
+**Fix**: `apsis_core::native::dry_run_argv(argv, exclude_file)` turns a create's argv into a
+dry run that works before the staging folder exists: the exclude list is read from the given
+file, there is no `--log-file`, and `--dry-run --no-human-readable` come last. The helper
+writes the plan's exclude text to `/var/lib/apsis/restore/safety.exclude` for the run and
+removes it after, the way the home filter is handled; `clear_leftovers` removes it too.
+Checked locally with rsync 3.2.7: a dry run against a destination whose parent doesn't exist
+prints "created directory", creates nothing, and its "Total transferred file size" counts only
+what `--link-dest` can't link. That is the safety snapshot's cost on the backup disk.
+
+The test-only polkit rule on apsis-test is also recorded above as the reason for the missing
+password prompt. Next: rebuild, reinstall, re-run 1e from the Restore click. Nothing to undo.
