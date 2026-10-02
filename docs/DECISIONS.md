@@ -4420,3 +4420,47 @@ more; five safety snapshots on the USB (`11-29-34`, `11-55-27`, `12-57-08`, `13-
 `14-12-19`), which can go, one at a time, before or during check 4. Next: check 4 (Stop
 during the safety snapshot; Cancel at the prompt; after a cancel a normal restart doesn't
 restore; a filled system disk between ready and Restart now).
+
+## 2026-10-03 - a reinstall during a delete left a half-removed snapshot (owner, apsis-test)
+
+After check 3 the applet's status area showed the helper's warning `2026-10-02_14-12-19:
+incomplete: no exclude.list` (check 3's safety snapshot), still there after a reboot on
+2026-10-03. Found from the helper's journal, `dpkg.log` and the USB (read-only mount):
+
+- 14:25:42 `delete-many ["2026-10-02_14-12-19", "2026-10-02_13-49-04", +2 more]: started`
+  (helper pid 4338), `14-12-19` first.
+- 14:26:22 the owner's `apt install --reinstall` of the 0.4.2-1 deb (check 3's 3i step,
+  "reinstall before check 4"). The deb's `prerm` stops `apsis-helper.service` on `upgrade`;
+  14:26:23 `Stopping apsis-helper.service`, `Deactivated successfully` (SIGTERM, the job
+  41 s in, no `deleted` line, no `Finished`). The bus started a new helper at once; its
+  list at 14:26:24 carries the warning.
+- The folder: `info.json` and `rsync-log` (14:14) kept, `exclude.list` gone, `localhost/`
+  5 entries and 7.1G left (`prune::remove_in` unlinks a folder's files in `readdir` order
+  and recurses into its folders, so `exclude.list` went before the long walk). The owner
+  then deleted `11-29-34`, `13-49-04` and `11-55-27` one at a time (about 70 s each, all
+  `done`); `12-57-08` was never listed again and is presumably among the "+2 more".
+
+Not a bug in the delete itself: nothing in the helper removes a finished snapshot's files,
+and `exclude.list` is written and synced before the create's rsync starts. Two gaps, **noted
+here and deferred until after checks 4 to 13 (owner, 2026-10-03)**:
+
+1. **The package's `prerm` stops the helper mid-job.** Right for the binary swap, wrong
+   while a job runs: a delete leaves a half-removed folder; a create leaves a staging folder
+   (already handled: the next create removes it, and the list shows it as a leftover); a
+   restore preparation would leave its staging folder too, and its plan files are cleared
+   on the next start. Candidates: the `prerm` refuses or waits while the helper reports a
+   running job; or the helper, on SIGTERM, finishes the file it's on and announces
+   `stopped` the way a Stop does. The applet should also say something when the helper
+   vanishes mid-job (the window got no `Finished`; both windows just listed).
+2. **A half-deleted snapshot is invisible and stuck.** `NativeRsync::list` turns a folder
+   with `info.json` and no `exclude.list` into a warning only (Timeshift's rule); the window
+   shows no row, so there is nothing to click, and `delete_known` refuses a name that isn't a
+   snapshot or a leftover. The only way out is a root `rm -rf` on the USB. Candidate: list
+   such a folder like a leftover (a row Delete can remove; `delete_snapshot` already accepts
+   it, since it only asks for `info.json`), with the warning as its label.
+
+Cleanup for check 4 (root, the owner): mount the USB read-write and remove
+`timeshift/snapshots/2026-10-02_14-12-19` by hand, which frees 7.1G; nothing in `snapshots-*`
+links to it (the tag links are made after the rename and removed by the delete first).
+Check 4's runbook gets this as a precondition. Also noted: on apsis-test, deleting one
+safety snapshot (2 to 3 GB, mostly hard links) takes about 70 s.
