@@ -1648,7 +1648,9 @@ No root (run by Claude):
   after that. An earlier one would roll them back, and the restore would cut the SSH link it's
   being watched through. The sudoers and polkit files live only on apsis-test: never in the
   repo, never in the .deb, and removed when testing ends. Their exact content is the owner's
-  (it names the test account).
+  (it names the test account). The Wi-Fi connection is a file under `/etc/netplan`, not under
+  `/etc/NetworkManager/system-connections` (found by check 9): a runbook that compares the
+  harness looks there.
 - A small read-only `tools/restore-check.sh`, run with sudo after each restore: ESP vs `/boot`
   hashes, modules for `uname -r`, `dpkg --audit`, `/system-update` gone, the unit's journal,
   `result.json`. A VM harness (OVMF, a Pop!_OS install) isn't worth it for 0.5.0: it needs root
@@ -1895,6 +1897,23 @@ Checks:
 - 8. Recovery drill: from the recovery partition, the README steps with the safety snapshot.
 - 9. Snapshot with Apsis 0.4.x: the dialog line; afterwards 0.4.x runs with the protected
   config; reinstalling 0.5 shows the result.
+  **Passed (apsis-test, 2026-10-03; DECISIONS "check 9 passed").** Without the version bump
+  (owner): the dialog's line comes from the snapshot's dpkg record, and the same build said
+  `This snapshot has Apsis 0.4.1. Install Apsis 0.5 again afterwards to restore again.` for
+  "6b baseline" and the same with 0.4.2 for "baseline 0.5.0" (`apsis no-restore:0.4.1` and
+  `no-restore:0.4.2` in the journal). The snapshot differed from the live system in one
+  package, apsis; same kernel, same harness. The restore: `rsync exited 0` after 58 s,
+  `done`, `Finished(Done)`; afterwards dpkg `0.4.1-1`, both binaries hashing as the
+  snapshot's, `Helper2`, no `restore` action. 0.4.1 started, read the version 2 config,
+  listed four snapshots and left `/var/lib/apsis` byte for byte alone. `apt install` of the
+  current .deb over it (an upgrade, no script error), a log out and in: `System restored to
+  2026-10-01 17:19`. The way back was a restore of "baseline 0.5.0" and a reinstall of the
+  current build; the USB ended with its three snapshots and the free bytes of before. Two
+  limits: the config in the snapshot was byte for byte the live one, so its protection is
+  shown by the filter's rule and the temp-tree test, not by this run; and what needs the
+  bump (dpkg saying 0.5.0 after the install, a snapshot with no Apsis line) moved to the
+  release gate. Four new findings for the triage are in the entry, the first a backup disk
+  the desktop had mounted (the lists failed with the raw mount error).
 - 10. `pkaction --verbose --action-id io.github.atraxsrc.Apsis.restore`: `auth_admin`.
 - 12. (added 2026-10-01) **pop-upgrade-init stays off**: in check 5's or 6's retry boot, the
   journal of that boot shows `pop-upgrade-init.service` skipped on its condition; after any
@@ -2209,6 +2228,11 @@ Checks:
    .deb: one happy-path restore (check 1's flow) and check 13 again.
    **Update 2026-10-03, later**: check 11 passed (DECISIONS "check 11 passed"). Left, in
    this order: checks 9 and 8; then the fixes; then the release gate.
+   **Update 2026-10-03, evening**: check 9 passed (DECISIONS "check 9 passed"), without the
+   version bump (owner): the bump comes once, with the fixes, for the real 0.5.0 .deb. Left,
+   in this order: check 8; then the fixes; then the release gate, which gains one line: its
+   happy-path snapshot is taken with the real 0.5.0 .deb installed, and its Restore dialog
+   shows no Apsis line (`apsis current` in the journal).
 
 Each slice ends with `cargo test --workspace`, clippy `-D warnings`, `cargo fmt` and a summary.
 

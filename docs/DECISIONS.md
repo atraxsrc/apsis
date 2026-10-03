@@ -5223,3 +5223,183 @@ ignored.
 
 **Left**: checks 9 and 8, in that order; then the fixes; then the release gate (one
 happy-path restore and check 13 on the real 0.5.0 .deb).
+
+## 2026-10-03 - check 9 passed: a snapshot that holds Apsis 0.4.1 restored, 0.4.1 ran, 0.5 installed again showed the result
+
+PLAN 6b.12 check 9, runbook `notes/check-9-runbook.md` (untracked), 17:50 to 18:56. Two
+restores: "6b baseline" (`2026-10-01_17-19-36`, the one that holds Apsis 0.4.1), then the way
+back, "baseline 0.5.0" (`2026-10-02_10-50-46`). Both with keep home, the safety snapshot on,
+the disk in, the real kernelstub, the current build (helper `6d6b01b5…`, dpkg `0.4.2-1`).
+What is marked (owner) was seen on apsis-test's screen; the rest is read from the check's
+logs.
+
+**The version bump: not before this check (owner; the runbook's branch A).** This supersedes
+"the bump comes before check 9" (2026-10-02, "check 1, steps 1a to 1c"). The bump happens
+once, with the fixes, for the real 0.5.0 .deb: a bump now would have replaced the build the
+other checks ran on and made a `0.5.0-1` that isn't the release. The check holds without
+it, because the dialog's line is read from the snapshot's dpkg record (`apsis::in_snapshot`),
+not from the running build's version: the same build said 0.4.1 for one snapshot and 0.4.2
+for the other (below). **Added to the release gate**: the gate's happy-path snapshot is
+taken with the real 0.5.0 .deb installed, and its Restore dialog shows no Apsis line (the
+journal's `check-restore` line ends `apsis current`).
+
+**Step 1, the read-only look** (one script with its mode as the first argument, run as
+`live` and inside each snapshot, the backup disk mounted read-only):
+
+- **"6b baseline"**: `apsis 0.4.1-1` installed; the new format (`-aAX --numeric-ids`); this
+  installation; helper `a0caa94206b09ed3`, applet `678127d4b8ed4c9a`; the bus policy names
+  `Helper2`; 5 polkit actions, none of them `restore`. The kernel block equal to the live
+  one (7.1.5, 7.0.11 as the previous pair, both kernelstub hooks with
+  `--preserve-live-mode`), so this is no kernel rollback. The `/opt` items and ping's
+  capability as live. The harness all `same` (2 files in `sudoers.d`, 1 in polkit's
+  `rules.d`, 1 in `/etc/netplan`, 0 in `sshd_config.d`). No leftover of checks 0.3 and 0.4.
+  The package difference to the live system: exactly two lines, `apsis 0.4.2-1` against
+  `0.4.1-1`, of 1745 packages.
+- **"baseline1"**: `apsis 0.3.0-1`, the old format, `Helper1`, 7 actions; no `/opt` items,
+  no capability on ping; the polkit rule missing; another config. Restoring it would have
+  cut the ssh session's access to the helper and deleted check 11's files, as expected.
+- **"baseline 0.5.0"**: `apsis 0.4.2-1`, helper `31ced6a22cb00911` (the first 0.5.0 build);
+  the way back loses no package.
+- **The config inside "6b baseline" is byte for byte the live one.** So an unchanged hash
+  after the restore doesn't show that the config is protected. What shows it: the rule
+  `- /etc/apsis/***` as line 6 of `restore.filter` at the Ready prompt (lines 1 to 6 were
+  the protect list), and the temp-tree test with a real rsync
+  (`everything_on_the_protect_list_is_untouched`, `tests/restore.rs`).
+
+**Deviations from the runbook:**
+
+- **`/etc/netplan` added to the harness comparison** (the inside script and the keyboard
+  collection). On apsis-test the Wi-Fi connection is a netplan file;
+  `/etc/NetworkManager/system-connections` has 0 files, so the runbook as written would
+  have compared nothing for the Wi-Fi and still said the harness was the same (Claude's
+  miss). Live: 1 netplan file, `same` in the snapshot.
+- **The gate of step 8 (`OLD-RUNS`) ignored the `list ... failed: ... already mounted on
+  /media/...` lines.** By the runbook's letter a `failed:` list from 0.4.1 was a fail. These
+  came from the desktop mounting the backup disk (finding 1), after lists that had
+  succeeded; no other `failed:` line was there. The owner passed the step on that reading.
+- **Step 7's verify ran twice**: the first run went to a shell without the runbook's
+  variables (its output was seen, not saved), the second saved the log. Nothing on
+  apsis-test changed between the two and nobody was logged in.
+
+**The dialog line** (owner, word for word): `This snapshot has Apsis 0.4.1. Install Apsis 0.5
+again afterwards to restore again.` for "6b baseline", and the same line with `0.4.2` for
+"baseline 0.5.0". No "Older format" line. The journal:
+
+```
+check-restore "2026-10-01_17-19-36" for :1.N: ok; home yes, root no, current format, apsis no-restore:0.4.1
+check-restore "2026-10-02_10-50-46" for :1.N: ok; home yes, root no, current format, apsis no-restore:0.4.2
+```
+
+**The preparation.** Safety snapshot 1 `2026-10-03_18-03-11`, linked against "baseline
+0.5.0", 1.26 GB (12031221760 to 10766716928 bytes free). `restore.filter`: lines 1 to 6 the
+protect list, line 35 `- /run/apsis/backup`. The plan: `"home": "keep"`, `"old_format":
+false`, kernel 7.1.5.
+
+**The offline boot** (18:10:06 to 18:11:10), `apsis-restore.service`:
+
+| time | line |
+|---|---|
+| 18:10:07.7 | `Restoring the system. Don't turn off the computer.` |
+| 18:10:08.6 | `copying, attempt 1 of 3` |
+| 18:11:06.6 | `the copy ended: rsync exited 0` |
+| | `refreshing the boot files`, kernelstub's lines (7.1.5, `preserve_live=True`) |
+| 18:11:09.99 | `the restore ended: done` |
+| | `apply-restore ended: Finished(Done)`, `Deactivated successfully` |
+
+The copy 58 s. ssh answered at 18:11:37, about three minutes after the click on Restart
+now (owner). `result.json`: `done`, `2026-10-01_17-19-36`, the safety snapshot
+`2026-10-03_18-03-11`, `"home": "keep"`, an empty message. `tools/restore-check.sh`: every
+line ok. Check 12's after-restore state: `pop-upgrade-init.service` skipped on
+`ConditionPathExists=!/system-update/apsis-helper`, nothing from pop-upgrade in that boot,
+`acpid` and `pop-upgrade` `disabled`.
+
+**So the apply finished while the copy replaced Apsis under it.** The process was the
+helper copy under `/var/lib/apsis/restore/`, started before the copy; the copy put 0.4.1's
+binaries, its bus policy (`Helper2`) and its polkit policy (no `restore` action) in place
+of the packaged ones, and the steps after the copy (kernelstub, the result, the cleanup,
+the restart) ran as with any other snapshot.
+
+**After the restore**: dpkg `apsis 0.4.1-1`; the helper and the applet hash as the
+snapshot's (`a0caa94206b09ed3`, `678127d4b8ed4c9a`); `dpkg -V apsis` clean; no `restore`
+polkit action; the Apsis block and the whole package list equal to the snapshot's, the
+kernel block and the `/opt` items equal to before (`RESTORED-TO`). Both markers and cowsay
+gone, the kept file there. The device node under `/opt` is the one of 2026-10-01 again
+(check 11's put-back had left one with a newer time; both baselines hold the older one).
+`rsync-log`: 0 error lines. The "before" numbers identical, the config's hash as before.
+
+**0.4.1 running.** (owner) The panel applets started. The window, after `Try again`
+(finding 1), showed four rows (the three base snapshots and safety snapshot 1), no
+`Restore` button and no result line. Settings showed the backup disk and the two filters:
+0.4.1 read the version 2 config the current build had written. The helper's journal: `list
+... ok, 4 snapshots` at 18:15:42, 18:15:43 and 18:21:32, and one `refused: busy with another
+snapshot operation` (in 0.4.1 a list is a job, so lists refuse each other; fixed in 0.4.2).
+The config and everything under `/var/lib/apsis` (`result.json` among it) were the same
+bytes and the same inodes before and after 0.4.1 ran (`OLD-RUNS`): 0.4.1 neither reads nor
+touches the state folder.
+
+**0.5 installed again.** `sudo apt install -y <the .deb>`, an upgrade: `Unpacking apsis
+(0.4.2-1) over (0.4.1-1)`, no script error, the helper `6d6b01b5c303cd03`. After a log out
+and in (owner): the status line `System restored to 2026-10-01 17:19`; the tooltip
+`Restored from snapshot 2026-10-01_17-19-36. Home folders were kept. Safety snapshot:
+none.` ("none" is false here: fix 6, known); the `Restore` button back; four rows. No
+`result.json:` line in the helper's journal, and the file's hash unchanged
+(`8b5d5a9b502611d2`) from the offline boot through 0.4.1 and the install. Over ssh, `busctl
+call ... RestoreResult` answered `(sssx) "done" "2026-10-01_17-19-36" "" 1791015069`: the
+number is the second of the `done` line, and the test-only polkit rule covers the ssh
+session for this method too.
+
+**The way back** (not part of the pass rule; the run isn't over without it). "baseline
+0.5.0" restored the same way: safety snapshot 2 `2026-10-03_18-41-12`, linked against
+safety snapshot 1, 0.83 GB (10766716928 to 9940791296); the offline boot 18:45:58 to
+18:46:59, the copy 18:46:00 to 18:46:55 (55 s), `done`, `Finished(Done)`; ssh answered at
+18:47:25. `restore-check.sh` every line ok, the `pop-upgrade-init` skip line there; dpkg
+`0.4.2-1` with the helper `31ced6a22cb00911`. Then the current build with `apt install
+--reinstall` (no helper job running): `6d6b01b5c303cd03`. The status line `System restored
+to 2026-10-02 10:50`, five rows. The Apsis, kernel, `/opt` and package blocks, the "before"
+numbers and the config's hash as before the check (`BACK-TO-TODAY`).
+
+**Cleanup.** The check's files in the home folder and the markers removed; `/opt` not
+touched; `dpkg --audit` clean; both safety snapshots deleted from the window, one at a
+time (`delete ... done` twice). Three snapshots, 12031221760 bytes free: exactly the number
+from before the check.
+
+**Findings, for the triage. None is fixed or started here.**
+
+1. **The desktop mounted the backup disk, and the lists failed.** At the first login after
+   the restore of "6b baseline", udisks (the desktop's volume monitor) mounted the backup
+   USB read-write under `/media/<user>/<label>`, 4 s after the login. The helper's lists
+   then failed with `mount failed: ... already mounted on /media/...`, and the window showed
+   that raw error and `Backup disk: not connected`. That was 0.4.1; its raw `apsis-helper:`
+   prefix is already gone in 0.4.2. It didn't happen in check 11's session or at the two
+   later logins of this check: intermittent, cause unknown. How the foreign mount ended
+   isn't in the run's notes. **Unverified: what the current build does with a backup disk
+   that something else has mounted.** To check; and a plain message ("the backup disk is
+   open in another app; unmount it") would beat the raw error.
+2. **The ESP's and `/recovery`'s FAT filesystems log "Volume was not properly unmounted"**
+   in 19 of the 47 boots in the journal, both offline boots and the boots after them among
+   them. Not new (check 5's log has it). To find out: whether it follows Apsis's restarts
+   only or plain reboots too.
+3. **0.4.1's Settings: Cancel does nothing when no value was changed** (owner). To check in
+   the current build.
+4. **The current build: `Restore` with no row selected does nothing and says nothing**
+   (owner; no `check-restore` call in the journal).
+5. Still open from check 11: the filter `- home/Downloads` without a leading slash (live in
+   apsis-test's config), and the blank `kernel:` warning lines.
+
+Not findings: I/O errors on a second USB stick, the owner's own, pulled while mounted at
+18:19 (that device only); one panel applet instead of two at the last login (the second
+monitor was probably off).
+
+**What check 9 established**: the Restore dialog names the Apsis a snapshot holds, from the
+snapshot's own dpkg record; a restore of a snapshot with Apsis 0.4.1 ends `done` although
+the copy replaces Apsis's binaries and its bus and polkit policies under the running
+apply; afterwards the system is the snapshot's, package list included, and 0.4.1 starts,
+reads the config and lists, and leaves `/var/lib/apsis` alone; 0.5 installed over it reads the kept
+`result.json` and shows the result. **Not shown by it** (branch A): dpkg saying 0.5.0
+after the install, and a snapshot with no Apsis line (both at the release gate); the
+config's protection by a changed hash (the two files were the same); a retry boot after a
+copy that had already replaced Apsis's files.
+
+**Left**: check 8; then the fixes, with the version bump; then the release gate on the
+real 0.5.0 .deb (one happy-path restore of a snapshot taken with that .deb, whose dialog
+shows no Apsis line, and check 13).
