@@ -5403,3 +5403,23 @@ copy that had already replaced Apsis's files.
 **Left**: check 8; then the fixes, with the version bump; then the release gate on the
 real 0.5.0 .deb (one happy-path restore of a snapshot taken with that .deb, whose dialog
 shows no Apsis line, and check 13).
+
+## 2026-10-03 - check 9, finding 1: the owner didn't unmount the backup disk
+
+A follow-up to "check 9 passed", finding 1, which left open how the desktop's mount of the
+backup disk ended before the list at 18:21:32 succeeded. The owner's answer: the only disk
+they handled was the second USB stick, their own FAT stick for carrying screenshots to the
+main machine (the one pulled at 18:19, under "Not findings"). They did nothing to the
+backup disk's mount under `/media`.
+
+So that mount went away without the owner unmounting it, somewhere between the failed
+lists and 18:21:32. By what is unknown, and so is whether pulling the other stick had a
+part in it. **Unverified**; read-only, the journal of that stretch on apsis-test:
+
+```
+ssh apsis-test 'journalctl --no-pager --since "2026-10-03 18:11:30" --until "2026-10-03 18:22:00" | grep -i -E "udisks|/media/|unmount|apsis-helper"'
+```
+
+(Its lines carry the host's name, the account's name and the disk's label: none of them
+goes into the repo.) For the triage of finding 1 this means two things aren't understood
+yet, not one: when the desktop mounts the backup disk, and when it lets go of it.
