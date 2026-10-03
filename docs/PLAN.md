@@ -1895,6 +1895,33 @@ Checks:
   tooltip as designed. The copy 55.6 s, the put-back 5.2 s, the unit 65 s. The kernel was
   the same on both sides, so `boot-kept` across a kernel change isn't shown by it.
 - 8. Recovery drill: from the recovery partition, the README steps with the safety snapshot.
+  **Passed (apsis-test, 2026-10-03, the last check; DECISIONS "check 8 passed").** In two
+  sittings. First the baseline `2026-10-02_10-50-46` through the window (keep home, the
+  safety snapshot on; `done`, the copy 55 s), with `RECOVER.txt` on the backup disk read
+  back and equal to `recover::text` byte for byte. Then 6b.11's lines typed in Pop's
+  recovery with the safety snapshot's name: the three mounts, the rsync line with the
+  saved `restore.filter` (a further pass as a dry run found nothing left), the four
+  `--rbind` mounts, `update-initramfs -u -k all` and `kernelstub --verbose` in the chroot,
+  `rm -f /mnt/system-update` (a no-op, nothing was armed). The machine started by itself,
+  ssh answered, the system was the safety snapshot's (both markers, cowsay and the current
+  build back; home, the config, `/var/lib/apsis`, `/opt` and the harness untouched), the
+  ESP's current pair was what `/boot` links to, and Apsis listed and checked a restore.
+  The USB ended with its three snapshots and the free bytes of before. What the run found
+  about the steps, none of it fixed here: `RECOVER.txt` doesn't name the safety snapshot
+  and sits on the disk whose mount line it holds; the lines rebuild both initrds and
+  rewrite the ESP's previous pair, so "Pop_OS-oldkern is never touched" isn't true of the
+  recovery steps themselves; kernelstub in the chroot copies the recovery's command line
+  into the ESP's `cmdline` file (nothing boots from it); `update-initramfs` reached
+  kernelstub once per kernel, not twice (6b.6's "five ESP writes" were three); by hand
+  there is no ESP backup and no check that the result boots; the window keeps naming the
+  restore that was undone. Read from the code and not exercised (same kernel, both
+  snapshots new format): after a kernel rollback the saved filter keeps out the kernel
+  the safety snapshot would bring back, and the note's `-A -X` follows the restored
+  snapshot's format. Not shown: a system that doesn't start, a restore that broke
+  mid-copy, a reinstall. Not looked at: the boot menu's entries word for word, the
+  window's lines after the drill. The recovery there: Pop!_OS 24.04 on kernel 7.0.11 (the
+  installed system's previous kernel), rsync 3.2.7 with ACLs and xattrs, sudo without a
+  password, no network and no ssh server, the backup USB not automounted.
 - 9. Snapshot with Apsis 0.4.x: the dialog line; afterwards 0.4.x runs with the protected
   config; reinstalling 0.5 shows the result.
   **Passed (apsis-test, 2026-10-03; DECISIONS "check 9 passed").** Without the version bump

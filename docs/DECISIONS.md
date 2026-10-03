@@ -5473,3 +5473,359 @@ create does then; it mounts read-write, which the kernel may allow next to the d
 read-write mount, so a create could run while a list can't. For the triage of finding 1:
 test both on apsis-test with the disk mounted by hand in the file manager; then decide
 between a plain message and using the mount that is there.
+
+## 2026-10-03 - check 8 passed: the recovery drill, the README's steps typed in Pop's recovery with the safety snapshot
+
+PLAN 6b.12 check 8, the last one. Runbook `notes/check-8-runbook.md` (untracked), two
+sittings on 2026-10-03. One restore through the window ("baseline 0.5.0",
+`2026-10-02_10-50-46`, keep home, the safety snapshot S on), then the README's "If a
+restore goes wrong" lines typed by hand in Pop's recovery with S's name, then the way back
+to today's state. The build was the current one (helper `6d6b01b5…`, dpkg `0.4.2-1`); no
+bump, no fix before it.
+
+**Where this entry's facts come from.** The owner ran every command and wrote the result up
+with a second guide (a claude.ai conversation, which also reviewed the runbook's revision);
+Claude Code wrote the runbook and its scripts and saw none of the logs. What follows is
+that write-up. Where something wasn't looked at or wasn't reported, it says so.
+
+**Verdict: passed**, with the deviations and the gaps listed below. No stop point was
+reached, and no stage of the way back was needed. Every pass word of the chain was printed,
+in order: `S1-OK`, `SCRIPT-RUNS`, `K-AS-EXPECTED`, `LOOK-OK`, `REDEPLOYED`,
+`STUB-LINES-KNOWN`, the ESP check after step 5b's dry run (the write-up calls it
+`ESP-UNTOUCHED-BY-STUB-DRYRUN`; the runbook's text has `DRY-RUN-LEFT-THE-ESP`),
+`MARKERS-SET`; at the window `PLAN-OK`, `READY-OK`, `RECOVER-AS-CODE`,
+`SAFETY-HOLDS-TODAY`, `RESTORED-TO`, `ESP-IDENTICAL`, `GO-DRILL`; in the recovery
+`MOUNTED-OK`, `DRY-OK`, `COPIED-OK`, `BOUND-OK`, `BOOTABLE`; afterwards `DRILLED-TO`,
+`DRILL-PASSED`, `APSIS-RUNS`, `BACK-TO-TODAY`, `OUT-COPIED`, `NUMBERS-IDENTICAL` three
+times, `CONFIG-AS-BEFORE-THE-CHECK`.
+
+**The owner's answers to the runbook's six questions**: two sittings; "finish the same
+restore" as a dry run only, no second by-hand restore; the README to the letter,
+`update-initramfs -u -k all` included, except for the snapshot's name, an `umount` if the
+recovery automounts, and no further line after a failed one; the save for the worst case
+includes the netplan file; the ESP's `cmdline` file stays as the recovery leaves it; the
+runbook's `bootback` mode only if the way back's stage 1 is reached and only after the
+state has gone to the guide and the guide agrees (never needed).
+
+### Sitting 1: what was settled before anything was changed
+
+- **The baseline** (a read-only look, `S1-OK`): `apsis 0.4.2-1`, helper `31ced6a22cb00911`,
+  applet `cba00afb3a45590a`; its kernel, `/opt` and package blocks equal the live ones
+  (1745 packages, none different); the harness the live one (2 files in `sudoers.d`, 1 in
+  polkit's `rules.d`, 1 in `/etc/netplan`, 0 in NetworkManager's `system-connections`, 0 in
+  `sshd_config.d`); no leftovers. `/home` is part of the root. The config's hash
+  `1e8d387f39671970`.
+- **kernelstub 3.1.4 and the hooks, read on apsis-test** (the runbook had four of these
+  from Claude's memory of the upstream source; three were right, one was corrected):
+  - Live mode is a key in `/etc/kernelstub/configuration`, not a look at the environment.
+    `application.py:145-157`: with `--preserve-live-mode` and `live_mode` true it warns and
+    exits 0; otherwise it sets `live_mode` false. The installed configuration has
+    `live_mode` false, `manage_mode` true, `setup_loader` true. Nothing in the package
+    mentions casper, `boot=` or `/cdrom`.
+  - The root and the ESP come from `/proc/mounts` and `findmnt -n -o UUID --mountpoint`
+    (`drive.py:80`, `108`). Corrected: not from a listing of `/dev/disk/by-uuid`.
+  - The loader entry's options line is built from the configuration
+    (`application.py:254`, `325`, `installer.py:175`), never from `/proc/cmdline`. Only
+    `copy_cmdline` (`installer.py:219-221`) reads `/proc/cmdline`, for the ESP's `cmdline`
+    file.
+  - `opsys.py:37` reads the running kernel's version (`platform.release()`); no use of it
+    was found, and the drill showed none (below).
+  - `update-initramfs` (initramfs-tools 0.142ubuntu25.5pop0): `-k all` through
+    `get_sorted_versions`, `post-update.d` through `run_bootloader`, `backup_initramfs=no`,
+    `MODULES=most`, `COMPRESS=zstd`. The two initrds are 214 MB each.
+- **The recovery, from a look-only boot** (the root mounted by the README's first line, one
+  script run, unmounted, restarted): Pop!_OS 24.04 LTS on **kernel 7.0.11, the same version
+  as the installed system's previous kernel**; the live user has uid 1000 and sudo asks no
+  password; 117 UEFI variables; rsync 3.2.7 with ACLs and xattrs (the installed one is
+  3.2.7 too); no network connected and no ssh server; `getfattr` absent; the recovery
+  partition mounted read-only at `/cdrom`; its clock in UTC. **The backup USB was not
+  automounted**, in the look and in the drill, although the desktop's automount setting is
+  on (a second stick the owner plugged in was automounted). The recovery's boots leave
+  nothing in the installed system's journal: its boot list has no entry for them.
+- **The saves for the worst case**: one archive of the harness files and the three `/opt`
+  files and the list of manually installed packages, in a private folder on the main
+  machine, never in the repo. The owner deletes it when the release gate is done.
+- **The ESP before the check** (sha256, first 16 characters; bytes):
+
+  | file | sha256 | bytes |
+  |---|---|---|
+  | `vmlinuz.efi` | `3ee40cb8f37bf9cb` | 17273344 |
+  | `initrd.img` | `6b63d5e0ee34f38d` | 214288357 |
+  | `cmdline` | `7132d2360e192580` | 167 |
+  | `vmlinuz-previous.efi` | `efe0806b74477346` | 17056256 |
+  | `initrd.img-previous` | `693e72765757298c` | 214015141 |
+  | `Pop_OS-current.conf` | `c040f6946b412da4` | 257 |
+  | `Pop_OS-oldkern.conf` | `d844b1a73f1cc5d5` | 275 |
+
+  The current pair was `/boot`'s 7.1.5 pair, the previous pair the `.old` links' 7.0.11
+  pair.
+
+### The restore through the window
+
+- 20:55:31 the dialog (as the runbook has it): `check-restore … ok; home yes, root no,
+  current format, apsis no-restore:0.4.2`. **No password is asked on apsis-test**: the
+  harness's test-only polkit rule covers `restore` too.
+- 20:57:26 `restore … keep-home safety: started`; the restore's dry run 41 s, S's dry run
+  15 s, S itself 4 min 45 s; `ready` 6 min 28 s after `started`. S cost 1314189312 bytes
+  (12031221760 to 10717032448 free), linked against the newest snapshot.
+- **At the Ready prompt, read-only**: the plan named the baseline, `"home": "keep"`,
+  `"old_format": false`, kernel 7.1.5, no link yet. **`RECOVER.txt` on the backup disk
+  equals `recover::text` for this restore byte for byte** (compared with the three UUIDs
+  replaced by placeholders). The two snapshots' `exclude.list` files are the same bytes
+  (61 lines), so the saved filter was also right for S. `restore.filter`: 114 lines, the
+  six protect lines first, `- /home/***`, one `/root` rule, five rules for kernel 7.1.5, no
+  mount rule outside `/dev`, `/proc`, `/sys`, `/run`. S held the ESP's seven files and
+  `/boot`'s four kernel and initrd files as they were live, the installed helper build,
+  both markers and cowsay.
+- Armed 21:08:32. The offline boot: `apsis-restore.service` 21:09:24 to 21:10:24, the copy
+  55 s (`copying, attempt 1 of 3`, `rsync exited 0`), the boot refresh 4 s (one kernelstub
+  run), the journal in the designed order, ending `apply-restore ended: Finished(Done)`.
+  ssh answered at 21:10:55.
+- After it: `tools/restore-check.sh` every line ok; `result.json` `done`, the baseline, S,
+  keep home (hash `8389da1773edd972`); `rsync-log` 378 lines, 0 error lines; the baseline's
+  builds installed (helper `31ced6a2…`); both markers and cowsay gone; **the ESP's seven
+  hashes as before the check**; `pop-upgrade-init` skipped on
+  `ConditionPathExists=!/system-update/apsis-helper`.
+
+### The drill in the recovery
+
+Times are the recovery's clock (UTC; the installed system is 10 hours ahead).
+
+| | line | result |
+|---|---|---|
+| | the UUIDs from `lsblk -f`, completed with Tab | |
+| 1 to 3 | the three mount lines (root, ESP, backup read-only) | no output |
+| | the script's `mounted`, 11:30 | the three mounts are the ones `RECOVER.txt` names; nothing armed; the ESP as after the restore |
+| | the script's `dry`, 11:32 | both rsync lines as dry runs, below |
+| 4 | the rsync line with S's name | ran twice (deviations); the second exited 0 |
+| | the script's `copied`, 11:42 | a further pass as a dry run: 0 lines. Both markers, cowsay and the helper `6d6b01b5…` back; `result.json`, the config and the ESP untouched by the copy |
+| 5 | the four `--rbind` mounts | no output |
+| | the script's `bound`, 11:44 | the chroot sees `/` and `/boot/efi`, the UEFI variables are there; kernelstub's dry run below |
+| 6 | `chroot /mnt update-initramfs -u -k all` | exit 0, about 2 minutes, no `W:` and no `E:` line |
+| 7 | `chroot /mnt kernelstub --verbose`, 11:49 | exit 0; the ESP byte for byte as the hooks had left it |
+| 8 | `rm -f /mnt/system-update` | no output (nothing was armed: a no-op) |
+| | the script's `boot`, 11:50 | the ESP's current pair is what `/boot` links to; `BOOTABLE` |
+| | "Restart." | the desktop panel's restart; nothing was unmounted by hand |
+
+**The two dry runs before the copy.**
+
+- "Finish the same restore" (the baseline's name): exit 0, 213 lines, 104 changes (73
+  changed files, 11 deleted, 20 new folders; 204 under `var`, 8 under `etc`). More than
+  the "few or none" the runbook expected, and all of it the live system's own writing
+  since the offline boot: CUPS's state, `vconsole.conf`, kernelstub's configuration,
+  rotated dpkg backups, chrony's cookies, logrotate's status, the empty
+  `system-update.target.wants` folder. It was not run for real.
+- "Pick the safety snapshot": exit 0, 331 lines, 169 changes (82 changed files, 5 deleted,
+  58 new files, 22 new folders, 2 new links; 239 under `var`, 82 under `usr`, 9 under
+  `etc`). Nothing under `/home`, the ESP, `/recovery`, `/var/lib/apsis`, `/etc/apsis`;
+  not `fstab`, not `crypttab`; nothing for `/opt`, sudoers, polkit, netplan, ssh, `passwd`,
+  `shadow` or `group`; nothing for `/boot`. Lines for both markers, cowsay and the helper.
+
+**kernelstub inside the chroot.**
+
+- It did not follow the running kernel. The recovery runs 7.0.11; the dry run named
+  `vmlinuz-7.1.5` and `initrd.img-7.1.5` (the newest in `/boot`, which the links name) and
+  the installed configuration's options, with nothing of the recovery's command line.
+- `bootctl is-installed` says yes inside the chroot, `ischroot` knows it is one, and **no
+  `kernel-install` line appeared** during `update-initramfs`.
+- **`update-initramfs -u -k all` ran kernelstub twice, once per kernel**, both times with
+  `--preserve-live-mode`, both writing the 7.1.5 pair. The README's own `kernelstub
+  --verbose` then changed nothing. So three writes of the ESP, not the five the runbook
+  expected from PLAN 6b.6 and the checks 0.1 to 0.3 entry ("twice per kernel", read from
+  the hooks, never counted in a run). Why `kernel-install`'s path didn't reach kernelstub
+  here, and whether it does on the installed system outside a chroot, is **not known**.
+- kernelstub saves its configuration file on every run (the time changes, not the bytes).
+
+**What the README's lines changed on the ESP and in `/boot`** (the script's diff, nothing
+else differed):
+
+| file | before | after |
+|---|---|---|
+| `initrd.img` | `6b63d5e0ee34f38d`, 214288357 bytes | `898ffd73f4349f62`, 214288328 bytes |
+| `initrd.img-previous` | `693e72765757298c`, 214015141 bytes | `661395e0b26df26c`, 214014854 bytes |
+| `cmdline` | `7132d2360e192580`, 167 bytes | `69a070220c8681b5`, 224 bytes |
+
+`/boot`'s two initrds changed the same way. `vmlinuz.efi`, `vmlinuz-previous.efi` and both
+entry files have the bytes of before (the entries were rewritten with the same bytes). The
+`cmdline` file now holds the recovery's command line (its initrd, `boot=casper`, a host
+name parameter, `noprompt`, the live medium): kernelstub copies `/proc/cmdline`, and in the
+chroot `/proc` is the recovery's. Nothing boots from that file; the entries' options come
+from kernelstub's configuration. Left as it is (the owner's answer); the next kernelstub
+run from the installed system writes it again.
+
+### The first normal boot, and the system afterwards
+
+- It started by itself at 21:54:19 (local), no menu, no text console, no wait; ssh
+  answered 8 s later.
+- **The system was S's** (`DRILLED-TO`): the Apsis block, the whole package list, the
+  kernel block, the `/opt` items and both markers with cowsay equal S's, and S's harness
+  files equal the live ones. Helper `6d6b01b5c303cd03`, dpkg `0.4.2-1`. `result.json`'s
+  hash unchanged by the drill, the config's hash `1e8d387f39671970`, 0 failed units,
+  `restore-check.sh`'s part 3 (the ESP against `/boot`, the modules, the entries) all ok.
+- The live tree against S after that boot, as a read-only dry run with the saved filter:
+  101 lines, 84 changes, 82 of them under `var`; outside it `boot/initrd.img-7.0.11`
+  (rebuilt; 7.1.5's has no line because the filter's kernel rule keeps it out), ten
+  `modules.*` files of 7.0.11 with new times (depmod), `vconsole.conf`, CUPS's state and
+  kernelstub's configuration. Nothing under `usr/bin`, `usr/sbin`, `usr/libexec`, `opt`,
+  sudoers, polkit or netplan.
+- **Apsis afterwards**: an applet process running, the helper's `list … ok, 4 snapshots`,
+  `check-restore` ok for the baseline. At that look the dialog's own Restore was clicked
+  by mistake: **Stop worked** (`stopped`, rsync's group ended, nothing armed, nothing
+  written, four snapshots and the same free bytes afterwards). So `APSIS-RUNS` is a
+  mechanical word in this run.
+- **The way back**: the simulated purge named cowsay alone; both markers and cowsay
+  removed; `BACK-TO-TODAY` (Apsis, the package list, the kernel block, the `/opt` items
+  and the empty leftovers block as before the check), the numbers and the config's hash
+  as before. The recovery's 25 log files copied to the main machine and compared by hash
+  before the check's folder was removed. S deleted from the window. **The USB: the three
+  base snapshots, 12031221760 bytes free, exactly as before**; `RECOVER.txt` still there,
+  naming the baseline.
+
+### The README against what had to be typed
+
+1. **The UUIDs came from `lsblk -f` only.** `RECOVER.txt` is on the disk that the third
+   line mounts, so it can't supply the first three lines (F5). A first attempt at a mount
+   line was wrong (a character of the UUID and ` /mnt` missing) and was caught before
+   Enter. Paths by UUID and Tab completion worked.
+2. No `umount` was needed: the recovery didn't automount the backup USB.
+3. **S's name isn't in `RECOVER.txt`** (0 times, F3). It came from the plan at the Ready
+   prompt, the runbook's `names` file and the script's printed line.
+4. **The rsync line as printed restores the baseline again, not S**; the name has to be
+   changed by hand. In this run the three-line command was taken from the script's output
+   with S's name already in it (a deviation from "edit `RECOVER.txt`'s text"). It pasted
+   as one command and ran at once; the README's one-line form was then typed as well.
+   Both forms work as one command.
+5. `sudo` never asked for a password.
+6. `update-initramfs -u -k all`: both initrds rebuilt, kernelstub twice, about 2 minutes.
+7. `kernelstub --verbose`: nothing the hooks hadn't done.
+8. "Restart." was the panel's restart; the README says nothing about unmounting, and
+   nothing was unmounted.
+9. **What the README doesn't say and a person would need**: nothing about the installer's
+   window that the recovery opens (a click on its install choices is a reinstall); nothing
+   about what a failing line means; no check that the result boots (the runbook's script
+   did that); no way to find the safety snapshot's name; no ssh in the recovery, so
+   whatever goes wrong is read from the screen.
+
+### Findings. None is fixed or started; all go to the triage with the fixes
+
+**From reading the code before the run (the runbook's F1 to F8):**
+
+| | finding | this run |
+|---|---|---|
+| F1 | the saved filter always keeps out the kernel that ran when the restore was prepared (`prepare.rs:185`; nothing rewrites `restore.filter`). After a kernel rollback the safety snapshot holds that kernel, and the README's line with the saved filter would not bring its modules and `/boot` files back, while dpkg's record and the `/boot` links name it | read only: 7.1.5 on both sides |
+| F2 | "finish the same restore" by hand doesn't finish a rollback: the kept kernel stays, no README line removes it, and the bare `kernelstub --verbose` takes the newest kernel in `/boot`, where the apply names the snapshot's | read only |
+| F3 | `RECOVER.txt` never names the safety snapshot, although it is written after the snapshot is made (`recover::text` gets only the restored snapshot's name) | shown |
+| F4 | `RECOVER.txt`'s `-A -X` follows the restored snapshot's format; a safety snapshot is always new format, so after restoring an old-format snapshot the note's line is wrong for it | read only: both new format |
+| F5 | `RECOVER.txt` is on the disk whose mount line it contains | shown |
+| F6 | the README's steps rebuild both initrds and rewrite the previous pair on the ESP, so "the Pop_OS-oldkern entry is never touched by a restore" doesn't hold for the README's own recovery steps | shown: `initrd.img-previous` has new bytes |
+| F7 | by hand there is no backup of the ESP and no check of what was written; the apply has both | a statement about the README's text; the runbook's script supplied the check |
+| F8 | `result.json` is protected, so after a by-hand restore the window still names the restore that was undone | the mechanism shown (`result.json`'s hash unchanged by the drill, still naming the baseline while the system is S's); the window's line itself was not reported |
+
+Also from reading: with `restore.filter` missing, rsync 3.2.7 stops with exit 11 before it
+copies or deletes anything (run on the main machine, not on apsis-test), so the README's
+line fails safely and then offers nothing. Relevant to the planned removal of the filter
+after a refused restart: after a refusal nothing needs recovering, but the filter must
+stay after a restore that ran.
+
+**New from the run (the write-up's N1 to N8):**
+
+- **N1. The FAT "Volume was not properly unmounted" lines** (check 9's finding 2) for the
+  ESP and the recovery partition appear at every boot since check 5, also after clean
+  unmounts (systemd unmounted both at 21:09:03; the boots at 21:09:23, 21:10:44 and
+  21:54:19 warned). The recovery doesn't cause them: the boot after the look-only session
+  warned although that session never mounted the ESP. Consistent with the vfat driver
+  leaving a dirty flag that is already set until `fsck.fat` clears it, with check 5's
+  power cut as the candidate. **Unverified**; `fsck.fat` was not run.
+- **N2.** Preparing a restore deletes the previous restore's `rsync-log` (as designed:
+  `clear_leftovers` in the helper's `prepare.rs`). A Stop leaves a `restore.filter` of the
+  stopped preparation and no `request.json`. So the filter in the state folder is the
+  last preparation's, not necessarily the last restore's: after a restore, a preparation
+  that is then stopped or cancelled replaces the filter the README's line would use.
+- **N3.** Each restore leaves an empty `/etc/systemd/system/system-update.target.wants/`
+  (the arm makes the folder; `remove_arm_files` removes the link in it, not the folder).
+- **N4.** The mistaken click on Restore, and Stop working (above).
+- **N5.** The recorded terminal session is noisy (history keys, typed-ahead lines); the
+  script's per-step logs are the reliable record. `sudo script` fails on a file in `/tmp`
+  owned by another user; plain `script` worked.
+- **N6.** `/etc/vconsole.conf` is a regular file in S; each boot makes it a link to
+  `default/keyboard`, and the desktop login writes a regular file again. Harmless churn
+  that a dry run shows as a new file.
+- **N7.** The greeter boot's warnings (COSMIC's theme watchers, a D-Bus denial for
+  `pop-upgrade-notify`, wireplumber's assertions) were not compared with an earlier
+  normal boot.
+- **N8.** With no applet running (the greeter only), no `apsis-*` unit is loaded.
+
+### Deviations from the runbook
+
+- Sitting 1: an env file sourced per shell (the main machine's `ls` and `cat` are aliased;
+  `grep` and `diff` are colour wrappers, left as they are); two `| tee` replaced by a
+  redirect; two more read-only greps of kernelstub's source into files of their own; the
+  look's pre-check also asked for `K-AS-EXPECTED`; the first command in the recovery
+  mistyped once (sudo printed its usage, nothing ran).
+- After sitting 1 the runbook took seven proposals from the owner's side and two review
+  notes: the script reads kernelstub's dry-run lines for the kernel, the initrd and the
+  boot options itself; the drill starts only with `ESP-IDENTICAL`; the cleanup only after
+  the recovery's logs are on the main machine with the same bytes; a simulated install
+  and purge showing cowsay alone; "Cancel, never Restore" where a dialog is only looked
+  at; power and an idle inhibitor before the long lines; an ESP check after the dry run
+  on the installed system. The script was copied to apsis-test a second time for it.
+- **The rsync line ran twice, both times with S's name** (item 4 above). The first run's
+  exit status was not captured; the second exited 0 and the pass after it found nothing
+  left to do.
+- At step 13 the dialog's Restore was clicked instead of Cancel (N4).
+
+### What check 8 established
+
+The README's commands, typed in Pop's recovery as it is on this machine, turned a system
+restored to one snapshot into the safety snapshot's system and left it starting by itself:
+the recovery has what the lines need (rsync with ACLs and attributes, sudo, the UEFI
+variables, the disks by UUID); the saved filter works unchanged against `/mnt/` and keeps
+`/home`, the config, the state folder, the ESP, `fstab`, `crypttab`, `/opt` and the harness
+out of the copy and of the deletions; `update-initramfs` and
+kernelstub work in a chroot entered from the recovery, with kernelstub taking the newest
+kernel in `/boot` and the installed configuration's options, not the running kernel and
+not the recovery's command line; `RECOVER.txt` on the backup disk is `recover::text`
+word for word; and Apsis lists and checks a restore afterwards.
+
+**Not shown by it:**
+
+- a system that doesn't start: nothing was broken, the root, the ESP and the installed
+  tools were good before the first line was typed;
+- a restore that failed or broke mid-copy (a mixed tree, the link still there);
+- a reinstall, and so the saved harness archive, which was never used;
+- a kernel rollback by hand (F1, F2), an old-format snapshot (F4), a restore with home
+  restored, a separate `/home`, an encrypted root, a live USB in place of the recovery
+  partition, a person who has never seen the steps;
+- **`--numeric-ids`, ACLs, attributes and capabilities coming through the recovery's
+  rsync**: the files that carry them (the three under `/opt`, ping) were the same in the
+  baseline and in S, so the by-hand copy had no line for them. They were as before
+  afterwards, which shows only that the copy left them alone. Check 11 showed them for the
+  apply, not for the recovery;
+- **the systemd-boot menu's entries**: not read word for word in either sitting (the owner
+  recalls a new-kernel entry, an old-kernel entry and Recovery);
+- **the window after the drill**: the status line, its tooltip, the rows, the `Last
+  snapshot` and `Backup disk` lines were not reported;
+- **editing `RECOVER.txt`'s own rsync line before it runs**: the line was taken from the
+  script with the name already in it;
+- the first rsync run's exit status and the copy's duration in the recovery;
+- whether the idle inhibitor of the runbook worked: not reported;
+- the runbook script's `bootback` mode and its by-hand equivalent: never run on a real
+  machine.
+
+### Left on apsis-test
+
+Today's system as before the check (the package list, the kernel block, the `/opt` items,
+the config, helper `6d6b01b5…`, dpkg `0.4.2-1`), **except**: both initrds in `/boot` and
+the two initrds on the ESP are the ones rebuilt in the chroot (the filter's kernel rule
+keeps the running kernel's initrd through every later restore, so 7.1.5's stays until the
+next kernel or initramfs update); the ESP's `cmdline` file holds the recovery's command
+line; `result.json` is this check's restore; kernelstub's configuration and log are
+rewritten. By N2 and N4 the state folder should now hold `result.json` and the stopped
+preparation's `restore.filter` and no `rsync-log`: an inference of Claude's, not read
+back. No marker, no cowsay, no file of the check; `/opt` untouched. The USB: the three
+base snapshots, 12031221760 of 30120226816 bytes free.
+
+**Left**: every check of PLAN 6b.12 has now passed (13 is rerun at the gate). Next the
+triage of this entry's findings together with the fixes of the two triage entries, the
+version bump, and the release gate on the real 0.5.0 .deb (one happy-path restore of a
+snapshot taken with it, whose dialog shows no Apsis line, and check 13).
