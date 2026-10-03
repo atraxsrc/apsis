@@ -5829,3 +5829,28 @@ base snapshots, 12031221760 of 30120226816 bytes free.
 triage of this entry's findings together with the fixes of the two triage entries, the
 version bump, and the release gate on the real 0.5.0 .deb (one happy-path restore of a
 snapshot taken with it, whose dialog shows no Apsis line, and check 13).
+
+## 2026-10-04 - corrections to the check 8 entry (owner)
+
+The entry above ("check 8 passed") stands as written; these four points correct it.
+
+1. **`ONLY-COWSAY` was printed.** It is step 6's simulated install (apt would install
+   cowsay and nothing else) and the gate for the markers: `MARKERS-SET` requires it. The
+   entry's list of pass words left it out. It belongs to sitting 2.
+2. **Which words belong to which sitting.** Sitting 1 is the runbook's steps 1 to 5:
+   `SCRIPT-RUNS`, `S1-OK`, `K-AS-EXPECTED`, `LOOK-OK`. Sitting 2 starts at step 5b:
+   `REDEPLOYED`, `STUB-LINES-KNOWN`, the ESP re-check word, `ONLY-COWSAY`, `MARKERS-SET`,
+   and then the window's, the recovery's and the later words as the entry lists them. The
+   entry gave one list with no boundary between the sittings.
+3. **The ESP re-check word.** `ESP-UNTOUCHED-BY-STUB-DRYRUN`, the word the owner saw, is
+   the second guide's own: its re-check of the ESP after step 5b's kernelstub dry run,
+   saved as the "esp after stub" log. The runbook's name for that check is
+   `DRY-RUN-LEFT-THE-ESP`. One check, two names; the entry gave both without saying whose
+   each was.
+4. **The state folder after the mistaken Restore and Stop was read back, not inferred.**
+   After the Stop at step 13 (22:03) it held `restore.filter` (2181 bytes) and
+   `result.json` (hash `8389da1773edd972`, this check's restore) and nothing else: no
+   `rsync-log`, no `request.json`. So in "Left on apsis-test" the sentence marked "an
+   inference of Claude's, not read back" is **shown**, and with it N2: the preparation
+   removed the previous restore's `rsync-log`, and the Stop left the stopped preparation's
+   filter and no plan.
