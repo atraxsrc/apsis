@@ -5854,3 +5854,252 @@ The entry above ("check 8 passed") stands as written; these four points correct 
    inference of Claude's, not read back" is **shown**, and with it N2: the preparation
    removed the previous restore's `rsync-log`, and the Stop left the stopped preparation's
    filter and no plan.
+
+## 2026-10-04 - triage of checks 1 to 9 and the check 8 findings, and the owner's decisions
+
+Every check of PLAN 6b.12 has passed (13 is rerun at the gate). This entry is the triage of
+what they found: the numbered fixes and their companions from the two triage entries of
+2026-10-03, check 9's findings, check 8's F1 to F8 and N1 to N8, the nine "README against
+what had to be typed" items, and the kernelstub count. **Nothing here is built yet**, and
+the version isn't bumped. The older entries stand as written.
+
+**How to read the tables.** Evidence: **V** = seen on apsis-test or in a run; **R** = read
+in the code or reasoned, never run. Decision: **before** = fixed in code before 0.5.0;
+**docs** = README or docs only, before 0.5.0; **after** = after 0.5.0; **no fix** = not a
+fix. Every decision is the owner's, marked (owner): stated on 2026-10-03 (the two triage
+entries), or on 2026-10-04, when the owner decided the pulls and the fixes' shapes and
+confirmed Claude's recommendations for all the other rows. Nothing is left open; the last
+three points to be decided are listed at the end.
+
+### The items of the two earlier triage entries
+
+| | item | found | evidence | decision | why, or how |
+|---|---|---|---|---|---|
+| 1 | fix 1: the `prerm` stops the helper mid-job | "a reinstall during a delete" | V | before (owner) | "Fix 1 and 1b" below |
+| 1a | the window says nothing when the helper vanishes mid-job | the same entry | V | after (owner) | with fix 1 the script no longer cuts a job; what is left is a helper that crashes |
+| 1b | a package operation while a restore is armed | reading for check 7, `notes/armed-upgrade.md` | R; that the timer's service fails once the packaged helper is gone is unverified | before (owner) | "Fix 1 and 1b" below |
+| 2 | fix 2: a half-deleted snapshot is invisible and stuck | the same entry as fix 1 | V | before (owner) | "Fix 2" below |
+| 3 | fix 3: a refused Restart now is logged `failed:` | check 4 | V | before (owner) | `Error::RestoreRefused` joins `describe_error`'s refused list. It then also covers the preparation's refusals, all of which come before anything is written |
+| 4 | fix 4: the status area stays `Preparing restore · ready` after a refused restart | check 4 | V | before (owner) | `on_restart_answered` sets the status when it opens the refusal dialog |
+| 5 | fix 5: `problems` shows the window line of `done` | check 6 | V | before (owner) | a line of its own that says some files weren't restored and names the log |
+| 6 | fix 6: the result tooltip's home and safety-snapshot lines are fixed strings | check 6; seen false in check 9 ("Safety snapshot: none") | V | before (owner): carry both fields | "Fix 6 and RECOVER.txt" below |
+| 7 | `boot-broken` shown as `boot-kept` | reading for check 7 | R | before (owner) | a line and tooltip of its own; "put back" is false for it |
+| 8 | the `boot-kept` tooltip names the wrong cause | check 7 | V | before (owner) | wording that covers a kernelstub that failed and a check that failed; the README's two places that say "didn't check out" change with it |
+| 9 | nothing of rsync's errors is logged on a plain exit 23 | check 6 | V | before (owner) | "Item 9 and N3" below |
+| 10 | `restore.filter` left behind after a refused restart | check 4 | V | before (owner), as part of Pull 1 | "Pull 1" below |
+| 11 | no `boot-kept` case in `tools/restore-check.sh` | reading for check 7; check 7 showed it can't tell | R | after (owner, 2026-10-03) | due before any check that could end `boot-kept` across a kernel change; it can't be exercised without such a restore |
+| 12 | the refusal at Restart now with `/pop-upgrade` present | check 7's step 0, skipped on purpose | not run | at the release gate (owner) | the regression test for fixes 3 and 4 and for Pull 1's removal |
+| 13a | Stop logs `stopping, SIGTERM ...`, the runbook expected `ok` | check 4 | V | no fix (owner) | the runbook's expectation was the wrong one; the line says more than `ok` |
+| 13b | a refused restart logs `plan removed: request.json`, not `plan removed (refused ...)` | check 4 | V | before (owner) | falls out of Pull 1: one path removes a plan, with one wording |
+| 13c | `failed:` where `refused:` is due | check 4 | V | fix 3 | |
+
+### Check 9's findings
+
+| | item | evidence | decision | why, or how |
+|---|---|---|---|---|
+| C1 | the desktop mounts the backup disk and the lists fail with `mount`'s raw error | V on 0.4.1 (the journal); R for the current build (the same `mount_argv`); a create or a restore's preparation beside a foreign mount: unverified; what makes the desktop mount it: unknown | a probe at the release gate (owner); one README troubleshooting row (owner); the plain message and "use the mount that is there": after (owner: nothing beyond the probe in 0.5.0) | the probe decides whether a write path misbehaves; if one does, that is a new finding |
+| C2 | the FAT "Volume was not properly unmounted" lines (also N1) | presence V; the cause (a dirty flag left by check 5's power cut) unverified | no fix (owner) | not Apsis's; `fsck.fat -n` was **not** run; nothing about their cause goes into the README |
+| C3 | Settings' Cancel does nothing when no value was changed | seen on 0.4.1; R for the current build: the button is disabled until a value changes (`on_press_maybe(dirty && !busy)`), the back arrow leaves | before (owner) | Cancel is always clickable and leaves the page |
+| C4 | Restore with no row selected does nothing and says nothing | R: the button is disabled without exactly one real snapshot selected, as Delete is; that fits "no `check-restore` call" | no fix in 0.5.0 (owner) | PLAN 6b.8 says no tooltip; the same behaviour as Delete |
+| C5a | the filter `- home/Downloads` without a leading slash | V (the code; rsync on a temp tree on the main machine); whether anything on apsis-test matches it: unverified | docs: one sentence in the README's Filters section (owner); a hint in Settings: after (owner) | a relative pattern is a legitimate rsync rule and can't be refused |
+| C5b | the blank `kernel:` warning lines | V | no fix (owner) | the firmware's ACPI dumps; the runbooks' filter gained `kernel: *$` |
+
+### Check 8: F1 to F8
+
+| | item | evidence | decision | why, or how |
+|---|---|---|---|---|
+| F1 | the saved filter keeps out the kernel that ran at the preparation, so a by-hand go-back after a rollback doesn't bring that kernel's files back | R | docs now, the fix after (owner) | "Pull 2" below |
+| F2 | "finish the same restore" by hand doesn't finish a rollback | R | docs now, the fix after (owner) | "Pull 2" below |
+| F3 | `RECOVER.txt` never names the safety snapshot | V | before (owner) | "Fix 6 and RECOVER.txt" below |
+| F4 | the note's `-A -X` follows the restored snapshot's format | R | before (owner) | each command gets its own flags |
+| F5 | the note is on the disk whose mount line it holds | V | before (owner) | the arm keeps a copy of the note in the state folder, readable after the first mount line; the README says the UUIDs come from `lsblk -f` |
+| F6 | "Pop_OS-oldkern is never touched" is false for the by-hand steps | V | docs (owner) | the sentence is corrected in the README, the note and PLAN 6b.11; `update-initramfs -u -k all` stays in the steps, as drilled |
+| F7 | by hand there is no ESP backup and no check of what was written | a statement about the text | docs (owner) | the README gains the compare lines the drill's script ran, and says that no backup of the ESP is made by hand |
+| F8 | `result.json` is protected, so after a by-hand restore the window names the restore that was undone | the mechanism V; the window's line was not reported | docs (owner): one sentence; no fix in code | the protection is on purpose |
+
+### Check 8: N1 to N8
+
+| | item | evidence | decision | why, or how |
+|---|---|---|---|---|
+| N1 | the FAT lines | as C2 | no fix (owner) | as C2 |
+| N2 | a preparation deletes the last restore's `rsync-log`, and a stopped one leaves its own filter in place of the last restore's | V (the corrections entry, point 4) | before (owner) | "Pull 1" below |
+| N3 | each restore leaves an empty `/etc/systemd/system/system-update.target.wants/` | V | before (owner) | "Item 9 and N3" below |
+| N4 | the mistaken click on Restore; Stop worked | V | no fix (owner) | what it cost is N2 |
+| N5 | the recorded terminal session is noisy | V | no fix (owner) | a runbook convention: the script's per-step logs are the record |
+| N6 | `/etc/vconsole.conf` changes at every boot and login | V | no fix (owner) | a runbook expectation for dry runs |
+| N7 | the greeter boot's warnings weren't compared with an earlier boot | not looked at | no fix (owner) | |
+| N8 | with no applet running, no `apsis-*` unit is loaded | V | no fix (owner) | the helper is started by the bus on demand, by design |
+
+### The README against what had to be typed
+
+| | item | decision |
+|---|---|---|
+| R1 | the UUIDs came from `lsblk -f` only | docs (owner), with F5 |
+| R2 | no `umount` was needed in Pop's recovery; another recovery or a live USB may automount the backup disk (unverified) | docs (owner), worded as "if it is mounted already" |
+| R3 | the safety snapshot's name is nowhere | F3 (owner), and one read-only line in the README to find it by hand (owner) |
+| R4 | the printed rsync line restores the same snapshot again; the README's one-line form has run-together spaces | docs (owner): the note's two labelled commands |
+| R5 | `sudo` asked no password | no fix |
+| R6 | `update-initramfs` takes about two minutes and rebuilds both initrds | docs (owner) |
+| R7 | `kernelstub --verbose` changed nothing after the hooks | no fix (owner); the line stays |
+| R8 | "Restart." says nothing about unmounting | docs (owner): the panel's restart, nothing unmounted, as drilled |
+| R9 | not said: the installer window the recovery opens, that a failing line means stop, a check that the result boots, that there is no ssh | docs (owner) |
+
+### Pull 1, as decided (owner): the filter's lifetime
+
+Item 10 pulled against the README's rsync line, which needs the filter of the restore that
+ran, and against N2: today `restore.filter` belongs to the last preparation, not to the
+last restore, and a preparation also deletes the last restore's `rsync-log`.
+
+- **`restore.filter` stays the preparation's working file.** It is removed on Stop, on
+  Cancel, on a refusal (while preparing or at Restart now), and with the arm's files after
+  a finished restore or a disarm.
+- **The note has a working copy too, `restore.note`.** The preparation writes it beside
+  `restore.filter` in the state folder, with the text it writes to the backup disk. It has
+  exactly `restore.filter`'s lifetime and removal sites, and the protect list covers it.
+- **Where the two working files are removed** (the call sites were read on 2026-10-04):
+  on Stop, Cancel and a refusal; and next to the removal of `request.json` in core's
+  `clean_up` and `give_up` (the apply's ends, after `result.json` and step `end` are saved
+  and the link is gone), in the helper's `disarm()` and in `clean_at_start()`. **Never
+  through `remove_arm_files`**: `clean_leftovers` calls that from `check_and_arm` right
+  before the arm, on the plan that is about to be armed, and would delete the files the
+  arm is about to copy. With this, no call removes them before the apply has ended: a
+  `Retry` end and a `LinkStuck` end remove nothing.
+- **The arm keeps a pair.** Before anything of the arm is written it copies
+  `restore.filter` to `last-restore.filter` and `restore.note` to `last-restore.note`,
+  all in the state folder, each copy written under a temporary name and renamed (the state
+  folder's own writer). **The arm is refused if either copy fails**: no link, the plan
+  dropped, an error in the status line.
+- **`rsync-log` is cleared at the arm**, not at the preparation.
+- **"Last restore" means "last arm."** An arm that is disarmed, or a restore that ends
+  `not-started`, has still replaced the pair and cleared the log.
+- **The note on the backup disk carries one line saying which file to trust.** It is
+  written at every preparation, so after a restore followed by a preparation that was
+  stopped, cancelled or refused it names that later one. The pair in the state folder is
+  the last arm's and is the one to trust.
+- **`RECOVER.txt` and the README name `last-restore.filter`.** With no such file (never
+  restored, or after a purge) the by-hand rsync exits 11 before it copies or deletes
+  anything (run on the main machine, 2026-10-03); the README says so.
+- **The new files are covered by the existing protect list** (`restore.note`,
+  `last-restore.filter`, `last-restore.note`): `/var/lib/apsis/***` matches the state
+  folder and everything in it, for the apply and for the by-hand line.
+- Item 13b falls out of this: a refused restart goes through `remove_plan`, with its
+  wording.
+
+### Pull 2, as decided (owner): what the by-hand section promises
+
+- **Drilled** (check 8): the same kernel on both sides, Pop's recovery partition, the
+  safety snapshot.
+- **Not drilled**: a by-hand go-back after a restore across a kernel change (F1), and
+  finishing such a restore by hand (F2). Both are read from the code only.
+- **0.5.0: README only.** The section says what was drilled and what was not, names the
+  kernel case as a known limit without promising an outcome, and says that when the system
+  still starts from either boot entry the way back is the window (shown by checks 2 and 9).
+- **0.5.x**: a filter without the kernel lines for by-hand use, with its own by-hand
+  rollback drill.
+
+### Fix 1 and 1b, as decided (owner): the package scripts
+
+- **The `prerm` refuses with one line while a job runs.** The helper holds a `flock` on a
+  file under `/run` for a job's duration, and the script tests the lock. No marker file
+  whose existence is the signal: a killed helper would leave it stale, while the kernel
+  drops a lock with its process.
+- **The script holds the lock through the stop**, so no job can begin between the test and
+  the stop. **The helper also takes it around the arm** (`check_and_arm` isn't a job), so
+  the script can't land inside one.
+- **A ready plan holds no lock.** An upgrade at the prompt goes on, the plan dies with the
+  helper, and the window gets "The preparation is gone."
+- **The refusal also holds for the new package's `prerm failed-upgrade`**: without that,
+  dpkg goes on with the upgrade after the installed script refused. That sequence is from
+  Debian Policy, not run here; the gate shows what dpkg really does.
+- **1b: the `prerm` disarms on `remove`, `upgrade`, `deconfigure` and `failed-upgrade`.**
+  Order: refuse first on a running job, then disarm, then stop the helper, so a refused
+  operation changes nothing.
+- **The `/system-update` link is removed only after its target is checked to be Apsis's
+  own.** If it then can't be removed, the script fails and prints the exact manual command.
+- **`disarm()` syncs after the link's removal, on both paths** (the timer's and the
+  script's). Found while reading: it has no sync today, so a power cut seconds after a
+  disarm could bring the link back with the filesystem's journal.
+- **`postrm remove` also removes Apsis's link and the unit files** (the lines `purge` has
+  today); the state folder and the config stay purge-only.
+
+### Fix 2, as decided (owner): the delete renames first
+
+- **A delete first renames the folder from `snapshots/` into `apsis-staging/`**, after
+  today's checks (the name, the `O_NOFOLLOW` walk, `info.json` a regular file, nothing
+  mounted inside), then removes the tag links, then removes the folder there. A cut delete
+  is then a leftover, which the list, Delete and the next create already handle.
+- **A folder already half-deleted in `snapshots/`** (a readable `info.json`, no
+  `exclude.list`) is listed as such a row, and Delete removes it.
+- **Nothing is removed from `snapshots/` unasked**: the next create removes leftovers in
+  the staging folder only.
+- **A folder in `snapshots/` with no `info.json` stays a known limit**: the delete refuses
+  it on purpose, and it still needs a root `rm` by hand.
+
+### Fix 6 and RECOVER.txt, as decided (owner)
+
+- **`RestoreResult` carries `home` and `safety_snapshot` on the wire.** `Helper3` is
+  unshipped, so the signature changes without a new interface.
+- **`RECOVER.txt` carries two complete, labelled commands**, "restore the same snapshot
+  again" and "go back to the safety snapshot", each with its own flags (F4). Nobody has to
+  edit a line.
+- **With no safety snapshot, the note says so in one line.**
+- **One caveat line about the kernel limit** (Pull 2), so the note promises no more than
+  the README.
+- **The note is written atomically** (a temporary name, then a rename). Today it is a
+  plain write onto the backup disk, which a cut would leave truncated.
+
+### Item 9 and N3
+
+- **Item 9**: on a plain exit 23 with the snapshot still there, the apply writes the last
+  20 lines of rsync's standard error to the journal, one line each, through `Runner::say`.
+  In the real runner `say` writes the journal only (since check 1); the trait's doc comment
+  still says "the journal, the console and the boot screen" and is corrected with the fix,
+  as is `Runner::refresh_boot`'s, which still names `update-initramfs`.
+- **N3**: `remove_arm_files` removes the wants folder when it is empty, as it does the
+  drop-in's folder; `postrm` does the same.
+
+### Corrections: the kernelstub count (K1 and K2)
+
+- **K1, PLAN 6b.6 step 5**: "twice per kernel, five ESP writes" was read from the two
+  hooks and never counted. "Twice per kernel" was wrong: in check 8's drill, inside a
+  chroot, the hooks ran kernelstub **once per kernel**. kernelstub ran three times in all
+  (two from the hooks of `update-initramfs -u -k all`, one from the README's own line), and
+  the third changed nothing. How many of those runs rewrote files on the ESP was **not
+  counted**. Outside a chroot the count is still **unverified**. PLAN's sentence is
+  corrected.
+- **K2, this file, the "checks 0.1 to 0.3" entry** ("what the boot refresh runs"): the
+  same claim, with the same correction. That entry stands as written; this is its
+  correction.
+- The decision those sentences supported is unchanged: the apply runs kernelstub only and
+  no `update-initramfs`, for the other reasons given there.
+
+### What 0.5.0 knowingly does not show or fix (owner)
+
+- A by-hand go-back after a restore across a kernel change (Pull 2).
+- The upgrade from 0.4.2: it runs 0.4.2's `prerm`, which has no guard.
+- The seconds between Restart now and the reboot: a package operation on Apsis then
+  cancels the arm, and only apt's output says so.
+- `just uninstall` bypasses the maintainer scripts: one README sentence, nothing more.
+- The FAT "not properly unmounted" lines: `fsck.fat -n` was not run, and nothing about
+  their cause goes into the README.
+- The window's texts for `problems` and `boot-broken` have never been seen in the real
+  window. There is no step with a hand-placed `result.json`; the applet's and the layout's
+  tests are what shows them.
+- Item 9's plain-23 path is shown by a unit test and the real-rsync test only: as root on
+  apsis-test a plain 23 needs a real I/O error.
+- A folder in `snapshots/` with no `info.json` (fix 2).
+- C1 beyond the gate's probe.
+
+### What follows, and the last three points decided
+
+The order of work, where the version bump goes and the release gate's list are in PLAN
+6b.13 ("Update 2026-10-04").
+
+**Decided last** (owner, 2026-10-04):
+
+1. C3: Settings' Cancel is always clickable and leaves the page. Before 0.5.0, in the
+   small README and applet commit (step 12 of the order of work). C4 stays "no fix".
+2. The three result texts (fix 5, `boot-broken`, the `boot-kept` tooltip) are worded in
+   their own commit, for the owner to edit.
+3. The unit's `ConditionFileIsExecutable=` hardening from `notes/armed-upgrade.md` is
+   after 0.5.0: it changes the unit's text and wants an offline boot of its own.

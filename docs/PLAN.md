@@ -637,6 +637,32 @@ boot restores; without it, nothing does, whatever else is on disk.
   begun: systemd stops it, or never starts it, when shutdown is queued. A restart that's
   under way keeps its link.
 
+**Decided 2026-10-04, not built yet** (the triage; DECISIONS.md, "triage of checks 1 to 9").
+Until it is built, the text above is what the code does.
+- **`restore.filter` and `restore.note` are the preparation's working files.** The
+  preparation writes `restore.note` beside `restore.filter`, with the recovery note's text
+  as it goes onto the backup disk (6b.11). The two share one lifetime: removed on Stop, on
+  Cancel, on a refusal (while preparing or at "Restart now"), and after a finished restore
+  or a disarm, next to `request.json` in the apply's `clean_up` and `give_up`, in
+  `disarm()` and in `clean_at_start()`. Never through `remove_arm_files`:
+  `clean_leftovers` calls that right before the arm and would delete the files the arm is
+  about to copy. A `Retry` and a `LinkStuck` end remove nothing.
+- **The arm keeps a pair**, before anything else of the arm is written: `restore.filter`
+  is copied to `last-restore.filter` and `restore.note` to `last-restore.note`, all in the
+  state folder, each copy under a temporary name and renamed. If either copy fails the arm
+  is refused. Then `rsync-log` is cleared: at the arm, no longer at the preparation. "Last
+  restore" means "last arm": a disarmed arm has replaced the pair too. All of these files
+  are under `/var/lib/apsis/***` (6b.2's protect list).
+- **A refused "Restart now" removes the plan through `remove_plan`**, so the journal says
+  `plan removed (refused ...)` and `refused:`, not `plan removed: request.json` and
+  `failed:` (check 4).
+- **The helper takes its job lock around the arm** (6b.9), so a package script can't land
+  inside one.
+- **`disarm()` syncs after it removes the link**, for the timer and for the package script.
+  A power cut seconds after a disarm must not bring the link back.
+- **Knowingly left** (owner): in the seconds between "Restart now" and the reboot, a
+  package operation on Apsis cancels the arm, and only apt's output says so.
+
 ### 6b.6 The apply, and the boot files
 
 Everything runs from `apsis-restore.service` in offline-update mode, as root, with the helper's
@@ -748,7 +774,12 @@ the saved step** (6b.10).
    folder. Config: management mode true, install loader true, config version 3.
    **No `update-initramfs`.** The restored `/boot/initrd.img-*` are the snapshot's, built on
    that system from the modules and configuration that are now back; rebuilding them would
-   run kernelstub twice per kernel through the hooks (five ESP writes where one is wanted),
+   run kernelstub through the hooks for every kernel it rebuilds (several kernelstub runs
+   where one is wanted; **corrected 2026-10-04**: this said "twice per kernel" and "five
+   ESP writes", read from the two hooks and never counted. "Twice per kernel" was wrong: in
+   check 8's drill, inside a chroot, the hooks ran kernelstub once per kernel, and the
+   by-hand call after them changed nothing; how many of those three runs rewrote files on
+   the ESP was not counted. Outside a chroot the count is **unverified**),
    run `kernel-install add` with plugins Apsis doesn't know, rewrite the protected kernel's
    initrd that rule 10 keeps, make `/boot` differ from the snapshot, and take minutes of the
    boot screen. `esp::esp_needs` is exact now: the initrd copied to the ESP is the one in the
@@ -1367,6 +1398,37 @@ is in 0.4.2 below too):
 - No new crates: rsync, udevadm, kernelstub, plymouth and logind are called like today's
   tools (fixed argv, fixed `PATH`).
 
+**Decided 2026-10-04, not built yet** (the triage; DECISIONS.md, "triage of checks 1 to 9").
+Until it is built, the table and the list above are what the code does.
+- **The job lock on disk.** The helper holds a `flock` on a file under `/run` for the
+  duration of every job (`State::begin` to the job's end), and around the arm. The kernel
+  drops the lock with the process, so a killed helper leaves nothing stale; the file's
+  existence means nothing. A ready plan holds no lock.
+- **The `prerm`** (`remove`, `upgrade`, `deconfigure`, and the new package's
+  `failed-upgrade`), in this order: it takes the lock without waiting and **refuses with
+  one line** if a job holds it, so a refused operation changes nothing; it **disarms** an
+  armed restore, removing `/system-update` only after checking that its target is Apsis's
+  state folder, and failing with the exact manual command if the link can't be removed;
+  then it stops the helper, still holding the lock. **`postrm remove`** also removes
+  Apsis's link and the unit files; the state folder and the config stay purge-only.
+- **`RestoreResult() -> (s state, s snapshot, s message, x when, s home, s
+  safety_snapshot)`**: the tooltip's two lines come from `result.json`, not from fixed
+  strings. `Helper3` is unshipped, so the signature changes without a new interface.
+- **The journal says `refused:` for a refused restore** (`Error::RestoreRefused` in
+  `describe_error`), while preparing and at "Restart now".
+- **Delete renames first**: after its checks, a delete moves the folder from `snapshots/`
+  into `apsis-staging/`, removes the tag links, then removes the folder there. A cut delete
+  is a leftover, which the list, Delete and the next create handle. A folder already
+  half-deleted in `snapshots/` (a readable `info.json`, no `exclude.list`) is listed as
+  such a row. Nothing is removed from `snapshots/` unasked, and a folder there with no
+  `info.json` stays refused (a known limit).
+- **The arm's cleanup also removes the wants folder when it is empty**
+  (`remove_arm_files`, as for the drop-in's folder), and `postrm` does the same.
+- **The state folder gains** `restore.note` (a working file, like `restore.filter`), and
+  `last-restore.filter` and `last-restore.note`, which only an arm writes (6b.5).
+- **Knowingly left** (owner): the upgrade from 0.4.2 runs 0.4.2's `prerm`, which has no
+  guard; `just uninstall` bypasses the maintainer scripts (one README sentence).
+
 ### 6b.10 Failure states
 
 | state | when | what happens | counted as an attempt? |
@@ -1410,6 +1472,11 @@ the same:
   there, it's `problems` as above. Before this the apply refreshed the boot files over a
   tree rsync had walked for a third of its length and reported `problems`, which the window
   shows as `System restored to …`.
+  **Decided 2026-10-04, not built yet**: when it's `problems`, the apply writes the last 20
+  lines of rsync's standard error to the journal, one line each (`Runner::say`, which in
+  the real runner is the journal only), and the window gets a line of its own for
+  `problems`. Shown by a unit test and the real-rsync test only: as root on apsis-test a
+  plain 23 needs a real I/O error.
 - the snapshot's folder is missing altogether: nothing is copied or deleted, and there's no
   such line. rsync can't tell this from the first case, so **the apply checks the snapshot
   itself right before every copy** (`apply::check_snapshot`, pure): its `localhost/` is a
@@ -1530,6 +1597,37 @@ while preparing. It holds only UUIDs and the snapshot name: no user names, no em
 
 Timeshift from a live USB can also read these snapshots, but its boot refresh isn't
 kernelstub's, so the README gives the steps above.
+
+**Decided 2026-10-04, not built yet** (check 8's findings; DECISIONS.md, "triage of checks 1
+to 9"). Until it is built, the steps above are what the README and the note say.
+- **What the drill showed, and what it didn't.** Drilled (check 8): the same kernel on both
+  sides, Pop's recovery partition, the safety snapshot. Not drilled: a by-hand go-back
+  after a restore across a kernel change, where the saved filter keeps out the kernel that
+  ran at the preparation, and finishing such a restore by hand. For 0.5.0 the README says
+  so, names the kernel case as a known limit without promising an outcome, and says that
+  when the system still starts from either boot entry the way back is the window. A filter
+  without the kernel lines for by-hand use, with its own by-hand rollback drill, is 0.5.x.
+- **The first sentence above is wrong for these steps themselves**: the restore never
+  touches the recovery partition or the `Pop_OS-oldkern` entry, but the by-hand lines
+  rebuild both initrds and rewrite the previous pair on the ESP. The README and the note
+  say that; `update-initramfs -u -k all` stays, as drilled.
+- **The note carries two complete, labelled commands**, "restore the same snapshot again"
+  and "go back to the safety snapshot", each with its own flags (a safety snapshot is
+  always the new format). With no safety snapshot it says so in one line. It has one
+  caveat line about the kernel limit. Nobody has to edit a line.
+- **Both commands and the README name `last-restore.filter`** (6b.5), not
+  `restore.filter`. Without that file rsync exits 11 before it copies or deletes anything,
+  and the README says so.
+- **The note is written atomically** on the backup disk, and the arm keeps its text as
+  `last-restore.note` in the state folder, readable after the first mount line. The note
+  on the backup disk is written at every preparation, so it carries one line saying which
+  to trust: the pair in the state folder, which is the last arm's.
+- **The README also gains** what check 8 had to supply: the UUIDs from `lsblk -f`; what to
+  do if the backup disk is mounted already; that the recovery opens an installer window
+  whose install choices are a reinstall; that a failing line means stop; the two compare
+  lines that show the ESP's current pair is what `/boot` links to; that no ESP backup is
+  made by hand; that `update-initramfs` takes about two minutes; the panel's restart with
+  nothing unmounted; and that `result.json` still names the earlier restore afterwards.
 
 ### 6b.12 Tests
 
@@ -2260,6 +2358,64 @@ Checks:
    in this order: check 8; then the fixes; then the release gate, which gains one line: its
    happy-path snapshot is taken with the real 0.5.0 .deb installed, and its Restore dialog
    shows no Apsis line (`apsis current` in the journal).
+   **Update 2026-10-04**: check 8 passed (DECISIONS "check 8 passed", and its corrections),
+   so every check has passed. The triage is done and decided (DECISIONS "triage of checks 1
+   to 9 and the check 8 findings, and the owner's decisions"); nothing of it is built yet.
+   **The order of work**, one small commit each, with build, test, clippy and fmt:
+   1. the docs of the triage (this update);
+   2. fix 3 (`refused:` in the journal);
+   3. fix 4 (the status after a refused restart);
+   4. fix 6 (`RestoreResult` carries `home` and `safety_snapshot`);
+   5. the result texts in one pass: fix 5 (`problems`), `boot-broken`'s own line, the
+      `boot-kept` tooltip, the README's two places, the layout states;
+   6. rsync's last 20 lines on a plain exit 23, with the two stale doc comments in core's
+      `restore/apply.rs` (`Runner::say`, `Runner::refresh_boot`);
+   7. the filter's lifetime (6b.5): `last-restore.filter`, `last-restore.note`, `rsync-log`
+      cleared at the arm, the working files removed, the sync in `disarm()`, the empty wants
+      folder;
+   8. `RECOVER.txt` (6b.11): two labelled commands, the safety snapshot, the caveat, the
+      atomic write;
+   9. the README's "If a restore goes wrong" and its limits (6b.11);
+   10. fix 2 (the delete renames first);
+   11. the package scripts and the helper's job lock (fix 1 and 1b, 6b.9);
+   12. the small README rows (the desktop's mount, a filter without a leading slash, `just
+       uninstall`, the upgrade from 0.4.2), and in the applet Settings' Cancel, always
+       clickable, leaving the page (C3);
+   13. the version bump, last, before the gate's build. The tag comes after the gate.
+
+   **The release gate**, on the real 0.5.0 .deb, in one list:
+   - the build's hashes (the .deb, the helper, the applet), and the install over 0.4.2-1:
+     dpkg says 0.5.0-1;
+   - one happy-path restore (check 1's flow) of a snapshot taken with that .deb installed,
+     whose dialog shows no Apsis line (`apsis current`); `RECOVER.txt` read back at the
+     ready prompt; `tools/restore-check.sh` clean;
+   - check 13 in full;
+   - **the C1 probe**: the backup disk mounted in Files, then a list, a create and a
+     check-restore; the disk unmounted afterwards with `udisksctl unmount`, never ejected;
+   - **after the happy-path restore, written down word for word**: the window's status
+     line (`System restored to ...`), its tooltip, the four rows, and both monitors;
+   - **the systemd-boot menu's entries word for word**: `bootctl list`, and the menu on the
+     screen at one boot;
+   - **the kept pair, by hash**: at the ready prompt, the hashes of `restore.filter` and of
+     `RECOVER.txt` on the backup disk are recorded; after the restore `last-restore.filter`
+     and `last-restore.note` must have those hashes (the working files are gone by then, by
+     design);
+   - **the refused "Restart now"** (`/pop-upgrade` present at the prompt; the regression
+     test for fixes 3 and 4): afterwards `restore.filter` is gone and `last-restore.filter`
+     and `last-restore.note` are unchanged;
+   - **what dpkg really does after fix 1's refusal** (a reinstall during a create),
+     including the new package's `prerm failed-upgrade`; the create finishes;
+   - **`command -v flock`** on apsis-test;
+   - the armed branch of the `prerm`, with a hand-made link (Claude's proposal): the
+     script's line, the link gone; a link to another place is left alone;
+   - fix 2: the helper stopped by hand in the middle of a delete of a throwaway snapshot
+     (Claude's proposal): a row appears and Delete removes it;
+   - the close: the three base snapshots and the free bytes of before, `/opt` and the
+     harness untouched, nothing armed.
+
+   **Not shown by the gate, knowingly** (owner): the window's texts for `problems` and
+   `boot-broken` (no hand-placed `result.json`), the plain-23 path, the FAT "not properly
+   unmounted" lines (`fsck.fat -n` was not run), a by-hand go-back across a kernel change.
 
 Each slice ends with `cargo test --workspace`, clippy `-D warnings`, `cargo fmt` and a summary.
 
