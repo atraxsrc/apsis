@@ -21,6 +21,8 @@ At the start of a session, confirm you will follow it.
 - Customer data, dumps, exports, wallet files, SSH material, seed phrases/mnemonics
 - Application config or state directories (`.config/`, `.local/`, app databases, log files)
 - If you find any of the above in the working tree, stop, tell the user the path, and do not `git add` it.
+- `apsis-test` is the label for the owner's test laptop (the ssh alias the checks use), not a secret:
+  it is allowed in docs and commit messages. Any other hostname stays out.
 
 ## History and ignore rules
 
