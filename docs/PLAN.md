@@ -1861,6 +1861,15 @@ Checks:
   over a mixed tree as `problems`; after a plain 23 the snapshot is now checked again.
 - 7. Boot files failed, simulated by the owner (e.g. a `kernelstub` that exits 1 on the test
   machine, put back afterwards): the ESP files are back, the newer kernel boots, `boot-kept` shown.
+  **Passed (apsis-test, 2026-10-03; DECISIONS "check 7 passed (and check 12)").** The
+  stand-in was `/usr/local/sbin/kernelstub`, bind-mounted onto itself before the
+  preparation so the filter's mount rule kept it through the copy (a stand-in placed live
+  is overwritten or deleted before the call). `rsync exited 0`, `the boot refresh failed
+  (kernelstub exited with code 1: …): putting the boot files back`, `boot-kept`,
+  `Finished(BootKept)`; the ESP's seven files hash as before, `cmdline` included, which the
+  stand-in had changed; kernel 7.1.5 still boots; both markers gone; the window's line and
+  tooltip as designed. The copy 55.6 s, the put-back 5.2 s, the unit 65 s. The kernel was
+  the same on both sides, so `boot-kept` across a kernel change isn't shown by it.
 - 8. Recovery drill: from the recovery partition, the README steps with the safety snapshot.
 - 9. Snapshot with Apsis 0.4.x: the dialog line; afterwards 0.4.x runs with the protected
   config; reinstalling 0.5 shows the result.
@@ -1871,6 +1880,13 @@ Checks:
   `/upgrade-attempted`, and `ls /etc/systemd/system/pop-upgrade-init.service.d/` is empty or
   gone. Then `sudo touch /pop-upgrade` and Restore: refused with the Pop line; `sudo rm
   /pop-upgrade` afterwards.
+  **Passed (apsis-test, 2026-10-03, with check 7; DECISIONS "check 7 passed (and check
+  12)").** The skip on `ConditionPathExists=!/system-update/apsis-helper` in the retry boots
+  of checks 5 and 6 and in check 7's offline boot; after check 7's restore `acpid` and
+  `pop-upgrade` `disabled`, no `/upgrade-attempted`, the drop-in folder gone; with
+  `/pop-upgrade` present the dialog refused with the Pop line (`check-restore … refused:
+  pop-upgrade-pending`). The same refusal at Restart now wasn't run: it is the regression
+  test for fixes 3 and 4.
 - 13. (added 2026-10-01) **Bulk delete** with both monitors on (two panel applet processes)
   and the window open: delete three snapshots at once from the window; all three go, no
   "Busy" line, and `journalctl -u apsis-helper` shows one `delete-many` job, then **one
@@ -1878,6 +1894,11 @@ Checks:
   cause: six `list` calls from six bus names in the same second after every job end, about
   half refused busy by each other, and the second delete refused because a list held the
   lock; the three processes were the two per-output applets and the window.
+  **Passed on 0.4.2 (2026-10-01); to be rerun on 0.5.0** at the release gate (`DeleteMany`
+  moved to `Helper3`, and the fix for a half-deleted snapshot touches the delete; DECISIONS
+  2026-10-03, triage). A partial data point from check 7's preparation (2026-10-03, the
+  0.5.0 build, both applets and the window open): five snapshots in one `delete-many` job,
+  `done`, one list per client afterwards; whether a "Busy" line showed wasn't observed.
 - 11. **What the temp-tree tests can't show without root** (added 2026-10-01). Before the
   snapshot the restore goes back to, as root: `chown 54321:54322` a file under `/opt` (ids no
   user database names); `mknod /opt/apsis-test-null c 1 3`; note `getcap /usr/bin/ping`.
@@ -2149,6 +2170,10 @@ Checks:
    passed 2026-10-02** (after the kernelstub fix its setup found; DECISIONS "check 2
    passed"); **check 3 passed 2026-10-02**; checks 4 to 13 are next, check 4 (Stop, Cancel,
    a filled disk) first.
+   **Update 2026-10-03**: checks 4, 5, 6, 7 and 12 passed (DECISIONS, the entries of that
+   day). Left, in this order (owner's triage, 2026-10-03): checks 11, 9 and 8; then the
+   fixes found by the checks, all before release; then the release gate on the real 0.5.0
+   .deb: one happy-path restore (check 1's flow) and check 13 again.
 
 Each slice ends with `cargo test --workspace`, clippy `-D warnings`, `cargo fmt` and a summary.
 
@@ -2634,7 +2659,8 @@ The panel popup is a read-only overview; the window does the work. One slice at 
 5. Window chrome: the four rooms; create beside the list - done.
 6. Copy pass, then theme audit (no hardcoded colours) - done 2026-09-29, see `DECISIONS.md`.
 
-Roadmap, not scheduled: a scheduler (`next` in time, the last/next timeline), undock.
+Roadmap, not scheduled: undock (optional, late). No scheduler: it was dropped on purpose
+(Phase 5.2, 2026-09-28) and `phase-5.2-schedule` stays parked (owner, 2026-10-03).
 
 ## 0.4.0 - The Timeshift model (released 2026-09-30)
 

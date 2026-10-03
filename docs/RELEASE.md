@@ -175,7 +175,13 @@ dropped: `cosmic-panel-config` asks for libcosmic without one, so a `rev` put fi
 `Cargo.lock` twice, which `cargo vendor` refuses. To move to a newer libcosmic on purpose:
 `cargo update -p libcosmic`, then build, test and commit the lock file.
 
-## cosmic-project-collection entries (draft)
+## cosmic-project-collection entries (draft; after Apsis is complete)
+
+**Status (owner, 2026-10-03):** the earlier collection PR, #114, is closed. A new PR is opened
+only once Apsis is complete, after 0.5.0 at the earliest, and only by the user. The same goes
+for the posts on Reddit and chat.pop-os.org: after Apsis is complete, not with a release in
+between. Until then nothing below is sent anywhere; the drafts are kept so they're ready.
+When the PR is opened, point the icon and screenshot URLs at the release tag of that day.
 
 **Unverified schema.** These were written without reading the current `applets.ron` /
 `applications.ron` (no network in Claude's session). Before opening the PR, copy the field
@@ -211,10 +217,16 @@ names and order from a neighbouring entry in each file and adjust these to match
 If the collection lists one program only once, keep the `applets.ron` entry and mention window
 mode in its description instead.
 
-PR text (draft):
+PR text (draft, for 0.5.0 standalone; rewritten 2026-10-03, to be read again against the
+release that's current when the PR is opened):
 
-> Add Apsis, a panel applet and window for system snapshots: create, list and delete rsync
-> snapshots, choose /root and /home and a filter list, in a window laid out like Timeshift's
-> that follows the COSMIC theme, with a read-only overview in the panel popup. It uses Timeshift's on-disk layout, so existing Timeshift snapshots keep
-> working, but doesn't need Timeshift. It opens as a window from the app launcher
+> Add Apsis, a panel applet and window for system snapshot and restore on the COSMIC desktop.
+> It takes rsync snapshots of the system to a backup disk, with a choice of /root and /home
+> and a filter list, lists and deletes them, and restores the whole system to a snapshot at
+> the next start (experimental; Pop!_OS 24.04 with systemd-boot). The window uses standard
+> COSMIC widgets and follows the live theme; the panel popup is a read-only overview. Apsis
+> is standalone and needs no other backup tool. It keeps Timeshift's on-disk layout, so
+> existing snapshots stay usable. It also opens as a window from the app launcher
 > (`apsis --window`). GPL-3.0-only.
+
+Posts (Reddit, chat.pop-os.org): not drafted yet; after Apsis is complete, with the PR.

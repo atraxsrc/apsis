@@ -4782,3 +4782,242 @@ and the apply now treats both as a broken copy (commit `62b1560`, the fourth exi
 PLAN 6b.10). Next: check 7, the boot files failing (a `kernelstub` that exits 1 on
 apsis-test, put back afterwards): the ESP files back, the newer kernel boots, `boot-kept`
 shown.
+
+## 2026-10-03 - triage before check 7: two corrections, the check order, what's fixed before release (owner)
+
+**Corrections (docs only).**
+
+- **No scheduler on the roadmap.** PLAN's roadmap line (under "UI polish") no longer lists a
+  scheduler: it was dropped on purpose (2026-09-28) and `phase-5.2-schedule` stays parked.
+  Undock stays, as an optional late item. The entries of 2026-09-29 that call the scheduler
+  "roadmap" are history and stand as written.
+- **The collection PR and the posts wait.** The earlier collection PR, #114, is closed (the
+  owner's statement; not looked up from the session, which doesn't talk to GitHub). A new PR
+  and the posts on Reddit and chat.pop-os.org come once Apsis is complete, after 0.5.0 at
+  the earliest. `docs/RELEASE.md` marks the collection entries that way and has the PR text
+  rewritten for 0.5.0 standalone, with no comparison to Timeshift in it.
+
+**The checks left (PLAN 6b.12).**
+
+- **Order: 7, 11, 9, then 8 last.** The recovery drill (8) is the one most likely to end in a
+  reinstall of the OS, which would take the harness (the sudoers entry, the test-only polkit
+  rule) and check 11's preparation with it.
+- **Check 12 is folded into the others.** Its after-restore state (`pop-upgrade-init` skipped
+  on the drop-in's condition in the offline boot, `acpid` and `pop-upgrade` not masked, no
+  `/upgrade-attempted`, the drop-in gone) goes into the verify step of checks 7 and 11. The
+  `/pop-upgrade` refusal is a test without a reboot at the start of check 7's session.
+- **Check 13 is rerun on 0.5.0**: `DeleteMany` moved to `Helper3`, and the fix for a
+  half-deleted snapshot touches the delete.
+
+**The deferred fixes, numbered here** (they were noted in three entries of 2026-10-03):
+
+1. the package's `prerm` stops the helper mid-job ("a reinstall during a delete", gap 1);
+2. a half-deleted snapshot is invisible and stuck (the same entry, gap 2);
+3. a refused Restart now is logged `failed:`, not `refused:` (check 4);
+4. the status area still reads `Preparing restore · ready` after a refused restart (check 4);
+5. `problems` shows the same window line as `done` (check 6, item 1);
+6. the result tooltip's home and safety-snapshot lines are fixed strings (check 6, item 2).
+
+Beside them: the apply logs nothing of rsync's errors on a plain exit 23 (check 6, item 3),
+and a refused restart leaves `restore.filter` behind (check 4).
+
+- **Before release** (fixed after the checks, before the smoke test): fix 5; fix 6, either by
+  carrying `home` and `safety_snapshot` in `RestoreResult` or by dropping those tooltip
+  lines, since a fixed string that can be false never ships; and rsync's errors on a plain
+  exit 23: **the apply logs the last 20 lines of rsync's standard error to the journal.**
+  Why 20: it is the tail the runner already keeps (`STDERR_TAIL_LINES` in the helper's
+  `apply.rs`, the lines a broken copy's message carries), so there is no second buffer and
+  no second number to keep in step; rsync's closing line takes one and leaves 19 per-file
+  errors, enough to tell what kind of failure it was (permissions, a read-only filesystem,
+  I/O); a mass failure (check 6's 1008 I/O errors) can't flood the journal; and the full
+  list stays in `rsync-log`, which the result names.
+- **Batch after the checks**: fixes 1 to 4, and removing `restore.filter` after a refused
+  restart. Fix 2 is one of the two reasons check 13 is rerun, so this batch lands before the
+  release gate as well (Claude's reading of the owner's list, to be corrected if wrong).
+- **Release gate after the fixes**, on the actual 0.5.0 .deb: one happy-path restore (check
+  1's flow) and check 13.
+
+**Noted while reading the code for check 7, not triaged yet:**
+
+- The window gives `boot-broken` the same line and tooltip as `boot-kept` (`result_text`:
+  "still boots the previous kernel", "the ones it had were put back"). For a put-back that
+  failed that is false. `result.json` and the journal tell the two apart, so check 7's pass
+  rule reads those, not the window alone.
+- `tools/restore-check.sh` has no `boot-kept` case: after a real one (a kernel rollback whose
+  boot refresh failed) its ESP lines would print FAIL although the ESP is right, because
+  they compare the ESP with what `/boot/vmlinuz` links to. In check 7 the kernel doesn't
+  change, so every line should still be ok there.
+
+## 2026-10-03 - triage, second part (owner): all six fixes before release, the armed remove, boot-broken's line
+
+The entry above stands; this adds the owner's answers to what it left open.
+
+- **All six fixes land before release.** The reading in the entry above is right: the batch
+  (fixes 1 to 4, and removing `restore.filter` after a refused restart) is done before the
+  release gate, like fixes 5 and 6 and the 20 lines of rsync's standard error.
+- **The `prerm` disarms an armed restore on `remove`: before release.** Found while reading
+  for check 7: after `apt remove apsis` with a restore armed and no restart, the next boot
+  still restores, on any later day. Nothing the package ships is needed for it: the link
+  (`/system-update`), the unit and its wants link under `/etc/systemd/system/`, the helper
+  copy, `state.json`, `request.json` and `restore.filter` under `/var/lib/apsis/restore/`
+  and the drop-in are all written by the helper on arm or at the preparation, none is in
+  dpkg's list, the package has no conffiles, and `postrm` names them only under `purge`. The
+  one thing that would undo the arm, the 10-minute disarm timer, runs the packaged helper,
+  which a remove takes away. It belongs in 0.5.0's own `prerm`: a remove always runs the
+  installed version's scripts, and 0.5.0 is the first version that can arm. This is the
+  armed branch of fix 1. Still open: the same on `upgrade` and `deconfigure` (Claude's
+  recommendation; an upgrade is benign as it is, the timer disarms with the new helper).
+- **`boot-broken` shown as `boot-kept`: before release**, in the same group as fix 5
+  (`problems` shown as `done`). Both are a result line that says something milder than what
+  happened.
+- **`tools/restore-check.sh` has no `boot-kept` case: fixed before any check that could end
+  `boot-kept` with a kernel change. Not a release gate.** Check 7 isn't such a check (the
+  kernel is 7.1.5 on both sides).
+- **The PR text** in `docs/RELEASE.md` has the compatibility fact back as one plain line,
+  worded like the README: Apsis keeps Timeshift's on-disk layout, so existing snapshots
+  stay usable. Still no description of Apsis by comparison.
+
+**Before release, in one list**: fixes 1 to 6 (fix 1 with its armed branch on `remove`);
+`restore.filter` removed after a refused restart; the last 20 lines of rsync's standard
+error in the journal on a plain exit 23; a line and tooltip of its own for `boot-broken`.
+Then the release gate on the real 0.5.0 .deb: one happy-path restore and check 13.
+**Not gating the release**: the `boot-kept` case in `restore-check.sh`.
+
+## 2026-10-03 - check 7 passed (and check 12): the boot refresh failed, the ESP was put back, `boot-kept`
+
+Runbook `notes/check-7-runbook.md` (untracked). The baseline `2026-10-02_10-50-46`, keep
+home, the safety snapshot on, the disk in, on the fixed build (helper `6d6b01b5…`). In the
+offline boot `kernelstub` was a stand-in that exits 1. What is marked (owner) was seen on
+apsis-test's screen or in a terminal; the rest is read from the check's logs.
+
+**How the stand-in got to be the binary the apply calls.** The apply looks up the bare name
+`kernelstub` on its fixed `PATH` (`/usr/local/sbin` first) after the copy, so a stand-in
+placed live never reaches the call: in `/usr/bin` the copy writes the baseline's file back,
+in `/usr/local/sbin` its `--delete` removes it. So the stand-in was a new file,
+`/usr/local/sbin/kernelstub`, **bind-mounted onto itself before the preparation**: the
+filter's ordinary mount rule then wrote its own exclude line for it, the copy left it
+alone, and the restart dropped the mount. The real `/usr/bin/kernelstub` was never touched.
+
+- At the Ready prompt `restore.filter` had exactly one such line, its line 35,
+  `- /usr/local/sbin/kernelstub`, and was 29 bytes longer than check 6's filter (that line,
+  owner). Before it:
+  `findmnt` showed the mount, `mountinfo` had one line for it, `command -v kernelstub` on
+  the helper's `PATH` gave the stand-in, `dpkg -V kernelstub` printed nothing.
+- **The stand-in is a pass-through unless a restore is armed**: it runs the real kernelstub
+  whenever `/system-update` isn't Apsis's link (its dry run through the stand-in exited 0),
+  and fails only in the offline boot. That the link is still Apsis's at the call is read
+  from core's `apply.rs`: `run` begins with the armed test (line 300), the link is removed
+  only in `give_up`, `clean_up` and the panic hook, every early `finish` returns, the
+  kernelstub call is at line 661 inside `boot_files`, and `clean_up` runs at line 786 after
+  it; `- /system-update` is the filter's first rule. The journal below shows it held.
+- Before failing it appended one line to the ESP's `cmdline` file, so that the put-back had
+  a changed file to put right. The condition for that held in step 1: one `options` line in
+  `Pop_OS-current.conf`, the running command line contains it, and kernelstub's sources
+  only read `/proc/cmdline` and write the ESP's file (`copy_cmdline`).
+- **What this changes compared with a real `boot-kept`**: one more exclude line; kernelstub
+  resolved in `/usr/local/sbin`; the kernel is 7.1.5 on both sides, so the files put back
+  are what a good refresh would have written, except `cmdline`.
+
+**Step 0, check 12's refusal** (owner): with `/pop-upgrade` present, Restore on the
+baseline opened "Can't restore this snapshot" with "A Pop!_OS upgrade is in progress." and
+"Finish or cancel it first, then restore."; the journal's `check-restore` line said
+`refused: pop-upgrade-pending`. The optional refusal at Restart now was **skipped on
+purpose**: it becomes the regression test for fixes 3 and 4 (`failed:` for `refused:`, the
+status area left at `Preparing restore · ready`).
+
+**Step 1, the baseline**: kernel 7.1.5, modules for 7.0.11 and 7.1.5, the `/boot` links to
+7.1.5 and `.old` to 7.0.11; seven files hashed on the ESP (the current and the previous
+pair, `cmdline`, both entries); `vmlinuz.efi` and `initrd.img` the same as `/boot`'s 7.1.5
+files; 359M free on the ESP; `acpid` and `pop-upgrade` `disabled`; none of the three Pop
+names; both kernelstub hooks with `--preserve-live-mode`; `/usr/local/sbin` empty.
+
+**The preparation**: the filter written 14:34, the safety snapshot `2026-10-03_14-34-57`,
+the plan 14:39 (`"home": "keep"`, running kernel 7.1.5), no link before Restart now.
+
+**The offline boot** (`-1`, 14:43:03 to 14:44:09), `apsis-restore.service`, exactly as the
+pass rule had it:
+
+| time | line |
+|---|---|
+| 14:43:04.726 | the unit starts |
+| 14:43:04.743 | `Restoring the system. Don't turn off the computer.` |
+| 14:43:05.588 | `copying, attempt 1 of 3` |
+| 14:44:01.195 | `the copy ended: rsync exited 0` |
+| 14:44:03.717 | `refreshing the boot files` |
+| 14:44:03.726 | `kernelstub: check-7 stand-in: called as: kernelstub --verbose --preserve-live-mode --kernel-path /boot/vmlinuz-7.1.5-76070105-generic --initrd-path /boot/initrd.img-7.1.5-76070105-generic` |
+| 14:44:03.726 | `kernelstub: check-7 stand-in: cmdline before: 7132d236…`, `cmdline after: 6b271557…`, `failing on purpose` |
+| 14:44:03.819 | `the boot refresh failed (kernelstub exited with code 1: check-7 stand-in: failing on purpose): putting the boot files back` |
+| 14:44:09.003 | `the restore ended: boot-kept: the boot refresh failed (kernelstub exited with code 1: check-7 stand-in: failing on purpose); the boot files from before were put back` |
+| 14:44:09.513 | `apply-restore ended: Finished(BootKept)` |
+| 14:44:09.519 | `Deactivated successfully` |
+
+No `removed kernel`, no second attempt, no `boot-broken`. The ESP backup logs nothing when
+it works: it and the `syncfs` are the 2.5 s between the copy's end and `refreshing`.
+Nothing from `apsis-restore` at warning level or above.
+
+**The result**: `result.json` `boot-kept`, the baseline, `14-34-57`, `"home": "keep"`, the
+message of the journal's `the restore ended` line. The state folder: `result.json`,
+`restore.filter`, `rsync-log`; no plan, no state, no helper copy, no `esp-backup/`.
+
+**The ESP**: the seven hashes after the boot are the seven of step 1 (`ESP-IDENTICAL`), no
+`.apsis-tmp` file. `cmdline` was `7132d236…` before, `6b271557…` after the stand-in wrote
+to it, `7132d236…` after the boot: **the put-back rewrote a file that had changed**, on the
+real vfat ESP, in 5.2 s for all seven files.
+
+**Check 12, the after-restore state: passed.** In the offline boot `pop-upgrade-init.service
+... was skipped because of an unmet condition check
+(ConditionPathExists=!/system-update/apsis-helper)`; no `upgrade.sh`, `apt-get`,
+`system-upgrade` or `system-update-cleanup` line; `acpid` and `pop-upgrade` `disabled`; no
+`/upgrade-attempted`, no `/pop-upgrade`; the drop-in folder gone. With step 0's refusal and
+the skips already seen in checks 5 and 6, every part of PLAN's item 12 is shown.
+
+**After**: `tools/restore-check.sh` every line ok, 0 failed units. As predicted, it can't
+tell `boot-kept` from `done` when the kernel doesn't change: its ESP lines compare with what
+`/boot/vmlinuz` links to, which is the same 7.1.5. Both markers "No such file", the kept
+file there, cowsay gone; the kernel 7.1.5 with its modules; before and after identical
+(`NUMBERS-IDENTICAL`); the stand-in still in place (the exclude kept it) and no longer a
+mount point.
+
+**The window** (owner): `System restored · still boots the previous kernel · see README`,
+the tooltip as in the strings file, no Restore again button; the same line after the
+current build was reinstalled.
+
+**Cleanup** (owner, and the cleanup log): the stand-in removed, `command -v kernelstub`
+gives `/usr/bin/kernelstub`, `dpkg -V kernelstub` and `dpkg --audit` print nothing, both
+hooks carry the flag, the real kernelstub's dry run exits 0. The safety snapshot deleted
+from the window (14:50:11 to 14:51:20, one list per client after `done`): 12031221760 of
+30120226816 bytes free on the USB with the three base snapshots, the same byte count as
+before the check (owner). The safety snapshot had cost 1.2 GB. The current build
+reinstalled.
+
+**Timings**: the preparation about 5 minutes; the copy 55.6 s; `syncfs` and the ESP backup
+2.5 s; the stand-in 0.1 s; the put-back 5.2 s; the unit 65 s in all (34.6 s of CPU); the
+normal boot started 20 s after it ended; from the click to ssh answering about 3 min 15 s
+(owner).
+
+**Found with it:**
+
+- **The `boot-kept` tooltip names the wrong cause** (owner): it says "The new boot files
+  didn't check out", which is wrong when kernelstub itself failed and wrote nothing new.
+  Wording that covers both causes is due, for example "The boot files couldn't be
+  refreshed, so the ones from before were put back." **Before release**, with fix 5 and
+  the line for `boot-broken`: the three are one pass over the result texts.
+- **A partial data point for check 13's rerun** (owner): in section P the five old safety
+  snapshots went in one bulk delete on the 0.5.0 build, with both panel applets and the
+  window open: one `delete-many` job, five deleted, `done`, 14:20:33 to 14:26:09, and each
+  client listed once after `done`. Whether a "Busy" line showed in a window was not
+  observed, so check 13 is still to be rerun in full.
+- **The backup disk's kernel name changed over the restart** (owner): `sda` before, `sdb`
+  after. The window shows the kernel name; every lookup is by UUID. Harmless.
+
+**What check 7 established**: a boot refresh that fails after the copy ends with the ESP
+exactly as it was, the kernel the machine started with booting, the system restored, and
+`boot-kept` in the result, the journal and the window; the put-back works on the real ESP
+and restores a file that was changed in between; the apply's kernelstub call carries
+`--kernel-path` and `--initrd-path` from the restored `/boot` links; the filter's mount
+rule protects a file that is a mount point when the restore is prepared. Not shown by it:
+`boot-kept` across a kernel change (the put-back restoring another kernel than the one
+`/boot` links to), which is where `restore-check.sh` needs its `boot-kept` case first.
+
+**Left**: checks 11, 9 and 8, in that order; then the fixes; then the release gate (one
+happy-path restore and check 13 on the real 0.5.0 .deb).
