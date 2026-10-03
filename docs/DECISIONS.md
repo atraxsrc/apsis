@@ -4524,3 +4524,92 @@ refusal) when the dialog closes.
 Left on apsis-test: the current build, five snapshots (the three of 4a plus the safety
 snapshots `10-08-43` and `10-20-54`, either can go, check 5 needs one restore to cut). No
 reinstall needed: no restore ran. Next: check 5, the power cut at about 30% of the copy.
+
+## 2026-10-03 - check 5 passed on apsis-test: the power cut at about 30% of the copy
+
+PLAN 6b.12 check 5, runbook `notes/check-5-runbook.md`: the baseline `2026-10-02_10-50-46`,
+keep home, safety snapshot on; the power button held about five seconds roughly 20 s into
+the offline boot's copy; the next power-on came back to the restore by itself and attempt 2
+finished it. The runbook's journal lines were checked against the code first (core
+`restore/apply.rs`, the helper's `apply.rs` and `service.rs`), not the design wording.
+
+- **Preconditions**: the installed helper hashed `a764aa62…` (check 4 restored nothing, no
+  reinstall). The USB held five snapshots, not seven: check 4's text redo left no safety
+  snapshots. `10-20-54` and `10-08-43` deleted from the window one at a time (59 s and 69 s to
+  `deleted`, `done` 11 s and 7 s later), three snapshots left, no staging folder, the three
+  tag links sound, 12G free. Two markers this time: `/etc/apsis-test-marker` early in rsync's
+  walk and `/var/lib/apsis-test-marker-late` late in it, so a finished copy is told from one
+  that stopped partway; cowsay; the kept file.
+- **The preparation**: `check-restore ... ok; home yes, root no, current format, apsis
+  no-restore:0.4.2`; `started` 10:59:39; the restore's dry run 38 s; the safety snapshot's dry
+  run 19 s; its create 3 min 33 s (`2026-10-03_11-00-37`); `ready` 11:04:41, 5 min 2 s after
+  the click. The plan: the baseline, that safety snapshot, `home: keep`, kernel 7.1.5; no
+  link, no unit before Restart now.
+- **The cut boot** (`-2`): Restart now at about 11:06:50 (`armed; restarting`, the helper
+  stopped 11:06:54). The boot's journal holds **one second**: first and last entry 11:07:15,
+  journald's flush of 971 entries to `/var/log/journal`, then nothing. The unit's start, the
+  Apsis line and `copying, attempt 1 of 3` were lost with the power (written after the flush,
+  never written back). `-b -2 -u apsis-restore.service` and `-u pop-upgrade-init.service`
+  both say `-- No entries --`. The cut itself, by the owner's count (the button held from
+  15 s after the Apsis line appeared), at about 11:07:37; nothing on disk records it.
+- **The retry boot** (`-1`, 61 s of journal): first entry 11:08:03; the unit started 11:08:04;
+  `Restoring the system. Don't turn off the computer.`; **`copying, attempt 2 of 3`** 11:08:05,
+  which is the proof of the count: `attempts` 1 was saved and fsynced before the cut boot's
+  `copying` line, and `state.json` itself is removed by step 8; `the copy ended: rsync exited
+  0` 11:09:00 (**55 s**, about check 1's uncut 53 s: rsync walks the whole tree again, the
+  files already copied save transfer, not time; it sent 211 MB against a 9.58 GB tree,
+  speedup 45); `refreshing the boot files` 11:09:02; kernelstub naming 7.1.5's vmlinuz and
+  initrd and backing up 7.0.11 as the previous pair; `the restore ended: done` 11:09:03;
+  `apply-restore ended: Finished(Done)`; `Deactivated successfully` 11:09:04. None of `the
+  copy broke`, `cut off`, `given up`, `wasn't saved`, `the ESP backup of an earlier boot`,
+  `panicked`. The normal boot's first entry 11:09:23; ssh answered by 11:09:38: **3 min 28 s**
+  from Restart now to the desktop, with the cut, two offline boots and the normal boot in it.
+- **The screen** (owner): the Pop logo with the Apsis line in both offline boots, nothing
+  else; no fsck line, no boot menu, no greeter until the normal boot.
+- **PLAN item 12, first part**: in the retry boot `pop-upgrade-init.service` was skipped on
+  `ConditionPathExists=!/system-update/apsis-helper`; no `upgrade.sh`, `apt-get`,
+  `system-upgrade` or `system-update-cleanup` line in that boot; afterwards `acpid` and
+  `pop-upgrade` `disabled` (not masked), no `/upgrade-attempted`, no `/pop-upgrade`, the
+  drop-in folder gone. The cut boot's skip line is among the lost entries, so nothing is
+  claimed for it; the design needs the retry boot's, which is there.
+- **`tools/restore-check.sh`**: every line ok (the arm gone including `state.json` and the
+  drop-in folder, no disarm timer, no `esp-backup/`, the ESP byte for byte `/boot`'s, modules
+  for 7.1.5, both loader entries, dpkg clean, 0 failed units, no Pop leftovers). Both markers
+  "No such file" (attempt 2 went through `/etc` and `/var/lib`), the kept file there (10:58),
+  cowsay gone. Before and after identical: `/home` 755 root:root, cryptswap on, `ping`
+  `cap_net_raw=ep`, the seven Flatpak rows and 1.9G, acpid and pop-upgrade disabled, kernel
+  7.1.5. Proton VPN starts. `result.json`: `done`, the baseline, `2026-10-03_11-00-37`,
+  `home: keep`, `when` 11:09:03. The state folder: `result.json`, `restore.filter`,
+  `rsync-log`. The helper's start after login removed no leftovers.
+- **The window** after login: `System restored to 2026-10-02 10:50`; four rows (the 11:00
+  safety snapshot, the baseline, the two 0.4 snapshots); the backup disk line `16G / 28G ·
+  62% used · 10G free`. The same after the reinstall (read from `result.json`).
+- **The 1a build back** (5h): `just deb`, scp, `apt install --reinstall` with no job running;
+  the rebuilt helper hashes **the same `a764aa62…`** as the one installed on 2026-10-02: the
+  build is reproducible. Logged out and in.
+
+**Observed, not defects**:
+- `rsync-log` holds attempt 2 only (303 lines, from 11:08:05, the retry's pid). rsync appends
+  and nothing in the apply truncates the file between attempts (the preparation clears it),
+  so attempt 1's lines went the way the journal's did: not written back before the cut. No
+  `deleting` line names a temporary file of the cut copy (pattern `.*/\.[^/]+\.[A-Za-z0-9]{6}$`);
+  whether one ever reached the disk isn't known. The markers and restore-check are the proof
+  of the tree's state, not the log.
+- The retry boot's kernel logged `FAT-fs (nvme0n1p1): Volume was not properly unmounted` and
+  the same for `nvme0n1p2`: the ESP and the recovery partition were mounted at the cut, as in
+  any power cut. Pop never fscks them (`fstab` pass 0); kernelstub wrote the ESP without
+  complaint and the check passed byte for byte. ext4's root replayed its journal silently
+  (no recovery line at warning level).
+- `systemd-cryptsetup[795]: device-mapper: remove ioctl on cryptswap  failed: Device or
+  resource busy` at 11:09:04, the retry boot's shutdown. Absent from the shutdowns of the
+  four earlier offline boots (`-7`, `-9`, `-13`, `-15`: checks 3, 2, 1 run 3 and 1 run 2) and
+  of three normal boots. Seen once; systemd's own shutdown ordering (closing the random-key
+  swap while it's still on), not the apply's; cryptswap was on again in the normal boot.
+  Watch for it in check 6.
+- The journal of a boot cut by power is good for its first second here: anything a later
+  check wants from a cut boot must be read from the next boot's effects, as this one was.
+
+Left on apsis-test: the current build, four snapshots (the three base ones and
+`2026-10-03_11-00-37`, which can go). Next: check 6, the backup disk unplugged before Restart
+now's reboot (never started, normal boot, the message after login), then unplugged at about
+30% of the copy and replugged (copy broke, attempt 2 finishes).

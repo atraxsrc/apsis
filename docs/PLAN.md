@@ -1825,7 +1825,16 @@ Checks:
 - 4. Stop during the safety snapshot; Cancel at the ready prompt; after a cancel, a normal
   restart doesn't restore. Fill the system disk between ready and Restart now: refused with
   the one line.
+  **Passed (apsis-test, 2026-10-03; DECISIONS "check 4 passed").** Nothing restored and
+  nothing left armed at any of the four; the journal and status wording differ from the
+  design in three places, noted there and deferred.
 - 5. Power cut at about 30% on the boot screen: attempt 2 finishes it.
+  **Passed (apsis-test, 2026-10-03; DECISIONS "check 5 passed").** The power button held
+  about 20 s into the copy; the next power-on came back to the restore by itself; the retry
+  boot's `copying, attempt 2 of 3` (the only proof of the count: `state.json` goes with the
+  cleanup, and the cut boot's journal kept only its first second), the copy 55 s, `done`,
+  both markers gone, restore-check clean, `pop-upgrade-init` skipped in the retry boot
+  (item 12's first part). 3 min 28 s from Restart now to the desktop.
 - 6. Backup disk unplugged before Restart now's reboot: never started, normal boot, the
   message after login. Unplugged at about 30%: copy broke. Replugged: attempt 2 finishes.
   Left out: "didn't finish", and Restore again finishes it.
