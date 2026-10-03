@@ -4464,3 +4464,63 @@ Cleanup for check 4 (root, the owner): mount the USB read-write and remove
 links to it (the tag links are made after the rename and removed by the delete first).
 Check 4's runbook gets this as a precondition. Also noted: on apsis-test, deleting one
 safety snapshot (2 to 3 GB, mostly hard links) takes about 70 s.
+
+**Correction (2026-10-03, check 4's 4a):** the tag links are removed *after* the folder
+(`delete_snapshot`: `prune::remove_at`, then `remove_tag_links`), not before, so the stopped
+delete left `snapshots-ondemand/2026-10-02_14-12-19` pointing at the removed folder. Harmless:
+`list` scans `snapshots/` only, and the next create's `update_symlinks` rebuilds every tag folder;
+removed by hand with the folder. The reinstall of the current build wasn't repeated: the
+helper and applet on apsis-test hash the same as the local deb (built 2026-10-02 14:26).
+
+## 2026-10-03 - check 4 passed on apsis-test: Stop, Cancel, a normal restart, a filled disk
+
+PLAN 6b.12 check 4, runbook `notes/check-4-runbook.md`, all four against the baseline
+`2026-10-02_10-50-46`, keep home, safety snapshot on; the 14-12-19 cleanup and the build check
+first (the correction above). Nothing restored, nothing left armed at any step.
+
+- **4b Stop**: clicked 16 s in, during the restore's own dry run (`checking disk space…`, the
+  create was never reached). Journal: `stop "2026-10-02_10-50-46" for :1.x (uid 1000):
+  stopping, SIGTERM to rsync's process group (SIGKILL after 10 s)`, then 6 s later `restore
+  "2026-10-02_10-50-46" keep-home safety for :1.x: stopped`. The state folder: today's
+  `restore.filter` and check 3's `result.json`; no `request.json`, no `/system-update`, no
+  unit file; no `apsis-staging` on the USB; the same three snapshots.
+- **4c Cancel**: `ready` 5 min 17 s after the click (the restore's dry run 31 s, the safety
+  snapshot's dry run 18 s, its create 3 min 45 s). Journal: `restore "2026-10-02_10-50-46" for
+  :1.x: plan removed (cancelled)`, `cancel-restore for :1.x: cancelled`. The state folder:
+  `result.json` only (the plan and the filter gone); the safety snapshot `2026-10-03_10-08-43`
+  stays, four rows. **The normal restart**: new boot id, `journalctl -b -1 -u
+  apsis-restore.service` says `-- No entries --`, zero `system-update.target` lines, kernel
+  7.1.5 unchanged, the marker and the kept file absent as check 3 left them.
+- **4d The filled disk**: `ready` 3 min 11 s after the click (the create 1 min 18 s, linked
+  to the morning's safety snapshot). `root_needs` 10 106 179 719 bytes (the 2% floor of a
+  460G partition), 454 974 615 552 free; `fallocate` of about 424 GiB left 200M (`df`:
+  `460G 436G 200M 100%`). Restart now: no restart. Journal: `plan removed: request.json`,
+  `restart-to-restore "2026-10-02_10-50-46" for :1.x: failed: can't restore this snapshot:
+  system-space:10106179719:209661952`; the job ended `stopped`. After `rm` of the fill:
+  424G free, the state folder `restore.filter` and `result.json`, no `request.json`, no
+  link, `apsis-helper.service` the only unit. The safety snapshot `2026-10-03_10-20-54`
+  stays, five rows.
+- 4e (the 31-minute prompt): skipped (owner); `Plan::is_too_old` has its unit tests.
+
+**Journal wording vs the runbook** (behaviour as designed, lines differ): the Stop line says
+`stopping, SIGTERM ...` rather than `ok`; a refused Restart now logs `plan removed:
+request.json` from `arm::disarm` (not `remove_plan`'s `plan removed (refused ...)`) and
+`failed: can't restore this snapshot: ...` because `Error::RestoreRefused` isn't in
+`describe_error`'s refused list, although nothing ran. Candidate, deferred with the other
+post-check fixes: say `refused:` for `RestoreRefused`. Also: a refused restart leaves
+`restore.filter` behind (the next preparation clears it); a cancel removes it.
+
+**The window** (owner, each step redone once to read the texts): after Stop `Restore stopped`;
+the "Stop the restore?" dialog's body "The safety snapshot being made is deleted. Nothing on
+the system has changed."; after Cancel `Restore cancelled`; the "Can't restore this snapshot"
+dialog "Not enough space on the system disk to restore (needs 9.4G, 200M free)." in the error
+colour, "Free some space, then try again.", "The preparation was dropped. Restore again to
+measure afresh."; **after Close the status area still reads `Preparing restore · ready`**:
+`on_restart_answered` opens the refusal dialog and returns without touching the status, and
+the job's later `stopped` end never reaches that path. Candidate, deferred with the other
+post-check fixes: on a refusal, set the status to `Restore stopped` (or a line naming the
+refusal) when the dialog closes.
+
+Left on apsis-test: the current build, five snapshots (the three of 4a plus the safety
+snapshots `10-08-43` and `10-20-54`, either can go, check 5 needs one restore to cut). No
+reinstall needed: no restore ran. Next: check 5, the power cut at about 30% of the copy.
