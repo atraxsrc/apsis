@@ -1602,7 +1602,9 @@ No root (run by Claude):
     strip a live xattr from an unchanged file (with `-X` it would: both are run). These skip
     with a message on a filesystem that stores neither.
   - **Not shown without root**, as ignored tests with the reason (check 11 below): owners by
-    number, a device node, a file capability.
+    number, a device node, a file capability. **They stay ignored**: check 11 showed all
+    three on apsis-test's real root (2026-10-03), with an ACL and a `user.*` attribute on a
+    root-owned file, so nobody is asked for a root run of the tests.
 - **Unit text** and its install path; **the drop-in's text and path** (the condition is
   `!/system-update/apsis-helper`, the path is under `/etc/systemd/system/`, and it is on the
   protect list and not in the package); **RECOVER.txt** has only UUIDs and the snapshot name.
@@ -1651,6 +1653,26 @@ No root (run by Claude):
   hashes, modules for `uname -r`, `dpkg --audit`, `/system-update` gone, the unit's journal,
   `result.json`. A VM harness (OVMF, a Pop!_OS install) isn't worth it for 0.5.0: it needs root
   and KVM, and the risk is Pop's boot chain on real hardware, which apsis-test is.
+- **Check 11's files stay on apsis-test** (found 2026-10-03): `/opt/apsis-check.txt` (an ACL
+  and a `user.*` attribute), `/opt/apsis-test-ids` (owner `54321:54322`) and
+  `/opt/apsis-test-null` (a device node) are live and inside "6b baseline" and "baseline
+  0.5.0", not inside "baseline1". No runbook creates files of those names or cleans `/opt`;
+  restoring "baseline1" deletes them from the live system (check 9 picks its snapshot
+  knowing that). Before a runbook has the owner create files, it has them list what is
+  there.
+- **A runbook script never guesses its mode** (check 11, 2026-10-03: a skipped step left the
+  snapshot's name empty, the script fell back to looking at the live system, and its pass
+  word was printed for a snapshot that didn't exist). Three rules for every runbook from
+  now on:
+  1. A script that can look at the live system or at a snapshot takes its mode as a
+     required first argument, the word `live` or a snapshot name. No argument is an error.
+  2. Every command that uses a name set in an earlier step fails in the owner's shell when
+     the name is empty (`${snap:?...}`), and the step that sets it ends with a command that
+     shows the name and that the folder is on the backup disk.
+  3. A pass word is printed only by a command that first finds, in the log it compares,
+     the header naming what was looked at (`== inside snapshot <name>`). And a step that
+     changes apsis-test is chained to the pass word of the step before it, so it can't run
+     after a step that was skipped.
 
 Checks:
 - **0.1** Facts: `sudo ls -la <backup>/timeshift/snapshots/<name>/localhost/boot/efi
@@ -1908,6 +1930,17 @@ Checks:
   /usr/bin/ping` is what was noted. Also there: `getfacl` on a file with an ACL, on the real
   ext4 root. The same three as ignored tests in `tests/restore.rs`, for a root run nobody is
   asked to make.
+  **Passed (apsis-test, 2026-10-03; DECISIONS "check 11 passed").** The items were the
+  preparation of 2026-10-01, still live under `/opt` and inside two of the base snapshots,
+  plus a `user.*` attribute as a fifth: the owner `54321:54322`, the node `c 1,3`, ping's
+  `cap_net_raw=ep`, the ACL `user:65534:r--`, `user.apsis`. A snapshot taken for the check
+  (the current build, so no reinstall afterwards) held all five; all five were changed
+  with no size or modification time moving; a read-only `rsync --dry-run -i` as root named
+  each (`.f....og...`, `cD+++++++++`, `.f........x`, `.f.......ax`); the restore (`rsync
+  exited 0` after 48 s, `done`) brought all five back, the capability byte for byte. Two
+  limits: `--numeric-ids` itself can't be told apart on one machine with one user database,
+  and `rsync-log` names the created node but none of the attribute-only changes. The three
+  ignored tests stay ignored: this check is their run on hardware.
 
 ### 6b.13 Order of work (after the final look)
 
@@ -2174,6 +2207,8 @@ Checks:
    day). Left, in this order (owner's triage, 2026-10-03): checks 11, 9 and 8; then the
    fixes found by the checks, all before release; then the release gate on the real 0.5.0
    .deb: one happy-path restore (check 1's flow) and check 13 again.
+   **Update 2026-10-03, later**: check 11 passed (DECISIONS "check 11 passed"). Left, in
+   this order: checks 9 and 8; then the fixes; then the release gate.
 
 Each slice ends with `cargo test --workspace`, clippy `-D warnings`, `cargo fmt` and a summary.
 

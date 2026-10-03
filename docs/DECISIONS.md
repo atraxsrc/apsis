@@ -5021,3 +5021,205 @@ rule protects a file that is a mount point when the restore is prepared. Not sho
 
 **Left**: checks 11, 9 and 8, in that order; then the fixes; then the release gate (one
 happy-path restore and check 13 on the real 0.5.0 .deb).
+
+## 2026-10-03 - check 11 passed: an owner by number, a device node, a file capability, an ACL and a user attribute come back
+
+PLAN 6b.12 check 11, runbook `notes/check-11-runbook.md` (untracked, revised once). One
+snapshot taken for the check, then one restore of it: keep home, the safety snapshot on,
+the disk in, the real kernelstub, the fixed build (helper `6d6b01b5…`). It is the run on
+hardware of the three ignored tests in `tests/restore.rs` (owners by number, a device node,
+a file capability), with an ACL and a `user.*` attribute on a root-owned file. What is
+marked (owner) was seen on apsis-test's screen; the rest is read from the check's logs.
+
+**The first run stopped at step 1, and what it found.** The runbook's preparation refused
+to write: `/opt/apsis-test-null` was already there. The preparation of 2026-10-01 is still
+live on apsis-test and is inside "6b baseline" (`2026-10-01_17-19-36`) and "baseline 0.5.0"
+(`2026-10-02_10-50-46`), one inode each across the two (link count 2), and **not** inside
+"baseline1". Nothing was written. Those files became the items, with a fifth one added,
+and the runbook was revised to create nothing under `/opt` and to clean nothing there:
+
+| item | where | value |
+|---|---|---|
+| owner by number | `/opt/apsis-test-ids` | `54321:54322`, mode 644 |
+| device node | `/opt/apsis-test-null` | `c 1,3`, `0:0`, mode 644 |
+| file capability | `/usr/bin/ping` | `cap_net_raw=ep` (`security.capability`, 20 bytes) |
+| ACL | `/opt/apsis-check.txt` (`0:0`, 644) | `user:65534:r--`, `mask::r--` |
+| a `user.*` attribute | `/opt/apsis-check.txt` | `user.apsis` = `1` |
+
+**Which snapshot, and why its own.** With the preparation inside the baseline, the
+baseline could have been the snapshot restored. The check took its own all the same
+(`2026-10-03_16-23-20`, comment "check 11", `"apsis-rsync-flags" : "-aAX --numeric-ids"`):
+it holds the current build, so no reinstall followed, and its link counts are a second look
+at the create (below). It and its safety snapshot were deleted at the end.
+
+**A slip in the second run: step 2 was skipped, and the recovery.** The snapshot was not
+taken, so the shell's `snap` was empty; the items script, given no name, looked at the live
+system (its header said `== the live system`), and step 2b's `SNAPSHOT-HOLDS-ALL-FIVE` was
+printed for a comparison of the live system with itself. Step 3's five changes were then
+made with no snapshot to restore. Recovered without a restore: cowsay purged, the markers
+and the kept file removed, then the runbook's put-back block (`chown`, `mknod -m 0644 ... c
+1 3`, `setfacl -m u:65534:r--`, the attribute, `setcap cap_net_raw=ep`; every `rc=0`).
+Afterwards the items block and the "before" numbers were identical to step 1's baseline.
+One trace is left: the device node is a new one (its time is 16:22 of that day, the two
+baselines hold the one of 2026-10-01); type, numbers, owner and mode are the same. The run
+then went on from step 2. The lesson is a harness rule now (PLAN 6b.12, "A runbook script
+never guesses its mode").
+
+**The snapshot** (16:23:20 to `done` at 16:28:50, linked against the baseline; 1.24 GB).
+Inside it, on the backup disk mounted read-only: the same items block as the baseline's,
+this time with the header `== inside snapshot 2026-10-03_16-23-20`. Link counts: 3 for
+`apsis-test-ids`, `apsis-check.txt` and `ping` (this snapshot and the two baselines: rsync
+links a file to the earlier snapshot only when owner, mode, time, ACL and attributes match,
+so the baselines' copies carry what the live files carry), 1 for the node (the put-back's
+new node differs in time from the baseline's; the create's log shows `cDc.t......` for it
+and `hf` for the other three). The dry run from the snapshot onto the live paths printed no
+item line: the live system was the snapshot.
+
+**The five changes** (after the markers, cowsay and the kept file): `chown root:root`, the
+node removed, `setfacl -b`, the attribute removed, `setcap -r`. The changed log shows all
+five different and **no size or modification time moved** on the three files. Then, as
+root, read-only, `rsync -a -A -X --numeric-ids --dry-run -i` from the snapshot onto the
+four live paths printed exactly:
+
+```
+.f.......ax apsis-check.txt
+.f....og... apsis-test-ids
+cD+++++++++ apsis-test-null
+.f........x ping
+```
+
+(and `.d..t...... ./` for `/opt` itself). No `>f`: no file's data would be sent. This
+settled, before any restore, the two claims the runbook had as unverified: rsync as root
+sees an owner-only change and a missing `security.capability` on a file whose size and
+time are the same. The ACL and the `user.*` attribute had been shown the same way on the
+main machine as an ordinary user (rsync 3.2.7, the restore's flags: 0 files transferred,
+both back).
+
+**The preparation.** `check-restore ... ok; home yes, root no, current format, apsis
+no-restore:0.4.2` (the version isn't bumped, so the dialog's Apsis line shows for this
+snapshot as for the baseline). The flags, live, from the helper's `running` lines: the
+restore's dry run `rsync -a -A -X --numeric-ids --delete --force --sparse --stats --dry-run
+--no-human-readable --exclude-from=.../restore.filter <snapshot>/localhost/ /` (39 s), and
+the safety snapshot's `rsync -aii -A -X --numeric-ids --recursive --verbose --delete
+--force --stats --sparse --delete-excluded --info=progress2 --link-dest=<the check's
+snapshot>/localhost/ ...` (dry run 15 s, create 1 min 32 s, 0.25 GB). `ready` 2 min 53 s
+after the click. At the prompt: no rule in `restore.filter` names `opt` or `ping`; the one
+rule that isn't anchored is `- home/Downloads`, from the config (observation a); the plan
+`"old_format": false`, `"home": "keep"`, kernel 7.1.5, the safety snapshot
+`2026-10-03_16-34-13`; the five still changed.
+
+**The offline boot** (`-1`, 16:38:10 to 16:39:04), `apsis-restore.service`:
+
+| time | line |
+|---|---|
+| 16:38:11.717 | the unit starts |
+| 16:38:11.731 | `Restoring the system. Don't turn off the computer.` |
+| 16:38:12.632 | `copying, attempt 1 of 3` |
+| 16:39:00.618 | `the copy ended: rsync exited 0` |
+| 16:39:03.125 | `refreshing the boot files` |
+| 16:39:03.857 | kernelstub's lines: `--preserve-live-mode`, 7.1.5 as the kernel and initrd, 7.0.11 backed up as the previous pair |
+| 16:39:03.955 | `the restore ended: done` |
+| 16:39:04.468 | `apply-restore ended: Finished(Done)` |
+| 16:39:04.474 | `Deactivated successfully` |
+
+The copy 48 s, the unit 53 s (26.4 s of CPU); the normal boot started at 16:39:24, about
+two minutes from Restart now to ssh answering (owner). `result.json`: `done`, the check's
+snapshot, the safety snapshot, `"home": "keep"`, an empty message. `tools/restore-check.sh`:
+every line ok, 0 failed units.
+
+**The five, after the restore**: the items block identical to step 1's baseline
+(`ITEMS-IDENTICAL`): `54321:54322`; `character special file 1,3`, `0:0`, mode 644;
+`/usr/bin/ping cap_net_raw=ep` and the attribute's 20 bytes the same; the ACL with
+`user:65534:r--` and `mask::r--`; `user.apsis` `1`; mode, size and modification time of the
+three files as before the snapshot. The "before" numbers identical too (`/home` 755
+root:root, cryptswap, the seven Flatpak rows, 1.9G, `disabled` twice, 7.1.5). Both markers
+and cowsay gone, the kept file there. The helper's sha256 still `6d6b01b5…`: no reinstall.
+
+**Check 12's after-restore state**: `pop-upgrade-init.service ... was skipped because of an
+unmet condition check (ConditionPathExists=!/system-update/apsis-helper)`; no `upgrade.sh`,
+`apt-get`, `system-upgrade` or `system-update-cleanup` line; `acpid` and `pop-upgrade`
+`disabled`; no `/upgrade-attempted`, no `/pop-upgrade`, the drop-in folder gone.
+
+**The window** (owner): `System restored to 2026-10-03 16:23`. The tooltip and the rows
+were not noted before the deletes.
+
+**The USB's free bytes**: 12031221760 before; 10793320448 after the check's snapshot;
+10540732416 after the safety snapshot; 12031221760 after both were deleted, exactly back.
+
+**Cleanup**: the kept file removed; `/opt` not touched (the old three as section P showed
+them, the node with its new time); ping `cap_net_raw=ep`, the same bytes; `dpkg --audit`
+clean; both snapshots deleted from the window one at a time (59 s and 73 s to `deleted`);
+three snapshots left, no rsync, no `/system-update`.
+
+**Two limits of what the check shows:**
+
+- **`--numeric-ids` itself isn't told apart.** 54321 and 54322 have no names, and for an id
+  without a name rsync uses the number with or without the flag; 65534 has one, but on one
+  machine with one user database a name maps to the same number anyway. Shown: owner,
+  group and the ACL's entry come back by number on the real root. The flag's own effect
+  needs another user database (a recovery from a live USB).
+- **`rsync-log` doesn't name attribute-only changes.** The restore's log has `cD+++++++++
+  opt/apsis-test-null` and no line for the owner, the ACL, the attribute or the capability
+  (0 error lines), as the experiment on the main machine had predicted for the ACL and the
+  attribute. So the log can say what was created, deleted or rewritten, not which owners
+  or attributes were set right.
+
+**For check 9**: "baseline1" doesn't hold the old three, so restoring it deletes them from
+the live system; "6b baseline" holds them (PLAN's harness note).
+
+**Observation a: the config's filter `- home/Downloads` has no leading slash** (read-only,
+nothing changed). apsis-test's config has `include_home = true` and two filters, in this
+order: `+ /home/<user>/**` and `- home/Downloads`.
+
+- *How it is written* (verified in code and on the disk): `exclude::for_backup` copies a
+  filter into the list as it stands; only a `+` filter with an absolute path gets lines for
+  its parent folders. The check's snapshot has it as line 58 of `exclude.list`, and the
+  restore's filter as its line 111 (the snapshot's list is appended unchanged).
+- *What it matches* (verified with rsync 3.2.7 on a temp tree, the main machine): a pattern
+  without a leading `/` that contains a `/` is matched against the end of a path, whole
+  names. Alone, the rule left out `/home/Downloads` and `/srv/home/Downloads` and copied
+  `/home/user1/Downloads` and `/myhome/Downloads`. So it is not the user's Downloads
+  folder. On apsis-test, on top of that, `+ /home/<user>/**` comes first and wins for
+  everything in that home. The user's Downloads folder is in every snapshot.
+- *Whether anything on apsis-test matches it*: unverified. Read-only: `sudo find / -xdev
+  -path "*/home/Downloads" 2>/dev/null`.
+- *Whose doing* (verified in code, as far as code can say): not a pick. Add Folder and Add
+  File (`picked_filter`) refuse a path that isn't absolute and write a folder as
+  `<path>/***`. Add Pattern (`typed_filter`) puts `- ` in front of whatever was typed, and
+  `validate_signed_filter` accepts any pattern that isn't blank. So it is an entry typed as
+  a pattern, or a hand edit of the file; which of the two only the owner knows. The UI did
+  what it is written to do: a relative pattern is a legitimate rsync rule (`*.iso`), so it
+  can't simply be refused.
+- *Candidates, not started*: a hint in the settings when a typed pattern has a `/` in it
+  but neither starts with `/` nor has a wildcard ("matches any path that ends this way;
+  start it with / to mean one place"). And `+ /home/<user>/**` is redundant while
+  `include_home` is on. The owner decides whether either is worth a change.
+
+**Observation b: twelve `kernel:` warning lines with nothing after the colon**, at
+16:38:13 in the offline boot (read-only). Not Apsis's and not new:
+
+- Verified from the earlier logs: check 7's verify log has the same twelve (14:43:06, its
+  offline boot). Check 1's log, taken without a filter, shows what they are: the empty
+  lines inside the kernel's ACPI error dumps for three of the firmware's WMI methods
+  (`\_SB.WMID.WQBC`, `WQBD`, `WQBE`: `ACPI BIOS Error (bug): Attempt to CreateField of
+  length zero`, then `hp_bioscfg: Returned error 0x4`), four empty lines per dump. Check 5's
+  log shows the same dumps in its retry boot.
+- Why they showed alone: the runbooks' filter drops the dumps' text lines
+  (`acpi|WQB|hp_bioscfg|Local[01]|Arg0`), but its `^\s*$` can't match a journal line whose
+  message is empty: the line still starts with its time and `kernel:`. A hole in the
+  filter, from check 7's runbook on.
+- Unverified: that the same dumps come in a normal boot (expected: the driver loads in
+  every boot). Read-only: `journalctl -b 0 -k --no-pager | grep -c WQB`.
+- For the next runbooks: add `kernel: *$` to the filter.
+
+**What check 11 established**: on the real ext4 root, as root, a new-format snapshot
+restores an owner and group by number, a device node, a file capability, an ACL and a
+`user.*` attribute, each after a change that left the file's size and modification time
+alone (or, for the node, removed it), with `rsync exited 0` and `done`; the create carries
+all five and `--link-dest` links their files only because the attributes match; the
+create's and the restore's flags are the ones in `native::rsync_argv` and `argv::rsync`,
+seen live. Not shown by it: `--numeric-ids`'s own effect. The three ignored tests stay
+ignored.
+
+**Left**: checks 9 and 8, in that order; then the fixes; then the release gate (one
+happy-path restore and check 13 on the real 0.5.0 .deb).
