@@ -5423,3 +5423,53 @@ ssh apsis-test 'journalctl --no-pager --since "2026-10-03 18:11:30" --until "202
 (Its lines carry the host's name, the account's name and the disk's label: none of them
 goes into the repo.) For the triage of finding 1 this means two things aren't understood
 yet, not one: when the desktop mounts the backup disk, and when it lets go of it.
+
+## 2026-10-03 - check 9, finding 1: what the journal of that stretch shows
+
+The read-only command of the entry above, run by the owner. Its lines, with the host, the
+account, the disk's label and its UUID left out (`sda` is the backup disk, `sdb` the
+owner's other stick; the helper is 0.4.1's):
+
+| time | line |
+|---|---|
+| 18:15:42 | the login: `gvfs-udisks2-volume-monitor.service` starts in the user's session |
+| 18:15:42 | the helper starts; one list `refused: busy with another snapshot operation`, one `ok, 4 snapshots`, then the kernel's `EXT4-fs (sda): unmounting filesystem` (the helper's own unmount) |
+| 18:15:43 | a second `ok` list and its unmount |
+| 18:15:46 | `udisksd: Mounted /dev/sda at /media/<user>/<label> on behalf of uid 1000` |
+| 18:16:43 | the helper leaves |
+| 18:17:58, 18:18:21 | `list for :1.N: failed: mount failed: mount: /run/apsis/backup: /dev/sda already mounted on /media/<user>/<label>.`, and mount's second line (`dmesg(1) may have more information after failed mount system call.`) as a journal line of its own |
+| 18:18:52 | udisks mounts `sdb`; 18:19:02 `Cleaning up mount point ... (device 8:16 no longer exists)`: the stick pulled while mounted |
+| 18:21:20 | the kernel's `EXT4-fs (sda): unmounting filesystem`; `udisksd: Cleaning up mount point /media/<user>/<label> (device 8:0 is not mounted)`; `udisksd: Unmounted /dev/sda on behalf of uid 1000` |
+| 18:21:32 | the helper starts; `list ... ok, 4 snapshots` |
+
+**What it settles, and what it corrects in the entry above:**
+
+- **The mount didn't go away by itself: the owner ended it.** It ended at 18:21:20 with an
+  unmount through udisks on behalf of the logged-in account (uid 1000), 12 s before the
+  list that worked. Not the helper: it wasn't running, and its own unmounts leave no udisks
+  line. The other stick had been gone since 18:19:02. Asked again, the owner corrected the
+  answer in the entry above: they did eject a disk around then and can't say which. Every
+  journal line of 18:21:10 to 18:21:25 (a second paste) adds this: an ssh session from the
+  main machine opens in the very second of the unmount and closes a second later, with no
+  sudo line, and another one-second session came at 18:21:12. So the unmount was either a
+  click on apsis-test or a command over ssh as the account (`udisksctl unmount` needs no
+  root for a mount the account's own session made); these lines can't tell the two apart.
+  Either way it was the owner's doing, not the desktop's and not Apsis's. Of the two things
+  the entry above calls not understood, one is left: when the desktop mounts the disk.
+- **Two lists failed, not "every later list"**: 18:17:58 and 18:18:21, both between the
+  desktop's mount and its unmount. The three `ok` lists are outside that stretch.
+- **When the mount came**: 4 s after the volume monitor started and 3 s after the helper's
+  second unmount. The helper had mounted and unmounted the disk twice within the monitor's
+  first second. Whether that is the trigger (the monitor taking a disk that changes state
+  while it starts for a newly plugged one) is **a guess of Claude's, unverified**; it would
+  fit "intermittent", since it needs a list at just that moment of a login.
+
+**The current build would fail the same way** (read in code, not run): the helper's mount
+call is the same in `v0.4.1` and today (`native::mount_argv`: `mount -o
+ro,nosuid,nodev,noexec /dev/disk/by-uuid/<uuid> /run/apsis/backup` for a list), and the
+error is `mount`'s, for a read-only mount of a filesystem that is mounted read-write
+elsewhere. Nothing in the helper looks for a foreign mount first. **Unverified**: what a
+create does then; it mounts read-write, which the kernel may allow next to the desktop's
+read-write mount, so a create could run while a list can't. For the triage of finding 1:
+test both on apsis-test with the disk mounted by hand in the file manager; then decide
+between a plain message and using the mount that is there.
