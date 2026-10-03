@@ -1850,6 +1850,15 @@ Checks:
 - 6. Backup disk unplugged before Restart now's reboot: never started, normal boot, the
   message after login. Unplugged at about 30%: copy broke. Replugged: attempt 2 finishes.
   Left out: "didn't finish", and Restore again finishes it.
+  **Passed (apsis-test, 2026-10-03; DECISIONS "check 6 Part A passed…" and "check 6
+  passed").** The pull is after `armed; restarting` (the arm reads the snapshot's `/boot`
+  sizes from the disk): the offline boot waited 60 s, `not-started`, nothing changed, the
+  window's line after login. The pull 13 s into the copy: `rsync exited 23`, `the copy
+  broke (…)`, `Retry { attempt: 2 }`, the replugged disk found at the retry boot's start,
+  `attempt 2 of 3`, `done`, `pop-upgrade-init` skipped in both boots (item 12). **Found and
+  fixed on the way** (commit `62b1560`): a disk that vanishes mid-copy can give rsync a
+  plain 23 without its "skipping file deletion" line, and the apply refreshed the boot files
+  over a mixed tree as `problems`; after a plain 23 the snapshot is now checked again.
 - 7. Boot files failed, simulated by the owner (e.g. a `kernelstub` that exits 1 on the test
   machine, put back afterwards): the ESP files are back, the newer kernel boots, `boot-kept` shown.
 - 8. Recovery drill: from the recovery partition, the README steps with the safety snapshot.

@@ -4720,3 +4720,65 @@ helper. The way back: install the fixed build, restore the baseline with the dis
 fixed apply runs the copy), install the fixed build again, log out and in, the markers, then
 Part B once more with the pull at 30 s after the Apsis line. Snapshots on the USB: the three
 base ones, `11-52-29`, `12-09-56`, `12-25-16`.
+
+## 2026-10-03 - check 6 passed on apsis-test: the backup disk pulled, twice (on the fixed build)
+
+PLAN 6b.12 check 6, runbook `notes/check-6-runbook.md`; Part A and the first two Part B runs
+are in the entry above. apsis-test was brought back first: the fixed build installed
+(`6d6b01b5…`; `e2fsck -n` of the USB `clean` after the day's pulls), the baseline restored
+with the disk in by the fixed apply (`copying` 13:00:36, `rsync exited 0` 55 s later, `done`,
+both markers gone, restore-check ok, the 1a helper back), the fixed build installed again,
+the markers and cowsay at 13:04.
+
+**Part B, third run (the pull at 30 s after the Apsis line):**
+- The preparation: safety snapshot `2026-10-03_13-07-14`; Restart now at about 13:10:40.
+- **The broken boot** (`-2`, 13:11:03 to 13:11:19, 16 s): the start line 13:11:04; `copying,
+  attempt 1 of 3` 13:11:05; the pull 13:11:18 (`usb 1-1: USB disconnect`, ext4 `error -5
+  reading directory block` for `comm rsync`), rsync in `/var/lib` at the time; **13:11:18 `the
+  copy ended: rsync exited 23`**, then **`the copy broke (rsync: [sender] opendir
+  ".../localhost/var/lib/systemd" failed: Input/output error (5)` … twenty such lines …
+  `rsync error: some files/attrs were not transferred (see previous errors) (code 23)`;
+  `rsync skipped its deletions after a read error, so the system may be a mix of the snapshot
+  and what was there before): restarting to try again, attempt 2 of 3`**; `apply-restore
+  ended: Retry { attempt: 2 }`; `Deactivated successfully`; the restart over the kept link.
+  No `refreshing the boot files`. The screen went dark right after the pull (owner).
+- **This run broke through the old rule**: rsync printed `IO error encountered -- skipping
+  file deletion` (`rsync-log` line 1092, after 1008 I/O errors), because the pull landed
+  while it was listing `/var/lib` and it still reached a folder's deletion pass. At 12:30 it
+  didn't. So rsync's behaviour depends on where the pull lands; both branches are in the
+  code, this one proved live, the new post-copy check by the 12:30 evidence and its unit
+  test, not yet live. One more Part B run would show it; optional (owner).
+- **The retry boot** (`-1`, 13:11:37 to 13:12:36): the disk plugged in as the screen went dark
+  enumerated at 13:11:37 with the boot (`usb 1-2: new high-speed USB device`); the unit
+  13:11:39; `copying, attempt 2 of 3` 13:11:40, 1 s in; `rsync exited 0` 13:12:32 (52 s);
+  `refreshing the boot files`; kernelstub naming 7.1.5; `the restore ended: done`;
+  `Finished(Done)`; `Deactivated successfully`. The normal boot 13:12:55; ssh 13:13:28: about
+  2 min 48 s from Restart now to the desktop with the pull, the broken boot and the retry in
+  it.
+- **PLAN item 12, first part, in both offline boots**: `pop-upgrade-init.service` skipped on
+  `ConditionPathExists=!/system-update/apsis-helper` in `-2` and `-1`; no `upgrade.sh`,
+  `apt-get`, `system-upgrade` or `system-update-cleanup` line; `acpid` and `pop-upgrade`
+  `disabled`; no `/upgrade-attempted`, no `/pop-upgrade`, the drop-in folder gone.
+- **After**: `tools/restore-check.sh` every line ok; both markers "No such file", the kept
+  file (13:04) there, cowsay gone (`no packages found`, no binary); before and after
+  identical (`/home` 755 root:root, cryptswap, `cap_net_raw=ep`, the seven Flatpak rows,
+  1.9G, disabled twice, 7.1.5); Proton VPN starts; `result.json` `done`, the baseline,
+  `13-07-14`, `home: keep`; the state folder `result.json`, `restore.filter`, `rsync-log`
+  (1410 lines: `building file list` at 13:11:05 and 13:11:40, the first run's errors and its
+  skipping line, then a clean second run; rsync appends, and with no power cut both runs
+  are there); the helper's start after login removed no leftovers. The window: `System
+  restored to 2026-10-02 10:50`.
+- 6h: the fixed build installed again (owner). On the USB: the three base snapshots and five
+  safety snapshots (`11-52-29`, `12-09-56`, `12-25-16`, the clean restore's, `13-07-14`),
+  7.6G free; the safety ones can go one at a time.
+
+**What check 6 established**, beyond PLAN's line: Restart now needs the disk (the arm reads
+the snapshot's `/boot` sizes), so "unplugged before Restart now's reboot" is the window from
+`armed; restarting` to the end of the offline boot's 60 s wait; the window shows the
+"not connected" list message and the `didn't start` result line at once; a disk late by 24 s
+is picked up by `udevadm wait` and the restore goes through; a disk that vanishes mid-copy
+gives rsync a plain 23 with or without its deletions line depending on where the walk is,
+and the apply now treats both as a broken copy (commit `62b1560`, the fourth exit 23 case in
+PLAN 6b.10). Next: check 7, the boot files failing (a `kernelstub` that exits 1 on
+apsis-test, put back afterwards): the ESP files back, the newer kernel boots, `boot-kept`
+shown.
