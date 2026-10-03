@@ -157,7 +157,8 @@ pub trait Runner {
     fn open_backup(&mut self, plan: &Plan) -> Result<(), String>;
 
     /// Reads what's at the snapshot's place, for [`check_snapshot`]. Asked right before
-    /// every copy.
+    /// every copy, and again after a copy that exited 23 (a disk that vanished mid-copy
+    /// looks like a few unreadable files to rsync; check 6, 2026-10-03).
     fn find_snapshot(&mut self, plan: &Plan) -> SnapshotFound;
 
     /// Step 3: pass 1, rsync over `/`. It returns only when what rsync wrote is on disk
@@ -432,13 +433,28 @@ fn run(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
                 .exit
                 .map_or_else(|| "didn't exit".to_owned(), |code| format!("exited {code}"))
         ));
-        let problems = match copied.end() {
-            CopyEnd::Ended { problems } => problems,
-            CopyEnd::Broke if state.attempts >= MAX_ATTEMPTS => {
-                let message = format!(
-                    "the copy broke on each of {MAX_ATTEMPTS} tries: {}",
-                    copied.why()
-                );
+        // A plain 23 is also what rsync 3.2.7 gives when the whole backup disk vanishes
+        // under it: its "skipping file deletion" line comes only from a later folder's
+        // deletion pass, and once the walk collapses none comes (check 6, 2026-10-03). So
+        // after a plain 23 the snapshot is looked at once more: gone, the copy broke.
+        let broke = match copied.end() {
+            CopyEnd::Ended { problems: false } => Ok(false),
+            CopyEnd::Ended { problems: true } => {
+                match check_snapshot(&plan, &runner.find_snapshot(&plan)) {
+                    Ok(()) => Ok(true),
+                    Err(reason) => Err(format!(
+                        "{}; after the copy, {reason}: the disk went away during the copy, \
+                         so the system may be a mix of the snapshot and what was there before",
+                        copied.tail
+                    )),
+                }
+            }
+            CopyEnd::Broke => Err(copied.why()),
+        };
+        let problems = match broke {
+            Ok(problems) => problems,
+            Err(why) if state.attempts >= MAX_ATTEMPTS => {
+                let message = format!("the copy broke on each of {MAX_ATTEMPTS} tries: {why}");
                 return finish(
                     paths,
                     runner,
@@ -448,12 +464,11 @@ fn run(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
                     message,
                 );
             }
-            CopyEnd::Broke => {
+            Err(why) => {
                 let attempt = state.attempts + 1;
                 runner.say(&format!(
-                    "the copy broke ({}): restarting to try again, attempt {attempt} of \
-                     {MAX_ATTEMPTS}",
-                    copied.why()
+                    "the copy broke ({why}): restarting to try again, attempt {attempt} of \
+                     {MAX_ATTEMPTS}"
                 ));
                 return End::Retry { attempt };
             }
@@ -984,6 +999,9 @@ mod tests {
         snapshot: SnapshotFound,
         /// rsync said it skipped its deletions, in every copy that exits 23.
         deletions_skipped: bool,
+        /// The backup disk leaves during the first copy: from then on the snapshot isn't
+        /// found, until a test puts it back.
+        disk_leaves_in_copy: bool,
         /// The exit codes of the copies to come; exit 0 when it's empty.
         exits: VecDeque<Option<i32>>,
         refresh: Refresh,
@@ -1017,6 +1035,7 @@ mod tests {
                 backup: Ok(()),
                 snapshot: found(&info()),
                 deletions_skipped: false,
+                disk_leaves_in_copy: false,
                 exits: VecDeque::new(),
                 refresh: Refresh::Works,
                 fail_esp_backup: false,
@@ -1093,6 +1112,13 @@ mod tests {
             self.call("copy", |fake| {
                 fake.note_state("copy");
                 let exit = fake.exits.pop_front().unwrap_or(Some(0));
+                if fake.disk_leaves_in_copy {
+                    fake.disk_leaves_in_copy = false;
+                    fake.snapshot = SnapshotFound {
+                        has_localhost: false,
+                        info: None,
+                    };
+                }
                 if matches!(exit, Some(0 | 23 | 24)) {
                     // The snapshot's kernels arrive; rule 10 keeps the running one's files.
                     fake.lab.install_kernel(OLD);
@@ -2011,6 +2037,54 @@ mod tests {
              deletions after a read error, so the system may be a mix of the snapshot and what \
              was there before"
         );
+    }
+
+    /// rsync 3.2.7 exits a plain 23, with no "skipping file deletion" line, when the whole
+    /// backup disk vanishes under it (check 6, 2026-10-03: the line comes only from a later
+    /// folder's deletion pass, and once the walk collapses none comes). So after a plain 23
+    /// the snapshot is looked at again: gone, the copy broke like any other, the boot files
+    /// aren't touched, and it's tried again.
+    #[test]
+    fn exit_23_with_the_snapshot_gone_after_the_copy_is_a_copy_that_broke() {
+        let lab = armed("apply-23-disk-gone");
+        let before = lab.esp_tree();
+        let mut fake = Fake::new(&lab);
+        fake.disk_leaves_in_copy = true;
+        fake.exits = [Some(23), Some(0)].into();
+        assert_eq!(boot(&mut fake), End::Retry { attempt: 2 });
+        assert!(is_linked(&lab));
+        assert_eq!(
+            State::load(&lab.state).unwrap(),
+            state(1, Step::Copy, false)
+        );
+        assert_eq!(fake.count_of("back_up_esp"), 0);
+        assert_eq!(fake.count_of("refresh_boot"), 0);
+        assert_eq!(fake.count_of("find_snapshot"), 2);
+        assert_eq!(lab.esp_tree(), before);
+        assert!(
+            fake.said.contains(
+                &"the copy broke (rsync error: code Some(23); after the copy, the snapshot's \
+                  folder isn't on the backup disk: the disk went away during the copy, so the \
+                  system may be a mix of the snapshot and what was there before): restarting \
+                  to try again, attempt 2 of 3"
+                    .to_owned()
+            ),
+            "{:?}",
+            fake.said
+        );
+        // The disk is back: the next attempt finishes it.
+        fake.snapshot = found(&info());
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::Done));
+    }
+
+    /// A plain 23 with the snapshot still there is what it was: a copy with problems.
+    #[test]
+    fn exit_23_with_the_snapshot_still_there_is_a_copy_with_problems() {
+        let lab = armed("apply-23-disk-there");
+        let mut fake = Fake::new(&lab);
+        fake.exits = [Some(23)].into();
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::Problems));
+        assert_eq!(fake.count_of("find_snapshot"), 2);
     }
 
     /// The next attempt can end well: the disk was back.

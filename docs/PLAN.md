@@ -695,8 +695,9 @@ the saved step** (6b.10).
    Never `--delete-excluded`, `--ignore-errors`, `-L` or `--link-dest`. Before every copy
    the snapshot itself is checked (6b.10, "Exit 23"). Exit 0 or 24: go on. 23 (some files
    couldn't be written or deleted): go on; the result is "restored with problems" and names
-   the log. **23 with rsync's "skipping file deletion" line**, anything else, or no exit code
-   (a signal): **copy broke** (6b.10).
+   the log. **23 with rsync's "skipping file deletion" line**, **23 with the snapshot gone
+   when it's looked at again right after the copy** (check 6, 2026-10-03), anything else, or
+   no exit code (a signal): **copy broke** (6b.10).
    The copy step returns only after a `syncfs` of each filesystem it wrote to (`/`, and a
    separate `/home` that's restored): rsync doesn't sync. Only then is step `boot-files`
    saved, so a copy that `state.json` records as ended is on disk and is **never run again**,
@@ -1388,16 +1389,27 @@ minimal one instead.
   clock in local time makes them disagree).
 - `RestoreResult` (6b.9) gives `""` and `0` for a `null` snapshot or time.
 
-**Exit 23** (found with real rsync, decided by the owner, 2026-10-01). rsync 3.2.7 exits 23,
-and nothing else, in three cases that aren't the same:
+**Exit 23** (found with real rsync, decided by the owner, 2026-10-01; the fourth case found
+in check 6, 2026-10-03). rsync 3.2.7 exits 23, and nothing else, in four cases that aren't
+the same:
 - some files couldn't be read or written: the rest is copied and deleted as usual. **Plain
-  23 stays `problems`**, and the apply goes on.
-- a whole folder of the snapshot can't be read (the backup disk going away under it looks
-  like this). From there on rsync deletes nothing, and says so on its standard output: "IO
-  error encountered -- skipping file deletion". **Exit 23 together with that line is a copy
-  that broke**: no boot refresh, the attempt counts, the link stays, and it's tried again
-  like any other broken copy. After the third, `failed`, and the message says the system may
-  be a mix of the snapshot and what was there before.
+  23 with the snapshot still there stays `problems`**, and the apply goes on.
+- a whole folder of the snapshot can't be read while the disk stays. From there on rsync
+  deletes nothing, and says so on its standard output when it next reaches a folder's
+  deletion pass: "IO error encountered -- skipping file deletion". **Exit 23 together with
+  that line is a copy that broke**: no boot refresh, the attempt counts, the link stays, and
+  it's tried again like any other broken copy. After the third, `failed`, and the message
+  says the system may be a mix of the snapshot and what was there before.
+- **the backup disk goes away under the copy** (check 6, 2026-10-03, the USB pulled 17 s
+  into a 54 s copy): every remaining `readdir` fails at once, the walk collapses within a
+  second, and **no deletion pass comes after the error, so the line is never printed**:
+  rsync exits a plain 23 with 59 files already deleted. So **after a plain 23 the apply
+  looks at the snapshot once more** (`find_snapshot` and `check_snapshot`, the same check as
+  before the copy; on ext4 the vanished disk's mount is in its shutdown state and every
+  open fails): gone, it's **a copy that broke**, with the reason in the journal; still
+  there, it's `problems` as above. Before this the apply refreshed the boot files over a
+  tree rsync had walked for a third of its length and reported `problems`, which the window
+  shows as `System restored to …`.
 - the snapshot's folder is missing altogether: nothing is copied or deleted, and there's no
   such line. rsync can't tell this from the first case, so **the apply checks the snapshot
   itself right before every copy** (`apply::check_snapshot`, pure): its `localhost/` is a

@@ -4613,3 +4613,110 @@ Left on apsis-test: the current build, four snapshots (the three base ones and
 `2026-10-03_11-00-37`, which can go). Next: check 6, the backup disk unplugged before Restart
 now's reboot (never started, normal boot, the message after login), then unplugged at about
 30% of the copy and replugged (copy broke, attempt 2 finishes).
+
+## 2026-10-03 - check 6 Part A passed; Part B found the apply finishing over a pulled disk (fixed)
+
+PLAN 6b.12 check 6, runbook `notes/check-6-runbook.md`, the baseline `2026-10-02_10-50-46`,
+keep home, safety snapshot on, the current build (`a764aa62…`) on apsis-test, two markers
+(`/etc/apsis-test-marker`, `/var/lib/apsis-test-marker-late`), cowsay, the kept file.
+
+**The pull is after Restart now, not before**: `check_and_arm` opens the shared mount and
+reads the snapshot's `/boot` sizes for the ESP space check, so with the disk out at the
+prompt the arm fails (`failed: backup device not found: <uuid>`, `plan removed:
+request.json`, the job `stopped`) and no offline boot runs. PLAN's "unplugged before Restart
+now's reboot" is the window from `armed; restarting` to the offline boot's 60 s wait; the
+runbook pulls the disk when the screen goes dark.
+
+**Part A passed** (the disk pulled during the shutdown, kept out through the login):
+- `armed; restarting` 11:59:41; the offline boot 12:00:03 to 12:01:05; the unit's start line
+  12:00:04; **12:01:04 `the restore ended: not-started: the backup disk <uuid> wasn't found
+  within 60 seconds`**, `Finished(NotStarted)`, `Deactivated successfully`; the normal boot
+  answered ssh at 12:01:45, 2 min 4 s after the click. Nothing about copying.
+  `pop-upgrade-init` skipped on the condition for the whole wait.
+- The screen: the Apsis line for the minute of the wait, then a normal boot (the design's
+  "didn't start" screen line went with check 1's one-message decision; the journal and the
+  window carry it).
+- `result.json` `not-started`, the baseline, the safety snapshot `2026-10-03_11-52-29`,
+  `home: keep`, the message with the disk's UUID. The state folder: `result.json` and
+  `restore.filter`; no plan, no `state.json`, no link, no unit, no drop-in folder. The three
+  test files, cowsay and the kernel untouched.
+- **The window with the disk out** shows both at once: the list area `Backup disk not
+  connected (UUID xxxx…). Plug it in.` with Try again, the Backup disk line `not connected`,
+  and the status area `The restore didn't start · nothing was changed · reconnect the backup
+  disk`; its tooltip is the helper's message with the UUID. After the plug-in the window's
+  own list came back by itself at 12:02:25 and the two panel applets' two seconds later; the
+  result line stayed.
+- The preparation: `started` 11:51:28, dry runs 38 s and 19 s, the create 3 min 44 s,
+  `ready` 5 min 20 s after the click. 2 min 4 s from Restart now to the desktop.
+
+**Part B, first run (12:12 to 12:15): the pull landed in the wait, not the copy.** One
+offline boot; `copying, attempt 1 of 3` came 24 s after the start line (1 s in every earlier
+boot): the disk was out when the boot began and back about 23 s in, so `udevadm wait` found
+it, the copy ran whole (54 s), `done`. Recorded as a "disk late by 24 s" variant of Part A
+that passed; the broken-copy branch wasn't reached. The kernel log also shows the disk
+leaving at 12:04:30 and 12:17:19 (two `lost async page write` each) and 12:23:54 (`lost sync
+page write`) between the parts: the owner re-seated it between ports. **Pulling it with
+writes pending is the one thing that can hurt the backup filesystem**: let the helper's job
+end and the mount go before a pull, and `e2fsck -n` it before check 7 (runbook).
+
+**Part B, second run (12:28 to 12:31): the pull landed in the copy and the apply finished
+over it.** Preparation `ready` 12:28:33 (safety snapshot `2026-10-03_12-25-16`); the offline
+boot 12:30:28 to 12:30:52; `copying, attempt 1 of 3` 12:30:30; the pull at 12:30:47 (ext4:
+`I/O error while writing superblock`, `Aborting journal on device sda-8`; the mount shows
+the `shutdown` option afterwards); **12:30:48 `the copy ended: rsync exited 23`; 12:30:50
+`refreshing the boot files`**; kernelstub; `the restore ended: problems: some files couldn't
+be written or deleted; see /var/lib/apsis/restore/rsync-log`; `Finished(Problems)`; a normal
+boot; **the window `System restored to 2026-10-02 10:50`**. restore-check: every line ok
+(the ESP, dpkg's audit and the units can't see a mixed tree).
+
+The evidence (`rsync-log`, 355 lines): 40 `rsync: [sender] readdir(".../localhost/usr/share/
+icons/…"): Input/output error (5)` lines from 12:30:47 on, `Number of deleted files: 59`,
+`total size is 7,645,244,508`, `rsync error: some files/attrs were not transferred (see
+previous errors) (code 23)`, and **no "IO error encountered -- skipping file deletion"
+anywhere**. The tree afterwards: the `/etc` marker gone, the `/var/lib` marker there,
+cowsay's binary gone with dpkg still listing it `ii` (`/var/lib/dpkg` never reached), the
+helper a third hash (the baseline's 1a build: `/usr/libexec` reached). A mix, reported as
+restored.
+
+**Cause.** PLAN 6b.10 held that a disk going away looks to rsync like an unreadable folder,
+which makes it print the "skipping file deletion" line, and `Copied::end` mapped a plain 23
+to `Ended { problems: true }`. rsync 3.2.7 prints that line only when, with its I/O-error
+flag set, it next reaches a folder's deletion pass (`--delete` is delete-during here). When
+the whole disk vanishes every remaining `readdir` fails at once, no folder is entered again,
+the walk collapses within a second, and the line never comes: a plain 23, exactly the code
+of "a few files couldn't be read". The helper's segment reader was not the gap: the line
+isn't in the log either.
+
+**Fix (core `restore::apply`, gate green, 2026-10-03).** After a copy that exited 23 the
+apply calls `find_snapshot` and `check_snapshot` once more, the check it already makes
+before every copy. The snapshot gone (on ext4 the vanished disk's mount is in its forced
+shutdown state and every `open` returns EIO, so `info.json` can't be read): **the copy
+broke**, with the journal line `the copy broke (<rsync's last lines>; after the copy, the
+snapshot's folder isn't on the backup disk: the disk went away during the copy, so the
+system may be a mix of the snapshot and what was there before): restarting to try again,
+attempt 2 of 3` and the usual retry over the kept link; the third such break ends `failed`
+as the others do. The snapshot still there: `problems` as before. Tests:
+`exit_23_with_the_snapshot_gone_after_the_copy_is_a_copy_that_broke` (the fake's disk
+leaves during the copy; no ESP backup, no boot refresh, the ESP untouched, the retry
+finishes it) and `exit_23_with_the_snapshot_still_there_is_a_copy_with_problems`. PLAN
+6b.6 step 3 and 6b.10 "Exit 23" now say four cases. Not changed: `Copied::end` itself (the
+deletions-skipped rule still holds for a folder that goes unreadable while the disk stays).
+
+**Found with it, deferred with the other post-check fixes** (owner to decide):
+1. **`problems` reads as `done` in the window**: `result_text` gives `Outcome::Done |
+   Outcome::Problems` the same `System restored to <date>` line, and the helper's message
+   is only in the tooltip. A line that says some files weren't restored, with the log named,
+   is due.
+2. **The result tooltip's home and safety snapshot are fixed strings** ("Home folders were
+   kept.", "Safety snapshot: none."): `RestoreResult` on the wire carries the outcome, the
+   snapshot, the message and the time, not `home` or `safety_snapshot`, though `result.json`
+   has both. Seen after check 6's first Part B run. Adding the two fields is cheap while
+   `Helper3` is unshipped; check 3's "Home folders were restored too." was never confirmed
+   for this reason.
+3. The apply logs nothing of rsync's errors on a plain 23 (the result names the log only).
+
+**apsis-test now**: a mix of the baseline and the state before 12:30, with the 1a build's
+helper. The way back: install the fixed build, restore the baseline with the disk in (the
+fixed apply runs the copy), install the fixed build again, log out and in, the markers, then
+Part B once more with the pull at 30 s after the Apsis line. Snapshots on the USB: the three
+base ones, `11-52-29`, `12-09-56`, `12-25-16`.
