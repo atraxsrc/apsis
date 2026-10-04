@@ -25,7 +25,7 @@ creates, lists and deletes snapshots and holds the settings.
 Timeshift works fine on COSMIC. Apsis is a native alternative, and Timeshift can still read its
 snapshots.
 
-> **Status:** 0.5.0 (in development). Apsis takes rsync snapshots itself and doesn't need
+> **Status:** 0.5.0. Apsis takes rsync snapshots itself and doesn't need
 > Timeshift. It uses Timeshift's layout on the backup disk, so snapshots Timeshift made keep
 > working in Apsis. Manual only: there is no schedule, and a snapshot
 > is only deleted when you delete it. **Restoring the whole system is new in 0.5.0 and

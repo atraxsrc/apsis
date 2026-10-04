@@ -4,7 +4,7 @@ All notable changes to Apsis are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] - 0.5.0
+## [0.5.0] - 2026-10-04
 
 Restoring the whole system to a snapshot, at the next start. Experimental; Pop!_OS 24.04
 with systemd-boot only.
@@ -381,6 +381,7 @@ First release.
   password every time.
 - App and symbolic icons, AppStream metainfo, desktop entries, `just install` / `just uninstall`.
 
+[0.5.0]: https://github.com/atraxsrc/apsis/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/atraxsrc/apsis/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/atraxsrc/apsis/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/atraxsrc/apsis/compare/v0.3.1...v0.4.0
