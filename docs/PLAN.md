@@ -2500,8 +2500,8 @@ Checks:
    13. the version bump, last, before the gate's build. The tag comes after the gate.
 
    **The release gate**, on the real 0.5.0 .deb, in one list:
-   - the build's hashes (the .deb, the helper, the applet), and the install over 0.4.2-1:
-     dpkg says 0.5.0-1;
+   - the file is the .deb CI builds from the tag, taken from the draft release: its hashes
+     (the .deb, the helper, the applet), and the install over 0.4.2-1: dpkg says 0.5.0-1;
    - one happy-path restore (check 1's flow) of a snapshot taken with that .deb installed,
      whose dialog shows no Apsis line (`apsis current`); `RECOVER.txt` read back at the
      ready prompt; `tools/restore-check.sh` clean;
@@ -2510,6 +2510,8 @@ Checks:
      check-restore; the disk unmounted afterwards with `udisksctl unmount`, never ejected;
    - **after the happy-path restore, written down word for word**: the window's status
      line (`System restored to ...`), its tooltip, the four rows, and both monitors;
+   - **`RestoreResult` by `busctl`** after the happy-path restore: the answer is
+     `(sssxss) "done" "<baseline>" "" <a number> "keep" "<safety snapshot>"`;
    - **the systemd-boot menu's entries word for word**: `bootctl list`, and the menu on the
      screen at one boot;
    - **the kept pair, by hash**: at the ready prompt, the hashes of `restore.filter` and of
@@ -2537,6 +2539,8 @@ Checks:
      (no stale lock); no rsync left afterwards (`pgrep rsync`); the staging folder is a row;
    - fix 2: the helper stopped by hand in the middle of a delete of a throwaway snapshot
      (Claude's proposal): a row appears and Delete removes it;
+   - **Settings' Cancel during a running save**: it drops the edits and leaves the page
+     while the save still writes; what the window and `config.toml` show afterwards;
    - the close: the three base snapshots and the free bytes of before, `/opt` and the
      harness untouched, nothing armed.
 

@@ -6103,3 +6103,323 @@ The order of work, where the version bump goes and the release gate's list are i
    their own commit, for the owner to edit.
 3. The unit's `ConditionFileIsExecutable=` hardening from `notes/armed-upgrade.md` is
    after 0.5.0: it changes the unit's text and wants an offline boot of its own.
+
+## 2026-10-04 - as built: the fixes before 0.5.0, the version bump, and the release mechanism
+
+The fixes and records decided in the triage entry above ("triage of checks 1 to 9 and the
+check 8 findings, and the owner's decisions") are built, in PLAN 6b.13's order of work, one
+commit each on `restore-6b-core`: `176c898` (fix 3), `9142449` (fix 4), `ab75045` (fix 6),
+`ca59fcf` (fix 5 and the result texts), `9f83218` (item 9), `917e980` (Pull 1), `0f5a6c7`
+(the disarm's flush, N3), `c251e49` (the armed-state gap), `114e2aa` (row 12), `f8c2db2`
+(`RECOVER.txt`), `546abe7` (the README's recovery section), `32d1dff` (fix 2), `9d23dd8`
+(a README limit), `9692f8c` (fix 1, 1b, row 5), `f918845` (step 12), `0ee8dda` (the
+version bump). This entry records, by topic, what the code decided beyond the rulings, and
+which earlier rulings it replaces. PLAN 6b marks each built bullet "Built (...)"; the older
+entries stand as written.
+
+**Labels.** "Read, not run" or "read from the code" = no run has shown it; "unverified" = not
+known. Every decision marked (owner) is the owner's, 2026-10-04.
+
+### The helper and the job lock
+
+- **The lock file** is `/run/apsis/job.lock`, root's, 0600, opened `O_NOFOLLOW | O_CLOEXEC`
+  and taken with `LOCK_EX | LOCK_NB` after the `running` flag and before anything is
+  announced, so a write refused by a package script was never a job. A symlink there, or a
+  file not owned by root, refuses the job as `Busy` with a journal line and leaves the file
+  as it is; any mode but 0600 is set to 0600 with `fchmod` first (`flock` works on a
+  read-only descriptor, so a 0644 file would let any user hold the lock). Left: a user who
+  opened a 0644 file before that `fchmod` keeps the descriptor until a restart; only an
+  unreleased build without the `prerm`'s `umask 077` could have made such a file.
+- **Unlocked, not only closed.** The lock's `Drop` calls `LOCK_UN`: a child forked a moment
+  earlier holds a copy of every descriptor until it execs, and a `flock` lasts until the
+  last copy closes. `O_CLOEXEC` stays, for a helper that dies.
+- **One guard, not two.** The triage's "the helper also takes it around the arm" is built
+  wider: `State::take_ready` marks the plan as taken in its slot and takes the lock, and that
+  guard (`Ready`) is what "Restart now", a cancel and the starter-gone path hold until the
+  plan has ended. The guards own the lock, not `State`; a ready plan's lock is dropped
+  before the plan goes back in its slot. A ready plan still holds no lock, as ruled.
+- **Row 5 is closed**: in the seconds between "Restart now" taking the plan and the link
+  being made, a second `Restore`, `Delete`, `DeleteMany`, `Create` and `WriteConfig` are
+  `Busy` (owner: kept as `Busy`), lists and `CheckRestore` go on, and `Job()` shows the
+  restore at 100%. A second "Restart now" and a cancel then are `Busy` too. The window is
+  unchanged: `Busy` closes the prompt with the busy line, and the plan ends right after.
+- **A taken plan dropped unended** (a panic) leaves its slot and frees the lock with no
+  announcement, as a job dropped unended does.
+- **Reads, `--disarm` and `--apply-restore` take no lock.**
+- **New journal lines**: `the job lock <file> is held: a package script runs`, `the job
+  lock <file> couldn't be taken: <error>`, `the plan's window left the bus, but the plan
+  stays: <error>`.
+- **The helper's errors cross the bus in their own words** (`f918845`): `encode_error`
+  sends `Error::Helper`'s message without the `apsis-helper: ` its Display puts in front;
+  the journal keeps the prefix (`describe_error` uses Display). `41bcac9` (0.4.2) had taken
+  it off only for errors made in the window's own process; a helper error that crossed the
+  bus showed it in every 0.4.x (checked against the tags' code) and on this branch until
+  `f918845`.
+- **This replaces, in part**, check 9's entry's "its raw `apsis-helper:` prefix is already
+  gone in 0.4.2" (this file, lines 5372-5373): that holds for errors made in the window, not
+  for helper errors that crossed the bus, which kept the prefix until `f918845`. Where C1's
+  mount error got its prefix in 0.4.1 is unverified (in this build a failed `mount` is
+  `Error::Native`, `mount failed: <stderr>`, with no prefix).
+- **The journal says `refused:` for a refused restore** (fix 3, `176c898`):
+  `Error::RestoreRefused` joins `describe_error`'s refused list, so the line is `refused:
+  can't restore this snapshot: <word>` at the preparation's end and at "Restart now", where
+  the same text also goes into the plan's removal line.
+
+### The restore: the preparation, the arm and what they write
+
+- **The armed-state guard** (`c251e49`). A second preparation while `/system-update`
+  exists is refused before it touches anything: `prepare::guarded` looks at both names in
+  front of the cleanup of leftovers and of the removal after a failed preparation.
+  Apsis's own link is `Refusal::RestoreArmed` (`restore-armed`); anything else at either
+  name stays `PendingUpdate`. `CheckRestore` makes the same split (core's `System` gained
+  `restore_armed`, set from a read of the link; at the apply it is false, the link being
+  the restore's own), keeping the pending update's place, last, in 6b.7's order.
+- **B1 (owner)**: `Restore` refuses while armed before the password and reads the link again
+  after it, both before `State::begin`; `guarded` under the lock is the third look. This
+  reverses an earlier ruling of the same day (the refusal after the password) that was
+  made in a review round and not written in this file. The order in `Restore`: the name
+  check, the link, busy, the password and the caller's uid, the link again,
+  `State::begin`. The method's error is `Failed` with `restore refused: restore-armed`, so
+  the window opens its "Can't restore this snapshot" dialog; the journal line is
+  `refused: can't restore this snapshot: restore-armed`. A foreign link is not refused
+  before the lock: the password is asked and `guarded` refuses it as `pending-update`, a
+  job that ends `failed`, as before.
+- **Pull 1, the filter's lifetime** (`917e980`), as built:
+  - `give_up` removes the working files but not `request.json`: it never removed it (the
+    helper's next start removes the plan). This corrects the premise of the triage's
+    "next to the removal of `request.json` in core's `clean_up` and `give_up`" (this file,
+    "Pull 1, as decided", line 5959); the removal sites are otherwise as ruled.
+  - The arm's two renames are consecutive, not one step: a power cut between them leaves a
+    mixed pair (this plan's filter, the earlier arm's note), with no link. Temporary files
+    of a cut arm (`last-restore.*.apsis-tmp`) stay until the next arm.
+  - A late arm failure (after the pair is kept, for example the helper copy) has already
+    replaced the pair and cleared `rsync-log`.
+  - A refused "Restart now" still calls `disarm` first; the plan's end is one line,
+    `plan removed (refused: ...)`, with `arm undone: ...` only if something of an arm was
+    there. No unit test covers that routing; the release gate's refused "Restart now"
+    does.
+  - A preparation can't run while another plan is ready (`State::begin` answers `Busy`),
+    so the removal at a failed preparation's end touches its own files only.
+  - `copy_all` stages every copy before it renames any; a source that can't be read leaves
+    both targets as they were. The copies are not capped at 64 KiB as the JSON files are.
+  - The cleanup of leftovers leaves `result.json`, `rsync-log` and the kept pair, so Cancel
+    no longer deletes the last restore's log.
+- **The disarm's flush** (`0f5a6c7`): `sync()` returns no error, so the failure policy
+  covers the flush of the link's folder only; an error takes the place of the list of
+  removed names; a removal that fails after a flush that failed wins (the flush's error is
+  lost). A restart that logind refused now logs `couldn't disarm: ...` instead of dropping
+  `disarm`'s result. An empty wants folder is removed whoever made it, as the drop-in's
+  folder is. The flush failure is injected in tests; no test shows a real power cut, a real
+  `fsync` failure, or that `sync()` ran.
+- **`RECOVER.txt`** (`f8c2db2`): `restore.note` is written first (the state folder), then
+  `RECOVER.txt` on the backup disk; if the second fails, the preparation fails and removes
+  `restore.note` again. Each write is a temporary file, `fsync`, rename, `fsync` of the
+  folder; a failed write leaves the earlier note whole. Modes: `restore.note` 0600,
+  `RECOVER.txt` 0644 exactly (it holds only UUIDs and snapshot names). A note that can't
+  be written fails the preparation after the safety snapshot was made: the safety snapshot
+  stays as a list row; the error names neither (owner: a README sentence, no code). The
+  filter warning line sits after the commands, before `Then:`. rsync in Pop's recovery is
+  3.2.7 (check 8); a missing `--exclude-from` file gives exit 11 before anything is copied
+  (shown on the main machine with 3.2.7 and the note's flags); a live USB's rsync is
+  unchecked. A test asserts that the "same snapshot again" command drops `-A -X` for an
+  old-format snapshot and the safety snapshot's keeps them; there is no golden file for it.
+- **Which pair a recovery finds** (read from the code): every state where the note may be
+  needed comes after an arm, and the arm copies the pair first or fails with no link; after
+  that only the next arm or a purge replaces or removes `last-restore.*`, and
+  `/var/lib/apsis/***` is protected from the copy. A Stop never rewrites `RECOVER.txt`.
+- **Item 9** (`9f83218`): on a plain exit 23 with the snapshot still there, rsync's last
+  error lines go to the journal as `apsis-helper: rsync stderr: <line>` (owner: the prefix
+  `rsync stderr: `), empty lines left out, said after the copy's `syncfs` and before the
+  step is saved. Core does not cut to 20; the helper's tail does, and one test ties the
+  two. The journal can carry file names, including files in another user's home if home
+  was restored (accepted, owner: the journal is readable by `adm`, the log is root's).
+  Nothing is said line by line after exit 0 or 24, after a copy that broke, or after a 23
+  with the deletions skipped or the snapshot gone.
+- **Fix 6** (`ab75045`): `RestoreResult` is `(sssxss)`. A ready plan sends `""` for home
+  and the safety snapshot. `from_wire` refuses an outcome with no home word or one it
+  doesn't know; the wire's home words are the file's, `keep` and `restore`. `result.json`'s
+  format did not change (it had both fields from its first commit). A window and a helper
+  that disagree on the type get an error for the call and the window shows no result line
+  (read from the code, not run).
+
+### Delete and the staging folder
+
+- **Fix 2** (`32d1dff`), beyond the ruling: the move is `RENAME_NOREPLACE` (any error
+  refuses, nothing moves, no plain-rename fallback); the staging folder is made with
+  `mkdirat` 0755 (the umask applies) and opened `O_NOFOLLOW`, and a refused move removes it
+  again if it is empty. Two refusal texts, both `InvalidInput` and before anything changed:
+  `apsis-staging/<name> is already there` (`EEXIST`) and `can't move it into
+  apsis-staging/ (<errno>)`. The order after the move: the line `moved <name> to
+  apsis-staging/`, `fsync` of `snapshots/` then of `apsis-staging/` (an error fails the
+  delete with the folder whole in the staging folder), the tag links, the walk, the
+  staging folder if empty, the unchanged `deleted ...` line.
+- **The row rule**: a snapshot name, a real folder, a regular `info.json` that parses, no
+  `exclude.list`. A symlinked `info.json` with no `exclude.list` stays the warning
+  `incomplete: no exclude.list`. Every leftover row reads "Unfinished snapshot or delete ·
+  Delete removes it" (owner).
+- **Left as is (owner)**: a name half-deleted in both `snapshots/` and `apsis-staging/` is
+  one row whose Delete is refused (`EEXIST`) until the next create removes the staging one;
+  a dangling tag link after a cut stays until the next create.
+- **Row 12** (`114e2aa`): every `Delete` and `DeleteMany` is refused while Apsis's own link
+  is in place (owner), read before the password and again after it, both before
+  `State::begin`: no job, no announcement, no mount. The name check still comes first. Not
+  checked a third time under the lock (a refusal there would be a `failed` job that every
+  window shows); since `9692f8c` a delete in row 5's seconds is `Busy`. On the wire:
+  `Error::RestoreArmed`, the text `restore armed`, the existing `Failed` error. Another
+  tool's link refuses no delete. An older window with the new helper shows "Delete failed:
+  restore armed" (read from the code, not run).
+- **No path but `Delete` and `DeleteMany` removes a finished snapshot** (read from the
+  code); a create removes folders in the staging folder only.
+
+### The window
+
+- **Fix 4** (`9142449`): when "Restart now" is refused (`RestoreRefused`), the window opens
+  the "Can't restore this snapshot" dialog with its dropped-plan line, as before, and now
+  also sets the status line to "Restore stopped"; before, it returned without setting it,
+  so `Preparing restore · ready` stayed. Any other error at "Restart now" keeps its error
+  line, unchanged.
+- **The result texts** (`ca59fcf`; the strings are the owner's): `problems` has two lines,
+  told apart by the helper's message naming `rsync-log` ("some files were not restored")
+  or not ("a cleanup step failed"); brittle and deliberate, a typed field would change the
+  wire. `problems` is the warning colour; `boot-broken` has its own line and tooltip in the
+  error colour; the `boot-kept` tooltip says "keeps the ones it had" (it also covers boot
+  files never touched); the `failed` tooltip has its own string when no safety snapshot was
+  taken. Colours are tested as tones, not pixels. Known limits (owner: not in 0.5.0): the
+  `failed` tooltip's advice is always about the backup disk; a `done` result can carry a
+  note about the previous kernel's boot files that no window shows; `rsync-log` needs root
+  to read. None of these lines has been seen in the real window.
+- **The result's tooltip** (fix 6) names the safety snapshot by its folder name (owner);
+  a result with no home word, not reachable over the bus, leaves the home sentence out.
+- **The armed refusals**: the "Can't restore this snapshot" dialog with its two lines for
+  B1, and no wait for a job end for it (`expect_own_end`; before, any restore job's
+  announcements were taken for its own for five seconds). A delete while armed: "Not
+  deleted: a restart to restore is waiting." with the tooltip "Restart the computer, or
+  wait for it to time out. Nothing was deleted."; no list, the selection stays.
+- **Settings' Cancel** (C3, `f918845`) is always clickable and leaves the page, dropping
+  any change; before, it was disabled until a value changed. A test clicks the centre of
+  every laid-out part of the page with the headless renderer and checks which messages
+  come out, the way a button's enabled state is now tested; it runs with the layout tests,
+  `APSIS_LAYOUT_TEST=1 cargo test -p apsis -- fit settings_cancel`.
+
+### The package scripts
+
+- **The `prerm`** (`9692f8c`): A's line (`apsis: the restore that was waiting for a restart
+  is cancelled`) on stdout, the refusals and the warning on stderr. It sets `umask 077`
+  before it makes the lock file, after the `mkdir`, so `/run/apsis` keeps its mode. The
+  timer stop isn't guarded by the systemd check (`|| true` covers it). After `--disarm`
+  the link decides, not the exit status, as PLAN 6b.9 records.
+- **`--disarm`'s lines**: `disarm: nothing armed`, `disarm: removed <names>` (owner: the
+  shorter line; "no restart in 10 minutes;" is gone, false under `apt remove`).
+- **`postrm`**: the reload of systemd and the bus comes after the unit files go (for purge
+  it came before); the wants folder and the drop-in's folder go when empty; purge's
+  removals are `rm -rf "$ETC" "$LIB"` (`/etc/apsis`, `/var/lib/apsis`), last.
+- **`postinst`** was touched for one line: all three scripts name the systemd check's path
+  as `SYSTEMD=/run/systemd/system`, so the tests don't depend on the build machine running
+  systemd.
+- **The test harness** runs copies of the scripts with a `PATH` of one folder: a fake
+  `systemctl`, `busctl` and helper, and links to `flock`, `mkdir`, `readlink`, `rm`,
+  `rmdir`, `true`. It refuses root, any absolute path outside its folder but `/dev/null`
+  and `/org/freedesktop/DBus`, and `..`. A new command in a script needs a line there or a
+  fake.
+- **Read, not run**: every statement about what dpkg does around the refusal (the new
+  package's `prerm failed-upgrade`, apt's wording). The release gate's list in PLAN 6b.13
+  shows them.
+- **The version bump** (`0ee8dda`): the workspace version is 0.5.0 (`Cargo.lock` follows,
+  the three apsis crates only), and the three release entries that go into the .deb come
+  with it, dated 2026-10-04: `resources/deb/changelog`'s `0.5.0-1` entry (signed with the
+  repo's commit identity), the metainfo's 0.5.0 release, the man page's `.TH` line. The
+  changelog entry and the metainfo say that an upgrade from 0.4.x does not wait. This
+  **replaces** "the 0.5.0 entry is the owner's at release, with `Cargo.toml`'s version
+  bump" and "also the owner's at release: the metainfo's release entry" (this file, lines
+  3998 to 4001) and "the `.TH` line ... the owner's at release, with the version" (line
+  3994): they are in the bump commit (owner). No test checks that the versions agree.
+- **lintian** on the 0.5.0 .deb built locally: 0 errors. `desktop-mime-but-no-exec-code`
+  is kept (owner): it comes from the applet entry's empty `MimeType=` since 0.4.2 dropped
+  `%F` (`Exec=apsis`), and 0.5.0 doesn't change it. It joins the warnings kept since
+  2026-09-26 (this file, line 785 on); `maintainer-script-calls-systemctl` now has three
+  sites (`prerm` twice, `postrm` once).
+- **The metainfo's screenshots stay as they are for 0.5.0** (owner): they point at an
+  older commit's copies.
+
+### The docs
+
+- **README** (`546abe7`, `9d23dd8`, `f918845`, and the fix commits): "If a restore goes
+  wrong" matches `RECOVER.txt`, with the boot check and `last-restore.filter`; the
+  half-deleted snapshot that looks whole is a known limit; the troubleshooting rows for
+  the new result lines, for a backup disk the desktop mounted (unmount it in Files, don't
+  eject, then Refresh; what makes the desktop mount it is unknown), and for a filter
+  without a leading slash (one sentence under Filters); one sentence that `just uninstall`
+  runs none of the package's checks; a paragraph "The upgrade from 0.4.x doesn't wait"
+  (v0.4.0, v0.4.1 and v0.4.2 ship one and the same `prerm`).
+- **The man page** carries the same filter sentence and names `last-restore.filter`;
+  `groff -man -ww -z` is clean.
+- **CHANGELOG.md**'s 0.5.0 section stays "Unreleased" until the release commit.
+- **No per-fix entries here**: this entry is the one record of what the fixes decided
+  (owner).
+
+### Knowingly left (owner), as PLAN 6b records
+
+- Timeshift making a snapshot in place could show as a deletable row while it runs (not
+  known whether it ever has `info.json` without `exclude.list`); Delete needs a click, a
+  confirm and a password.
+- A job begun after the `prerm` has exited, during an upgrade's unpack, runs the old binary
+  to its end.
+- The upgrade from 0.4.x runs 0.4.x's `prerm`, which never refuses (it stops the helper,
+  even in the middle of a snapshot or a delete).
+- A snapshot half-deleted in place by Apsis 0.4.x or Timeshift that still has `info.json`
+  and `exclude.list` is listed as a whole snapshot, can be the `--link-dest` base and is
+  offered for Restore; the safety snapshot is the way back. Not detectable reliably.
+- Settings' Cancel during a save that is still running drops the edits and leaves the page
+  while the save still writes; its answer still sets the status line and reloads the
+  settings. Read, not seen.
+- `removed_or` puts the error's full text into `DeviceRemoved`'s reason, so it can carry
+  the `apsis-helper:` prefix if an `Error::Helper` gets there. Unverified whether any does
+  (rsync's and `mount`'s errors are `Error::Native`); the code is left as it is.
+- A bare `Error::Helper` text that equals or starts like an encoded kind (`stopped`,
+  `refused: `, ...) would decode as that kind. No guard: `Error::Native`, `InvalidConfig`
+  and `InvalidSettings` have had the same exposure all along, and none of today's
+  `Error::Helper` texts does so.
+
+The triage entry's list "What 0.5.0 knowingly does not show or fix" stands.
+
+**After 0.5.0 (owner)**: a window opened while a restore is armed has no line that says
+so; a refusal before the lock that the window doesn't know as "no job" (an invalid name,
+for example) still gets the five-second wait; in the armed window, a click on Restore
+clears "Restarting..." and leaves the line empty after the dialog closes.
+
+### Release mechanism (owner)
+
+**The release gate tests the .deb that CI builds from the tag.** The release commit
+(`CHANGELOG.md` dated, README's Status line, SECURITY's Supported row) comes first, and the
+tag is pushed on it, so the gate runs on the released commit. The tag's push makes the .deb
+and a draft release that only the owner can see; the owner runs the gate on apsis-test
+with that file and publishes the draft only if the gate passes. On a failure, the tag and
+the draft are deleted, and the fix is tagged again.
+
+Why, from a read-only check of the workflow and the local build (2026-10-04):
+
+- **A local .deb never hashes the same as CI's.** CI's Rust is unpinned stable
+  (`.github/workflows/release.yml:31`, `dtolnay/rust-toolchain@stable`; no toolchain file
+  in the repo) and cargo-deb is unpinned (`release.yml:33-34`, `cargo install cargo-deb
+  --locked`). Known the same: the sources and the lock (`release.yml:36`, `just deb
+  --locked`, passed to `cargo build` by the `deb` recipe).
+- **The binaries embed the build machine's cargo home path.** No `[profile]`, no
+  `trim-paths`, no remap flag and no `RUSTFLAGS` exist in the repo. In the local build the
+  cargo home's path appears 1186 times in `/usr/bin/apsis` and 233 times in
+  `/usr/libexec/apsis-helper` (the repo's own path 0 times: the workspace's sources appear
+  as relative paths). A .deb built on the owner's machine would carry the builder's
+  account name in those paths and must not be uploaded over CI's.
+- **cargo-deb's dates**: `SOURCE_DATE_EPOCH` is set nowhere; the local .deb's entries are
+  all dated 2026-10-01 10:00, neither the build time nor the commit's. Where cargo-deb takes
+  that date is unverified.
+- **The .deb's contents are final at the bump.** The three release entries are in
+  `0ee8dda`; the release commit only dates `CHANGELOG.md` and edits README's Status line
+  and SECURITY's Supported row, none of which goes into the .deb. The workflow names the
+  file from `Cargo.toml`'s version, not from the tag (`release.yml:43` uploads
+  `target/debian/*.deb`; the tag only names the release).
+- The workflow runs on pushed `v*` tags only (`release.yml:7-9`); it makes a draft only if
+  the tag has no release yet (`release.yml:41-42`) and uploads with `--clobber`.
+
+This makes "the real 0.5.0 .deb" precise, in the version bump's ruling (this file, check
+9's entry, "The version bump: not before this check", line 5236 on) and in PLAN 6b.13's
+release gate: it is CI's file from the tag, not a locally built one.
