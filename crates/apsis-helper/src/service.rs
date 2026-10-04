@@ -380,9 +380,9 @@ impl Helper {
     }
 
     /// How the restore stands (PLAN 6b.9; polkit: `list`, no password): `ready` while a plan
-    /// waits at the prompt, else the last `result.json`'s outcome, snapshot, message and time
-    /// (`""` and `0` for a `null` snapshot or time), else nothing. A read of a file, never a
-    /// job and never refused.
+    /// waits at the prompt, else the last `result.json`'s outcome, snapshot, message, time,
+    /// home choice and safety snapshot (`""` and `0` for a `null` snapshot or time, `""` for
+    /// no safety snapshot), else nothing. A read of a file, never a job and never refused.
     async fn restore_result(
         &self,
         #[zbus(header)] header: Header<'_>,
@@ -1216,8 +1216,9 @@ mod tests {
         }
         // Nothing else: exactly thirteen methods and two signals.
         assert_eq!(xml.matches("<method ").count(), 13, "{xml}");
-        // `RestoreResult() -> (sssx)`.
-        assert!(xml.contains("type=\"(sssx)\""), "{xml}");
+        // `RestoreResult() -> (sssxss)`.
+        assert!(xml.contains("type=\"(sssxss)\""), "{xml}");
+        assert!(!xml.contains("type=\"(sssx)\""), "{xml}");
         // `CancelRestore()` takes nothing: the ready plan is the one there is.
         assert!(
             xml.contains("<method name=\"CancelRestore\">\n  </method>"),

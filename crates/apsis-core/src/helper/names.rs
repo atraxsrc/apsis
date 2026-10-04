@@ -58,9 +58,10 @@ pub const METHOD_RESTART_TO_RESTORE: &str = "RestartToRestore";
 /// `CancelRestore()` (0.5.0): removes the ready plan (nothing is armed yet). No password for
 /// the uid that prepared it; [`ACTION_RESTORE`] for another.
 pub const METHOD_CANCEL_RESTORE: &str = "CancelRestore";
-/// `RestoreResult() -> (s state, s snapshot, s message, x when)` (0.5.0): how the last
-/// restore went, from `result.json`; `state` is `ready`, `done`, `problems`, `boot-kept`,
-/// `boot-broken`, `not-started`, `failed` or `""` for none.
+/// `RestoreResult() -> (s state, s snapshot, s message, x when, s home, s safety_snapshot)`
+/// (0.5.0): how the last restore went, from `result.json`; `state` is `ready`, `done`,
+/// `problems`, `boot-kept`, `boot-broken`, `not-started`, `failed` or `""` for none; `home`
+/// is `keep` or `restore`, and `""` stands for none.
 pub const METHOD_RESTORE_RESULT: &str = "RestoreResult";
 /// `JobChanged((sssxdx) job)`, to everyone on the bus: a job started, got further (at most
 /// about twice a second), is stopping, or ended (sent once with `done`, `failed` or

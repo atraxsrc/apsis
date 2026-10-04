@@ -1439,6 +1439,7 @@ mod restore {
     use apsis_core::restore::apsis::InSnapshot;
     use apsis_core::restore::dialog::Dialog as Check;
     use apsis_core::restore::esp::CheckFailure;
+    use apsis_core::restore::filter::Home;
     use apsis_core::restore::refusal::Refusal;
     use apsis_core::restore::state::{Outcome, RestoreResult};
 
@@ -1948,6 +1949,8 @@ mod restore {
             snapshot: Some(NEWEST.to_owned()),
             message: String::new(),
             when: Some(1_790_000_000),
+            home: Some(Home::Keep),
+            safety_snapshot: None,
         };
         send(&mut app, Message::RestoreResultRead(Ok(done)));
         let shown = app.result_text().expect("a result line");
@@ -1958,6 +1961,8 @@ mod restore {
             snapshot: Some(NEWEST.to_owned()),
             message: "the backup disk was disconnected".to_owned(),
             when: None,
+            home: Some(Home::Keep),
+            safety_snapshot: None,
         };
         send(&mut app, Message::RestoreResultRead(Ok(failed)));
         let (line, tooltip) = app.result_text().unwrap();
@@ -1986,6 +1991,8 @@ mod restore {
             snapshot: Some(NEWEST.to_owned()),
             message: "the backup disk 0000 wasn't found within 60 seconds".to_owned(),
             when: Some(1_790_000_000),
+            home: Some(Home::Keep),
+            safety_snapshot: None,
         };
         send(&mut app, Message::RestoreResultRead(Ok(not_started)));
         let (line, _) = app.result_text().unwrap();
@@ -1993,6 +2000,55 @@ mod restore {
             line,
             fl!("result-not-started", what = fl!("result-what-disk"))
         );
+    }
+
+    /// The result's tooltip says what happened to home and names the safety snapshot, from
+    /// `result.json` through `RestoreResult` (fix 6, 2026-10-04): the four combinations.
+    #[test]
+    fn the_result_tooltip_has_home_and_the_safety_snapshot_from_the_result() {
+        for outcome in [Outcome::Done, Outcome::Problems] {
+            for (home, safety, tooltip) in [
+                (
+                    Home::Keep,
+                    Some(SECOND),
+                    "Restored from snapshot 2026-09-25_11-28-53. Home folders were kept. \
+                     Safety snapshot: 2026-09-23_08-33-55.",
+                ),
+                (
+                    Home::Keep,
+                    None,
+                    "Restored from snapshot 2026-09-25_11-28-53. Home folders were kept. \
+                     Safety snapshot: none.",
+                ),
+                (
+                    Home::Restore,
+                    Some(SECOND),
+                    "Restored from snapshot 2026-09-25_11-28-53. Home folders were restored \
+                     too. Safety snapshot: 2026-09-23_08-33-55.",
+                ),
+                (
+                    Home::Restore,
+                    None,
+                    "Restored from snapshot 2026-09-25_11-28-53. Home folders were restored \
+                     too. Safety snapshot: none.",
+                ),
+            ] {
+                let mut app = window();
+                send(
+                    &mut app,
+                    Message::RestoreResultRead(Ok(RestoreResult {
+                        state: apsis_core::restore::state::ResultState::Ended(outcome),
+                        snapshot: Some(NEWEST.to_owned()),
+                        message: String::new(),
+                        when: Some(1_790_000_000),
+                        home: Some(home),
+                        safety_snapshot: safety.map(str::to_owned),
+                    })),
+                );
+                let (_, shown) = app.result_text().expect("a result line");
+                assert_eq!(shown, tooltip, "{outcome:?}");
+            }
+        }
     }
 
     /// Every restore state the window can show, by name (PLAN 6b.8's preview states).
@@ -2013,6 +2069,8 @@ mod restore {
                     snapshot: Some(NEWEST.to_owned()),
                     message: message.to_owned(),
                     when: Some(1_790_000_000),
+                    home: Some(Home::Restore),
+                    safety_snapshot: Some(SECOND.to_owned()),
                 })),
             );
             app

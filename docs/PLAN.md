@@ -1334,7 +1334,7 @@ process; after a restore the snapshot's own Apsis is installed whole, panel and 
 | `Restore(s snapshot, b restore_home, b safety_snapshot)` | **`restore`, `auth_admin`, asked every time** | Returns once started. Job kind `restore`, with `JobChanged` progress and `Finished("restore", ok, msg)`; ok means "ready" |
 | `RestartToRestore(s snapshot)` | none for the uid that started the plan, else `restore` | Re-checks space, the ESP, the boot files and freshness, arms (unit, drop-in, helper copy, `state.json`, `/system-update`, `sync`), starts the disarm timer, then logind `Reboot(false)` over the system bus (zbus, no new crate) |
 | `CancelRestore()` | none for the starter's uid, else `restore` | Removes the plan (not armed yet) |
-| `RestoreResult() -> (s state, s snapshot, s message, x when)` | `list` | `ready`, `done`, `problems`, `boot-kept`, `boot-broken`, `not-started`, `failed` or `""`. The window asks when it opens (6b.8) |
+| `RestoreResult() -> (s state, s snapshot, s message, x when, s home, s safety_snapshot)` | `list` | `ready`, `done`, `problems`, `boot-kept`, `boot-broken`, `not-started`, `failed` or `""`; `home` is `keep` or `restore`, and `""` stands for none. The window asks when it opens (6b.8) |
 | `Stop(s snapshot)` (existing) | as now | Also stops a restore's preparation |
 
 **The lock, the ready plan, and the signals** (settles item 7 of the helper slice; the rule
@@ -1414,6 +1414,7 @@ Until it is built, the table and the list above are what the code does.
 - **`RestoreResult() -> (s state, s snapshot, s message, x when, s home, s
   safety_snapshot)`**: the tooltip's two lines come from `result.json`, not from fixed
   strings. `Helper3` is unshipped, so the signature changes without a new interface.
+  **Built (fix 6).**
 - **The journal says `refused:` for a refused restore** (`Error::RestoreRefused` in
   `describe_error`), while preparing and at "Restart now".
 - **Delete renames first**: after its checks, a delete moves the folder from `snapshots/`
@@ -1449,7 +1450,8 @@ minimal one instead.
   `done`)".
 - `result.json`'s time is never checked against the plan's or any other time (a hardware
   clock in local time makes them disagree).
-- `RestoreResult` (6b.9) gives `""` and `0` for a `null` snapshot or time.
+- `RestoreResult` (6b.9) gives `""` and `0` for a `null` snapshot or time, and `""` for no
+  safety snapshot.
 
 **Exit 23** (found with real rsync, decided by the owner, 2026-10-01; the fourth case found
 in check 6, 2026-10-03). rsync 3.2.7 exits 23, and nothing else, in four cases that aren't

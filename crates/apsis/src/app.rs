@@ -21,6 +21,7 @@ use apsis_core::helper::{HelperClient, JobEvent};
 use apsis_core::job::{Job, JobKind, JobState};
 use apsis_core::restore::apsis::InSnapshot;
 use apsis_core::restore::dialog::Dialog as Check;
+use apsis_core::restore::filter::Home;
 use apsis_core::restore::plan;
 use apsis_core::restore::refusal::{Refusal, Unreadable};
 use apsis_core::restore::state::{Outcome, RestoreResult, ResultState};
@@ -1642,15 +1643,21 @@ impl AppModel {
             fl!("result-what-readme")
         };
         let name = result.snapshot.clone().unwrap_or_default();
+        // From `result.json` (fix 6, 2026-10-04). A result always says what happened to
+        // home (`RestoreResult::from_wire`); without it the tooltip says nothing of home.
+        let home = match result.home {
+            Some(Home::Keep) => fl!("result-home-kept"),
+            Some(Home::Restore) => fl!("result-home-restored"),
+            None => String::new(),
+        };
+        let safety = result
+            .safety_snapshot
+            .clone()
+            .unwrap_or_else(|| fl!("result-safety-none"));
         Some(match outcome {
             Outcome::Done | Outcome::Problems => (
                 fl!("result-done", date = date.as_str()),
-                fl!(
-                    "result-done-tip",
-                    name = name,
-                    home = fl!("result-home-kept"),
-                    safety = fl!("result-safety-none")
-                ),
+                fl!("result-done-tip", name = name, home = home, safety = safety),
             ),
             Outcome::BootKept | Outcome::BootBroken => (
                 format!(

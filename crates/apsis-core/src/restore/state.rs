@@ -374,10 +374,11 @@ fn cut(message: &str) -> Cow<'_, str> {
     Cow::Owned(format!("{CUT_MARK}{}", &message[start..]))
 }
 
-/// `RestoreResult` on the bus, D-Bus type `(sssx)`: `(state, snapshot, message, when)`.
-/// `state` is `ready`, an [`Outcome`]'s word, or `""` for nothing; `""` and `0` stand for a
-/// `null` snapshot or time.
-pub type WireRestoreResult = (String, String, String, i64);
+/// `RestoreResult` on the bus, D-Bus type `(sssxss)`: `(state, snapshot, message, when, home,
+/// safety_snapshot)`. `state` is `ready`, an [`Outcome`]'s word, or `""` for nothing; `""`
+/// and `0` stand for a `null` snapshot or time. `home` is `keep` or `restore` with an
+/// outcome, else `""`; `safety_snapshot` is `""` if none was taken.
+pub type WireRestoreResult = (String, String, String, i64, String, String);
 
 /// Where the restore stands, as `RestoreResult` tells it (PLAN 6b.9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -397,6 +398,11 @@ pub struct RestoreResult {
     pub snapshot: Option<String>,
     pub message: String,
     pub when: Option<i64>,
+    /// Whether home was kept or restored: `Some` with [`ResultState::Ended`], from the
+    /// file; `None` otherwise.
+    pub home: Option<Home>,
+    /// The safety snapshot of the last result, if one was taken.
+    pub safety_snapshot: Option<String>,
 }
 
 impl RestoreResult {
@@ -407,6 +413,8 @@ impl RestoreResult {
             snapshot: None,
             message: String::new(),
             when: None,
+            home: None,
+            safety_snapshot: None,
         }
     }
 
@@ -415,13 +423,12 @@ impl RestoreResult {
         Self {
             state: ResultState::Ready,
             snapshot: Some(snapshot.to_owned()),
-            message: String::new(),
-            when: None,
+            ..Self::none()
         }
     }
 
-    /// The last result as the wire carries it: its outcome, snapshot, message and time (the
-    /// safety snapshot and the home choice stay in the file).
+    /// The last result as the wire carries it: its outcome, snapshot, message and time, the
+    /// home choice and the safety snapshot.
     #[must_use]
     pub fn of(report: &Report) -> Self {
         Self {
@@ -429,6 +436,8 @@ impl RestoreResult {
             snapshot: report.snapshot.clone(),
             message: report.message.clone(),
             when: report.when,
+            home: Some(report.home),
+            safety_snapshot: report.safety_snapshot.clone(),
         }
     }
 
@@ -444,6 +453,11 @@ impl RestoreResult {
             self.snapshot.clone().unwrap_or_default(),
             self.message.clone(),
             self.when.unwrap_or(0),
+            self.home
+                .map(file::home_word)
+                .unwrap_or_default()
+                .to_owned(),
+            self.safety_snapshot.clone().unwrap_or_default(),
         )
     }
 
@@ -451,9 +465,10 @@ impl RestoreResult {
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Helper`] for a state word this version doesn't know.
+    /// [`crate::Error::Helper`] for a state or home word this version doesn't know, and for
+    /// an outcome without a home word.
     pub fn from_wire(wire: WireRestoreResult) -> crate::Result<Self> {
-        let (state, snapshot, message, when) = wire;
+        let (state, snapshot, message, when, home, safety_snapshot) = wire;
         let state = match state.as_str() {
             "" => ResultState::None,
             "ready" => ResultState::Ready,
@@ -461,11 +476,23 @@ impl RestoreResult {
                 .map(ResultState::Ended)
                 .ok_or_else(|| crate::Error::Helper(format!("unknown restore state {word:?}")))?,
         };
+        let home = match home.as_str() {
+            "" if !matches!(state, ResultState::Ended(_)) => None,
+            "keep" => Some(Home::Keep),
+            "restore" => Some(Home::Restore),
+            word => {
+                return Err(crate::Error::Helper(format!(
+                    "unknown restore home {word:?}"
+                )));
+            }
+        };
         Ok(Self {
             state,
             snapshot: (!snapshot.is_empty()).then_some(snapshot),
             message,
             when: (when != 0).then_some(when),
+            home,
+            safety_snapshot: (!safety_snapshot.is_empty()).then_some(safety_snapshot),
         })
     }
 }
@@ -474,38 +501,117 @@ impl RestoreResult {
 mod tests {
 
     /// `RestoreResult`'s answer (PLAN 6b.9): a ready plan, the last `result.json`, or nothing;
-    /// `""` and `0` stand for a `null` snapshot or time on the wire.
+    /// `""` and `0` stand for a `null` snapshot or time on the wire, and `""` for no home
+    /// choice and no safety snapshot.
     #[test]
     fn the_restore_result_survives_the_bus() {
         let none = RestoreResult::none();
         assert_eq!(
             none.to_wire(),
-            (String::new(), String::new(), String::new(), 0)
+            (
+                String::new(),
+                String::new(),
+                String::new(),
+                0,
+                String::new(),
+                String::new()
+            )
         );
         assert_eq!(RestoreResult::from_wire(none.to_wire()).unwrap(), none);
         let ready = RestoreResult::ready("2026-09-25_11-28-53");
-        assert_eq!(ready.to_wire().0, "ready");
+        let wire = ready.to_wire();
+        assert_eq!(wire.0, "ready");
+        assert_eq!((wire.4.as_str(), wire.5.as_str()), ("", ""));
         assert_eq!(RestoreResult::from_wire(ready.to_wire()).unwrap(), ready);
         for outcome in Outcome::ALL {
-            let report = Report {
-                outcome,
-                snapshot: (outcome != Outcome::Failed).then(|| "2026-09-25_11-28-53".to_owned()),
-                safety_snapshot: Some("2026-10-02_07-00-00".to_owned()),
-                home: Home::Restore,
-                message: "some words\nand more".to_owned(),
-                when: (outcome != Outcome::NotStarted).then_some(1_790_000_000),
-            };
-            let result = RestoreResult::of(&report);
-            assert_eq!(result.state, ResultState::Ended(outcome));
-            let wire = result.to_wire();
-            assert_eq!(wire.0, outcome.word());
-            assert_eq!(wire.1.is_empty(), report.snapshot.is_none());
-            assert_eq!(wire.3 == 0, report.when.is_none());
-            assert_eq!(RestoreResult::from_wire(wire).unwrap(), result);
+            for (home, word) in [(Home::Keep, "keep"), (Home::Restore, "restore")] {
+                for safety in [Some("2026-10-02_07-00-00"), None] {
+                    let report = Report {
+                        outcome,
+                        snapshot: (outcome != Outcome::Failed)
+                            .then(|| "2026-09-25_11-28-53".to_owned()),
+                        safety_snapshot: safety.map(str::to_owned),
+                        home,
+                        message: "some words\nand more".to_owned(),
+                        when: (outcome != Outcome::NotStarted).then_some(1_790_000_000),
+                    };
+                    let result = RestoreResult::of(&report);
+                    assert_eq!(result.state, ResultState::Ended(outcome));
+                    assert_eq!(result.home, Some(home));
+                    assert_eq!(result.safety_snapshot, report.safety_snapshot);
+                    let wire = result.to_wire();
+                    assert_eq!(wire.0, outcome.word());
+                    assert_eq!(wire.1.is_empty(), report.snapshot.is_none());
+                    assert_eq!(wire.3 == 0, report.when.is_none());
+                    assert_eq!(wire.4, word);
+                    assert_eq!(wire.5, safety.unwrap_or(""));
+                    assert_eq!(RestoreResult::from_wire(wire).unwrap(), result);
+                }
+            }
         }
+        let wire = |state: &str, home: &str| {
+            (
+                state.to_owned(),
+                String::new(),
+                String::new(),
+                0,
+                home.to_owned(),
+                String::new(),
+            )
+        };
         // A state this version doesn't know.
-        assert!(
-            RestoreResult::from_wire(("moon".to_owned(), String::new(), String::new(), 0)).is_err()
+        assert!(RestoreResult::from_wire(wire("moon", "")).is_err());
+        // A home word it doesn't know, and a result that doesn't say what happened to home.
+        assert!(RestoreResult::from_wire(wire("done", "kept")).is_err());
+        assert!(RestoreResult::from_wire(wire("done", "")).is_err());
+    }
+
+    /// A `result.json` as every build since the first has written it (the six fields, the
+    /// safety snapshot a name or `null`): the home choice and the safety snapshot reach the
+    /// wire from the file.
+    #[test]
+    fn an_earlier_builds_result_json_still_reads_and_gives_home_and_the_safety_snapshot() {
+        let dir = temp_dir("result-earlier-build");
+        for (home, safety, wire_safety) in [
+            ("keep", "\"2026-10-01_09-15-42\"", SAFETY),
+            ("restore", "null", ""),
+        ] {
+            let text = format!(
+                r#"{{
+  "version": 1,
+  "outcome": "done",
+  "snapshot": "2026-09-25_11-28-00",
+  "safety_snapshot": {safety},
+  "home": "{home}",
+  "message": "",
+  "when": 1790000600
+}}
+"#
+            );
+            std::fs::write(dir.join(RESULT_FILE), text).unwrap();
+            let wire = RestoreResult::of(&Report::load(&dir).unwrap()).to_wire();
+            assert_eq!(
+                wire,
+                (
+                    "done".to_owned(),
+                    SNAPSHOT.to_owned(),
+                    String::new(),
+                    1_790_000_600,
+                    home.to_owned(),
+                    wire_safety.to_owned()
+                )
+            );
+        }
+        // A file without the two fields was never written by any build: it's refused like
+        // any other that isn't whole, and the helper answers that there's no result.
+        std::fs::write(
+            dir.join(RESULT_FILE),
+            "{\n  \"version\": 1,\n  \"outcome\": \"done\",\n  \"snapshot\": \"2026-09-25_11-28-00\",\n  \"message\": \"\",\n  \"when\": 1790000600\n}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            invalid(Report::load(&dir)),
+            "result.json: no \"safety_snapshot\""
         );
     }
     use super::super::file::tests::temp_dir;
