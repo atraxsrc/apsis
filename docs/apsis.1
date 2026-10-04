@@ -238,14 +238,18 @@ What an interrupted snapshot leaves there is shown in the list and removed by th
 snapshot (or with Delete).
 .TP
 .I timeshift/apsis\-restore\-RECOVER.txt
-On the backup disk: the recovery steps with this machine's disk UUIDs and the snapshot's name
+On the backup disk: the recovery steps with this machine's disk UUIDs and the snapshots' names
 filled in, written while a restore is prepared.
 .TP
 .I /var/lib/apsis/restore/
 The restore's state folder (root only): the plan
 .RI ( request.json ),
-the rsync filter
-.RI ( restore.filter ),
+the rsync filter and the recovery note while a restore is prepared
+.RI ( restore.filter ,
+.IR restore.note ),
+the two kept when it was last armed, which the recovery steps use
+.RI ( last\-restore.filter ,
+.IR last\-restore.note ),
 rsync's log, the attempt counter
 .RI ( state.json ),
 the boot partition's backup

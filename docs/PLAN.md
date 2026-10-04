@@ -1614,58 +1614,68 @@ left.
 
 ### 6b.11 If a restore breaks booting
 
-The recovery partition and the ESP's `Pop_OS-oldkern` entry are never touched by a restore. The
-README gets a section, "If a restore goes wrong". A copy with this machine's UUIDs and the
-snapshot name filled in is written to the backup disk (`timeshift/apsis-restore-RECOVER.txt`)
-while preparing. It holds only UUIDs and the snapshot name: no user names, no emails.
+The recovery partition and the ESP's `Pop_OS-oldkern` entry are never touched by a restore;
+the by-hand steps below rebuild that entry's initrd and rewrite its files on the ESP. The
+README has a section, "If a restore goes wrong". A copy with this machine's UUIDs and the
+snapshots' names filled in is written to the backup disk (`timeshift/apsis-restore-RECOVER.txt`)
+while preparing, atomically, and the arm keeps it as `last-restore.note` in the state folder.
+It holds only UUIDs and snapshot names: no user names, no emails.
 
 1. At power-on, hold Space for the systemd-boot menu and pick **Pop!_OS Recovery**, or boot a
-   Pop!_OS live USB of the same version.
-2. In a terminal:
+   Pop!_OS live USB of the same version (the recovery opens an installer window; its install
+   choices are a reinstall).
+2. In a terminal, one line at a time; a line that prints an error stops the rest:
    ```
    sudo mount /dev/disk/by-uuid/<root-uuid> /mnt
    sudo mount /dev/disk/by-uuid/<esp-uuid> /mnt/boot/efi
-   sudo mkdir -p /media/backup && sudo mount -o ro /dev/disk/by-uuid/<backup-uuid> /media/backup
-   # finish the same restore (or pick the safety snapshot to go back):
+   sudo mkdir -p /media/backup
+   sudo mount -o ro /dev/disk/by-uuid/<backup-uuid> \
+     /media/backup
+   # one of: (a) the same snapshot again, (b) the safety snapshot
    sudo rsync -a -A -X --numeric-ids --delete --force --sparse \
-     --exclude-from=/mnt/var/lib/apsis/restore/restore.filter \
-     /media/backup/timeshift/snapshots/<name>/localhost/ /mnt/
+     --exclude-from=/mnt/var/lib/apsis/restore/last-restore.filter \
+     /media/backup/timeshift/snapshots/<snapshot or safety-snapshot>/localhost/ /mnt/
    for d in dev proc sys run; do sudo mount --rbind /$d /mnt/$d; done
    sudo chroot /mnt update-initramfs -u -k all
    sudo chroot /mnt kernelstub --verbose
    sudo rm -f /mnt/system-update
    ```
-   (`-A -X` only for a new-format snapshot; RECOVER.txt has the right line.) The filter's
-   rules are anchored at the transfer root, so they work unchanged against `/mnt/`. Its rule 5
-   lines name the installed system's mount points, which are right for `/mnt` too. `--rbind
-   /sys` brings `efivars` for kernelstub. `--numeric-ids` matters here: the live system's user
-   database isn't the installed one.
+   `RECOVER.txt` has both rsync commands, labelled, with the names filled in (with no safety
+   snapshot, one line says so in place of (b)), and a line after them: without the filter,
+   stop. `-A -X` only for a new-format snapshot; a safety snapshot always is. The filter's
+   rules are anchored at the transfer root, so they work unchanged against `/mnt/`. Its rule
+   5 lines name the installed system's mount points, which are right for `/mnt` too.
+   `--rbind /sys` brings `efivars` for kernelstub. `--numeric-ids` matters here: the live
+   system's user database isn't the installed one. The README adds the check that the
+   result boots: two `cmp` lines, the ESP's `vmlinuz.efi` and `initrd.img` against what
+   `/boot/vmlinuz` and `/boot/initrd.img` link to (each about 100 columns, so not in the
+   note).
 3. Restart.
 
 Timeshift from a live USB can also read these snapshots, but its boot refresh isn't
 kernelstub's, so the README gives the steps above.
 
-**Decided 2026-10-04, not built yet** (check 8's findings; DECISIONS.md, "triage of checks 1
-to 9"). Until it is built, the steps above are what the README and the note say.
+**Decided 2026-10-04, built in steps 8 and 9** (check 8's findings; DECISIONS.md, "triage of
+checks 1 to 9").
 - **What the drill showed, and what it didn't.** Drilled (check 8): the same kernel on both
   sides, Pop's recovery partition, the safety snapshot. Not drilled: a by-hand go-back
   after a restore across a kernel change, where the saved filter keeps out the kernel that
   ran at the preparation, and finishing such a restore by hand. For 0.5.0 the README says
   so, names the kernel case as a known limit without promising an outcome, and says that
-  when the system still starts from either boot entry the way back is the window. A filter
-  without the kernel lines for by-hand use, with its own by-hand rollback drill, is 0.5.x.
+  when the system still starts from either boot entry the way back is the window. **Built
+  (step 9).** A filter without the kernel lines for by-hand use, with its own by-hand
+  rollback drill, is 0.5.x.
 - **The first sentence above is wrong for these steps themselves**: the restore never
   touches the recovery partition or the `Pop_OS-oldkern` entry, but the by-hand lines
   rebuild both initrds and rewrite the previous pair on the ESP. The README and the note
-  say that; `update-initramfs -u -k all` stays, as drilled. **Built (step 8) for the note;
-  the README and this section's first sentence in step 9.**
+  say that; `update-initramfs -u -k all` stays, as drilled. **Built (steps 8 and 9).**
 - **The note carries two complete, labelled commands**, "restore the same snapshot again"
   and "go back to the safety snapshot", each with its own flags (a safety snapshot is
   always the new format). With no safety snapshot it says so in one line. It has one
   caveat line about the kernel limit. Nobody has to edit a line. **Built (step 8).**
 - **Both commands and the README name `last-restore.filter`** (6b.5), not
   `restore.filter`. Without that file rsync exits 11 before it copies or deletes anything,
-  and the README says so. **Built (step 8) for the note; the README in step 9.**
+  and the README says so. **Built (steps 8 and 9).**
 - **The note is written atomically** on the backup disk, and the arm keeps its text as
   `last-restore.note` in the state folder, readable after the first mount line. The note
   on the backup disk is written at every preparation, so it carries one line saying which
@@ -1676,6 +1686,7 @@ to 9"). Until it is built, the steps above are what the README and the note say.
   lines that show the ESP's current pair is what `/boot` links to; that no ESP backup is
   made by hand; that `update-initramfs` takes about two minutes; the panel's restart with
   nothing unmounted; and that `result.json` still names the earlier restore afterwards.
+  **Built (step 9).**
 - **Knowingly left** (owner, 2026-10-04): after restore 1 runs, a restore 2 that is armed
   and then disarmed replaces the kept pair and `RECOVER.txt`. The note then names restore
   2's snapshot and its safety snapshot. Restore 1's safety snapshot stays on the disk as a
@@ -2062,9 +2073,10 @@ Checks:
   rewrite the ESP's previous pair, so "Pop_OS-oldkern is never touched" isn't true of the
   recovery steps themselves; kernelstub in the chroot copies the recovery's command line
   into the ESP's `cmdline` file (nothing boots from it); `update-initramfs` reached
-  kernelstub once per kernel, not twice (6b.6's "five ESP writes" were three); by hand
-  there is no ESP backup and no check that the result boots; the window keeps naming the
-  restore that was undone. Read from the code and not exercised (same kernel, both
+  kernelstub once per kernel, not twice (6b.6's "five ESP writes" were three kernelstub
+  runs; the third changed nothing); by hand there is no ESP backup and no check that the
+  result boots; the window keeps naming the restore that was undone. Read from the code
+  and not exercised (same kernel, both
   snapshots new format): after a kernel rollback the saved filter keeps out the kernel
   the safety snapshot would bring back, and the note's `-A -X` follows the restored
   snapshot's format. Not shown: a system that doesn't start, a restore that broke
