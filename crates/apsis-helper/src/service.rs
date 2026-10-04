@@ -1893,6 +1893,16 @@ mod tests {
             describe_error(&Error::RestoreRefused("pop-upgrade-pending".to_owned())),
             "refused: can't restore this snapshot: pop-upgrade-pending"
         );
+        // The journal keeps `Error::Helper`'s prefix; the bus gets the bare words (step 12).
+        let full = Error::Helper("No space left on device (os error 28)".to_owned());
+        assert_eq!(
+            describe_error(&full),
+            "failed: apsis-helper: No space left on device (os error 28)"
+        );
+        let HelperError::Failed(message) = HelperError::from(full) else {
+            panic!("not Failed")
+        };
+        assert_eq!(message, "No space left on device (os error 28)");
 
         let mut list = SnapshotList::default();
         assert_eq!(describe_list(&list), "ok, 0 snapshots");

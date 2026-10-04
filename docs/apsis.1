@@ -204,6 +204,16 @@ matches within one folder level,
 across folders, and a leading
 .B /
 starts at the root.
+Without it, a pattern with a
+.B /
+in it matches the end of any path:
+.B \-\~home/Downloads
+leaves out
+.I /home/Downloads
+and
+.IR /srv/home/Downloads ,
+not
+.IR /home/you/Downloads .
 Built\-in excludes (caches, /proc, /tmp, other mounts) always come first.
 .TP
 .B Misc

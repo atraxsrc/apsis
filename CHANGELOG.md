@@ -73,6 +73,11 @@ with systemd-boot only.
   removes. A folder an earlier version left half-deleted in `timeshift/snapshots/` (an
   `info.json`, no `exclude.list`) is shown as such a row too. These rows now read "Unfinished
   snapshot or delete · Delete removes it".
+- An error the helper reports now reaches the window's status line in its own words, without
+  `apsis-helper:` in front, for example `Restore failed: No space left on device (os error
+  28)`. 0.4.2 took it off only for errors made in the window; the helper's journal keeps it.
+- Settings' **Cancel** is always clickable and leaves the page, dropping any change. Before,
+  it was greyed out until something changed, so with nothing changed it did nothing.
 
 ## [0.4.2] - 2026-10-01
 

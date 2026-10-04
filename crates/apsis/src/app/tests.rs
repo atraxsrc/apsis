@@ -1315,6 +1315,92 @@ fn the_popup_fits_its_width() {
     assert!(node.bounds().height < 520.0, "{}", node.bounds().height);
 }
 
+/// What a click in the middle of each part of `element`, laid out at `size`, sends: which
+/// buttons are clickable, as the window has them. `None` where [`layout`] is skipped.
+fn clicks(mut element: Element<'_, Message>, size: Size) -> Option<Vec<Message>> {
+    use cosmic::iced::core::clipboard::Null;
+    use cosmic::iced::core::layout::{Layout, Limits as LayoutLimits};
+    use cosmic::iced::core::renderer::Headless;
+    use cosmic::iced::core::widget::Tree;
+    use cosmic::iced::core::{Event, Rectangle, Shell, mouse};
+    if std::env::var_os("APSIS_LAYOUT_TEST").is_none_or(|v| v != "1") {
+        eprintln!("click test skipped; set APSIS_LAYOUT_TEST=1 to run it");
+        return None;
+    }
+    let renderer = cosmic::iced::futures::executor::block_on(<cosmic::Renderer as Headless>::new(
+        cosmic::font::default(),
+        14.0.into(),
+        Some("tiny-skia"),
+    ))?;
+    let mut tree = Tree::new(&element);
+    let node =
+        element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &LayoutLimits::new(Size::ZERO, size));
+    let mut centres = Vec::new();
+    let mut parts = vec![Layout::new(&node)];
+    while let Some(part) = parts.pop() {
+        centres.push(part.bounds().center());
+        parts.extend(part.children());
+    }
+    let viewport = Rectangle::with_size(size);
+    let mut sent = Vec::new();
+    for centre in centres {
+        for event in [
+            mouse::Event::ButtonPressed(mouse::Button::Left),
+            mouse::Event::ButtonReleased(mouse::Button::Left),
+        ] {
+            let mut shell = Shell::new(&mut sent);
+            element.as_widget_mut().update(
+                &mut tree,
+                &Event::Mouse(event),
+                Layout::new(&node),
+                mouse::Cursor::Available(centre),
+                &renderer,
+                &mut Null,
+                &mut shell,
+                &viewport,
+            );
+        }
+    }
+    Some(sent)
+}
+
+/// C3 (check 9): Settings' Cancel is always clickable and leaves the page, with nothing
+/// changed and while a job runs; Save stays off until something changed.
+#[test]
+fn settings_cancel_is_always_clickable_and_leaves_the_page() {
+    let has = |sent: &[Message], wanted: fn(&Message) -> bool| sent.iter().any(wanted);
+    let cancel = |m: &Message| matches!(m, Message::DialogDiscard);
+    let save = |m: &Message| matches!(m, Message::Save);
+    let back = |m: &Message| matches!(m, Message::Back);
+    let mut app = in_settings();
+    assert!(!view(&app).dirty());
+    let Some(sent) = clicks(app.window_view(), WINDOW_MIN_SIZE) else {
+        return;
+    };
+    assert!(
+        has(&sent, back),
+        "the probe finds the back button: {sent:?}"
+    );
+    assert!(has(&sent, cancel), "nothing changed: {sent:?}");
+    assert!(!has(&sent, save), "nothing changed: {sent:?}");
+    send(&mut app, Message::DialogDiscard);
+    assert_eq!(app.page, Page::List);
+
+    let mut app = in_settings();
+    send(&mut app, Message::Include(Row::IncludeHome, true));
+    let sent = clicks(app.window_view(), WINDOW_MIN_SIZE).unwrap();
+    assert!(has(&sent, cancel) && has(&sent, save), "changed: {sent:?}");
+    app.running = Some(Operation::Create(String::new()));
+    let sent = clicks(app.window_view(), WINDOW_MIN_SIZE).unwrap();
+    assert!(has(&sent, cancel), "a job runs: {sent:?}");
+    assert!(!has(&sent, save), "a job runs: {sent:?}");
+    send(&mut app, Message::DialogDiscard);
+    assert_eq!(app.page, Page::List);
+    assert!(!view(&app).dirty(), "the change is dropped");
+}
+
 /// Screenshots of the real views, for looking at them without a COSMIC session: set
 /// `APSIS_SCREENSHOTS` to a folder and each view is written there as `<name>.rgba` (width and
 /// height as two little-endian `u32`s, then RGBA bytes). Skipped otherwise.
@@ -1815,6 +1901,26 @@ mod restore {
                 fl!("restore-failed", reason = "rsync died"),
                 None
             ))
+        );
+    }
+
+    /// A helper error that crossed the bus (encoded in the helper, decoded here) reaches the
+    /// status line in the helper's own words, without `apsis-helper: ` (step 12; step 8 saw
+    /// `Restore failed: apsis-helper: No space left on device (os error 28)`).
+    #[test]
+    fn a_helper_error_from_the_bus_reaches_the_status_line_without_the_prefix() {
+        use apsis_core::helper::{decode_error, encode_error};
+        let said = "No space left on device (os error 28)";
+        let sent = encode_error(&apsis_core::Error::Helper(said.to_owned()));
+        let mut app = with_dialog();
+        send(&mut app, Message::DialogConfirm);
+        send(
+            &mut app,
+            Message::Finished(restore_op(), Err(CliError::from(decode_error(&sent)))),
+        );
+        assert_eq!(
+            app.status,
+            Some(Status::Error(fl!("restore-failed", reason = said), None))
         );
     }
 

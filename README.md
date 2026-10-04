@@ -122,8 +122,11 @@ At the "Ready to restore" prompt the package operation goes on, and the window t
 preparation is gone. After "Restart now", while the restore waits for its restart, the
 package operation cancels the restore and says `apsis: the restore that was waiting for a
 restart is cancelled`; the safety snapshot stays, and the restore can be started again
-afterwards. (The installed version's script decides, so the upgrade from 0.4.x doesn't wait
-yet.)
+afterwards.
+
+**The upgrade from 0.4.x doesn't wait.** It runs the installed 0.4.x package's script, which
+stops the helper even in the middle of a snapshot or a delete. Upgrade from 0.4.x while
+nothing runs.
 
 ## Use
 
@@ -337,7 +340,9 @@ in the snapshot too.
 - `*` matches any name within one folder level; it doesn't cross a `/`.
 - `**` matches anything, across folders.
 - `***` after a folder means the folder and everything in it.
-- A pattern starting with `/` starts at the root of the system.
+- A pattern starting with `/` starts at the root of the system. Without the leading `/`, a
+  pattern with a `/` in it matches the end of any path: `- home/Downloads` leaves out
+  `/home/Downloads` and `/srv/home/Downloads`, not `/home/you/Downloads`.
 
 | filter | effect |
 |---|---|
@@ -353,6 +358,7 @@ in the snapshot too.
 | you see | what to do |
 |---|---|
 | Backup disk not connected | plug it in; Apsis notices and lists again |
+| the list fails with a `mount` error that says the disk is already mounted (on `/media/...`) | the desktop opened the backup disk by itself: unmount it in Files (unmount, don't eject), then Refresh |
 | can't hold snapshots: it's encrypted or a container | encrypted backup disks aren't supported yet; pick a plain one |
 | No backup disk chosen | Settings → Location |
 | Apsis needs apsis-helper | reinstall the .deb, or `sudo just install` |
@@ -381,6 +387,9 @@ Your snapshots stay on the backup disk. `apt purge` also removes `/var/lib/apsis
 restore's state folder, including the kept recovery pair (`last-restore.filter` and
 `last-restore.note`). `apt remove` is refused while a job runs, and cancels a restore that
 waits for its restart (see "Upgrading, reinstalling or removing while Apsis is busy").
+`just uninstall` runs none of the package's checks: it stops the helper even in the middle
+of a job and doesn't cancel a restore that waits for its restart, so run it only while
+nothing runs and no restore waits.
 
 ## Development
 

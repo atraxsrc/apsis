@@ -886,7 +886,8 @@ impl AppModel {
         )
     }
 
-    /// Settings: a back button, Cancel and Save, the tabs, and the active tab.
+    /// Settings: a back button, Cancel and Save, the tabs, and the active tab. Cancel is
+    /// always clickable: it drops any change and leaves the page (C3, check 9).
     fn settings_page(&self) -> Element<'_, Message> {
         let dirty = matches!(&self.settings, SettingsLoad::Ready(v) if v.dirty());
         let busy = self.saving_settings || self.running.is_some() || self.loading;
@@ -897,7 +898,7 @@ impl AppModel {
             title4(fl!("settings")).into(),
             widget::space::horizontal().into(),
             widget::button::standard(fl!("cancel"))
-                .on_press_maybe((dirty && !busy).then_some(Message::DialogDiscard))
+                .on_press(Message::DialogDiscard)
                 .into(),
             widget::button::suggested(fl!("save"))
                 .on_press_maybe((dirty && !busy).then_some(Message::Save))

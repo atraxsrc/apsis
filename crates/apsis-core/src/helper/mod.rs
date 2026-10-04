@@ -318,7 +318,8 @@ const DELETE_MANY_HEADER: &str = "delete stopped: ";
 /// [`Error::DeviceNotFound`], [`Error::DeviceRemoved`], [`Error::InvalidInput`],
 /// [`Error::RestoreRefused`], [`Error::RestoreArmed`], [`Error::Stopped`] and
 /// [`Error::DeleteManyStopped`] keep their kind, so [`decode_error`] gives them back;
-/// anything else is its text.
+/// [`Error::Helper`] is its own words, without the `apsis-helper: ` its Display puts in front
+/// for the journal; anything else is its text.
 #[must_use]
 pub fn encode_error(error: &Error) -> String {
     match error {
@@ -341,6 +342,7 @@ pub fn encode_error(error: &Error) -> String {
             left.join(","),
             encode_error(reason)
         ),
+        Error::Helper(message) => message.clone(),
         other => other.to_string(),
     }
 }
@@ -701,6 +703,30 @@ mod tests {
             decode_error(&encode_error(&Error::RestoreArmed)),
             Error::RestoreArmed
         ));
+    }
+
+    /// The helper's own words cross the bus without `Error::Helper`'s `apsis-helper: `
+    /// prefix (the journal's form), alone and as the reason of a stopped delete of several
+    /// (step 8 saw `Restore failed: apsis-helper: No space left on device` in the window).
+    #[test]
+    fn a_helper_error_crosses_the_bus_without_the_prefix() {
+        let said = "No space left on device (os error 28)";
+        let error = Error::Helper(said.to_owned());
+        assert_eq!(encode_error(&error), said);
+        assert!(matches!(decode_error(&encode_error(&error)), Error::Helper(m) if m == said));
+        let stopped = Error::DeleteManyStopped {
+            deleted: Vec::new(),
+            failed: "2026-09-25_11-28-53".to_owned(),
+            left: Vec::new(),
+            reason: Box::new(Error::Helper(said.to_owned())),
+        };
+        let Error::DeleteManyStopped { reason, .. } = decode_error(&encode_error(&stopped)) else {
+            panic!("not decoded")
+        };
+        assert!(
+            matches!(*reason, Error::Helper(ref m) if m == said),
+            "{reason:?}"
+        );
     }
 
     #[test]

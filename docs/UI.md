@@ -160,8 +160,9 @@ The whole flow is PLAN.md's Phase 6b; the window's part:
 
 ### Settings
 
-A page in the same window: back button, **Cancel** (drop changes) and **Save** (write
-`config.toml`; one password), and four tabs (libcosmic tab bar).
+A page in the same window: back button, **Cancel** (always clickable: drops any change and
+leaves the page) and **Save** (write `config.toml`; one password), and four tabs (libcosmic
+tab bar).
 
 - **Location**: radio list of the disks that can hold snapshots (path, filesystem, size,
   label); the chosen one shown as `Not connected` when it's unplugged; other Linux filesystems
