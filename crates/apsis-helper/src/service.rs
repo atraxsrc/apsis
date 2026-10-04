@@ -493,7 +493,8 @@ impl Helper {
 
     /// Starts deleting snapshot `name`, or the interrupted create's folder `name` (polkit:
     /// `delete`) and returns; `Finished("delete", ..)` follows. The backup device is mounted
-    /// read-write for the delete only; the name must be one the list has.
+    /// read-write for the delete only; the name must be one the list has. Refused while a
+    /// restore is armed, before the password ([`Helper::begin_delete`]).
     async fn delete(
         &self,
         #[zbus(header)] header: Header<'_>,
@@ -508,9 +509,12 @@ impl Helper {
             if parse_snapshot_name(&name).is_none() {
                 return Err(Error::InvalidSnapshotName(name.clone()));
             }
-            self.refuse_if_running()?;
-            authorize(connection, &caller, ACTION_DELETE, true).await?;
-            self.state.begin(JobKind::Delete).await
+            self.begin_delete(
+                &arm::Paths::system(),
+                JobKind::Delete,
+                authorize(connection, &caller, ACTION_DELETE, true),
+            )
+            .await
         }
         .await;
         self.start(
@@ -535,7 +539,8 @@ impl Helper {
     /// Starts deleting `names` (snapshots or interrupted creates' folders) as one job, in
     /// order (polkit: `delete`, asked once), and returns; `Finished("delete-many", ..)`
     /// follows. At least two names, each a snapshot name, none repeated. It stops at the first
-    /// failure; the message then says what was deleted, what failed and what's left.
+    /// failure; the message then says what was deleted, what failed and what's left. Refused
+    /// as a whole while a restore is armed, before the password ([`Helper::begin_delete`]).
     async fn delete_many(
         &self,
         #[zbus(header)] header: Header<'_>,
@@ -547,9 +552,12 @@ impl Helper {
         let label = format!("delete-many {} for {caller}", logged_names(&names));
         let started = async {
             check_delete_many(&names)?;
-            self.refuse_if_running()?;
-            authorize(connection, &caller, ACTION_DELETE, true).await?;
-            self.state.begin(JobKind::DeleteMany).await
+            self.begin_delete(
+                &arm::Paths::system(),
+                JobKind::DeleteMany,
+                authorize(connection, &caller, ACTION_DELETE, true),
+            )
+            .await
         }
         .await;
         let journal = label.clone();
@@ -775,6 +783,33 @@ impl Helper {
         let answer = authorized.await?;
         refuse_while_armed(paths, armed).await?;
         Ok((answer, self.state.begin(kind).await?))
+    }
+
+    /// `Delete`'s and `DeleteMany`'s way to the write lock (`kind`), with polkit's answer
+    /// as `authorized`.
+    ///
+    /// While a restore is armed every delete is refused, whichever snapshot it names: the
+    /// armed plan's snapshot and its safety snapshot must be there at the restart, armed
+    /// lasts minutes at most, and "no delete while armed" is the rule that can be said in
+    /// one line (owner, 2026-10-04). Before the password and again before the lock, as
+    /// `Restore` is ([`Helper::begin_unless_armed`]): no job begins, so nothing is
+    /// announced, nothing is mounted and no snapshot goes; a delete of several is refused
+    /// once, as a whole. Not looked at a third time under the lock: that refusal would be a
+    /// job that ends `failed`, which every other window shows as a failed delete.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RestoreArmed`]; [`Error::Busy`] before the password or from the lock;
+    /// what `authorized` gave.
+    async fn begin_delete(
+        &self,
+        paths: &arm::Paths,
+        kind: JobKind,
+        authorized: impl Future<Output = apsis_core::Result<()>>,
+    ) -> apsis_core::Result<Running> {
+        self.begin_unless_armed(paths, kind, || Error::RestoreArmed, authorized)
+            .await
+            .map(|((), running)| running)
     }
 
     /// Logs whether the operation could start. If it did, runs `work` in the background
@@ -1168,7 +1203,8 @@ fn describe_error(error: &Error) -> String {
         | Error::NoSuchSnapshot(_)
         | Error::NoSnapshotDevice
         | Error::ConfigChanged
-        | Error::RestoreRefused(_) => format!("refused: {error}"),
+        | Error::RestoreRefused(_)
+        | Error::RestoreArmed => format!("refused: {error}"),
         Error::Stopped => "stopped".to_owned(),
         other => format!("failed: {other}"),
     }
@@ -1396,6 +1432,136 @@ mod tests {
         ));
         assert!(matches!(removed_or(io(), None, &by_uuid), Error::Native(_)));
         std::fs::remove_dir_all(&by_uuid).unwrap();
+    }
+
+    /// A lab (a prepared plan under a temp root) with two snapshot folders on a backup
+    /// disk's mount point, so the tree comparison covers them.
+    fn lab_with_snapshots(name: &str) -> (std::path::PathBuf, arm::Paths, std::path::PathBuf) {
+        let (root, paths, exe) = lab(name);
+        for snapshot in ["2026-09-25_11-28-00", "2026-10-04_09-00-00"] {
+            let dir = root
+                .join("run/apsis/backup/timeshift/snapshots")
+                .join(snapshot);
+            std::fs::create_dir_all(dir.join("localhost/etc")).unwrap();
+            std::fs::write(dir.join("info.json"), "{ \"type\": \"rsync\" }\n").unwrap();
+            std::fs::write(dir.join("localhost/etc/os-release"), "NAME=\"Pop!_OS\"\n").unwrap();
+        }
+        (root, paths, exe)
+    }
+
+    /// Row 12 (2026-10-04): while Apsis's own link is in place, `Delete` and `DeleteMany`
+    /// are refused before the password is asked for and before the write lock: no job
+    /// begins, so nothing is announced, nothing mounts and no snapshot goes. One refusal
+    /// for the whole call. The snapshot folders, the state folder and the arm are the same
+    /// afterwards, byte for byte.
+    #[tokio::test]
+    async fn a_delete_while_a_restore_is_armed_is_refused_before_anything_happens() {
+        let (root, paths, exe) = lab_with_snapshots("delete-armed");
+        arm::arm(&paths, &exe).unwrap();
+        let before = tree(&root);
+        let (state, mut changes) = State::new();
+        let helper = Helper::new(Arc::clone(&state));
+        for kind in [JobKind::Delete, JobKind::DeleteMany] {
+            let mut asked = false;
+            let refused = helper
+                .begin_delete(&paths, kind, async {
+                    asked = true;
+                    Ok(())
+                })
+                .await;
+            assert!(matches!(refused, Err(Error::RestoreArmed)), "{kind:?}");
+            assert!(!asked, "{kind:?}: no password is asked for");
+            assert!(!state.is_running(), "{kind:?}: the lock isn't taken");
+            assert!(changes.try_recv().is_err(), "{kind:?}: no job is announced");
+            assert_eq!(tree(&root), before, "{kind:?}");
+        }
+        // In the journal it's a refusal, and it travels as itself.
+        assert_eq!(
+            describe_error(&Error::RestoreArmed),
+            "refused: a restore is armed and waits for the restart"
+        );
+        let HelperError::Failed(message) = HelperError::from(Error::RestoreArmed) else {
+            panic!("not Failed")
+        };
+        assert!(matches!(decode_error(&message), Error::RestoreArmed));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The password dialog can stay open for a while: a restore armed meanwhile refuses the
+    /// delete too, still before the lock.
+    #[tokio::test]
+    async fn a_restore_armed_while_the_password_was_asked_for_refuses_the_delete_too() {
+        let (root, paths, exe) = lab_with_snapshots("delete-armed-late");
+        let (state, mut changes) = State::new();
+        let helper = Helper::new(Arc::clone(&state));
+        let refused = helper
+            .begin_delete(&paths, JobKind::DeleteMany, async {
+                arm::arm(&paths, &exe).unwrap();
+                Ok(())
+            })
+            .await;
+        assert!(matches!(refused, Err(Error::RestoreArmed)));
+        assert!(arm::is_armed(&paths));
+        assert!(!state.is_running() && changes.try_recv().is_err());
+        assert!(
+            root.join("run/apsis/backup/timeshift/snapshots/2026-09-25_11-28-00/info.json")
+                .exists()
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Another tool's update at either name isn't Apsis's arm: the delete begins as before.
+    /// So does one with no link at all, leftovers of an arm included. And what refused a
+    /// delete before still does.
+    #[tokio::test]
+    async fn another_tools_update_or_no_link_lets_the_delete_begin_as_before() {
+        for name in ["system-update", "etc/system-update"] {
+            let (root, paths, _) = lab_with_snapshots("delete-foreign");
+            std::os::unix::fs::symlink("/var/lib/other-tool", root.join(name)).unwrap();
+            let (state, mut changes) = State::new();
+            let helper = Helper::new(Arc::clone(&state));
+            let mut asked = false;
+            let running = helper
+                .begin_delete(&paths, JobKind::Delete, async {
+                    asked = true;
+                    Ok(())
+                })
+                .await;
+            assert!(running.is_ok(), "{name}");
+            assert!(asked && state.is_running(), "{name}");
+            let announced = changes.try_recv().expect("the job is announced").job;
+            assert_eq!(
+                (announced.0.as_str(), announced.1.as_str()),
+                ("delete", "running")
+            );
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+        // No link, with what an arm left behind.
+        let (root, paths, exe) = lab_with_snapshots("delete-no-link");
+        arm::arm(&paths, &exe).unwrap();
+        std::fs::remove_file(&paths.link).unwrap();
+        let (state, _changes) = State::new();
+        let helper = Helper::new(Arc::clone(&state));
+        let running = helper
+            .begin_delete(&paths, JobKind::DeleteMany, async { Ok(()) })
+            .await
+            .expect("no link: the delete begins");
+        // Busy and polkit's no, as before: the first before the password, neither a job.
+        let mut asked = false;
+        let busy = helper
+            .begin_delete(&paths, JobKind::Delete, async {
+                asked = true;
+                Ok(())
+            })
+            .await;
+        assert!(matches!(busy, Err(Error::Busy)) && !asked);
+        drop(running);
+        let denied = helper
+            .begin_delete(&paths, JobKind::Delete, async { Err(Error::NotAuthorized) })
+            .await;
+        assert!(matches!(denied, Err(Error::NotAuthorized)));
+        assert!(!state.is_running());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// B1 (owner, 2026-10-04): while Apsis's own link is in place, `Restore` is refused

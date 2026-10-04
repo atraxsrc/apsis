@@ -681,8 +681,24 @@ Until it is built, the text above is what the code does.
   stays as the third line, under the lock (a refusal there is a job that ends `failed`).
   At apply the link is the restore's own and is never refused as armed.
   **Built (armed-gap fix).**
+- **No snapshot is deleted while a restore is armed** (the armed-gap audit's row 12; owner,
+  2026-10-04). `Delete` and `DeleteMany` are refused while Apsis's own `/system-update` is
+  in place (`arm::is_armed`), whichever snapshots they name: the armed plan's snapshot and
+  its safety snapshot must be there at the restart, armed lasts minutes at most, and one
+  rule for every delete is the simpler one to state. The link is looked at before the
+  password and once more after it, both before the job lock: no job is announced, nothing
+  is mounted, and a delete of several is refused once, as a whole. Another tool's link
+  refuses nothing here. On the wire it is `Error::RestoreArmed` (`restore armed`, a
+  `Failed`); the window's line is "Not deleted: a restart to restore is waiting." with the
+  tooltip "Restart the computer, or wait for it to time out. Nothing was deleted." The
+  seconds between "Restart now" taking the plan and the link being made are not covered
+  (below, step 11). **Built (row 12).**
 - **Knowingly left** (owner): in the seconds between "Restart now" and the reboot, a
   package operation on Apsis cancels the arm, and only apt's output says so.
+- **Knowingly left** (owner, 2026-10-04; the armed-gap audit's row 1): `Create` is not
+  refused while a restore is armed. A reboot during it leaves an interrupted create's
+  folder, which the next create removes; it touches neither the plan's snapshot, nor the
+  safety snapshot, nor the state folder.
 - **Knowingly left until step 11** (owner, 2026-10-04): "Restart now" takes the plan out of
   "ready" before its checks and the arm, which take seconds (a mount, sizes). In those
   seconds no plan is ready and no link exists, so a second `Restore` is let in and its

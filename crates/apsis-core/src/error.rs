@@ -68,6 +68,11 @@ pub enum Error {
     /// (`restore::refusal::Refusal::to_wire`), which the applet decodes for its dialog.
     #[error("can't restore this snapshot: {0}")]
     RestoreRefused(String),
+    /// A delete the helper refused because a restore is armed and waits for the restart
+    /// (PLAN 6b.5): no snapshot goes while one, the armed plan's or its safety snapshot
+    /// among them. Nothing ran.
+    #[error("a restore is armed and waits for the restart")]
+    RestoreArmed,
     #[error(transparent)]
     Io(#[from] io::Error),
 }

@@ -629,6 +629,61 @@ fn a_refusal_before_the_job_began_waits_for_no_end() {
     }
 }
 
+/// A delete while a restore is armed (row 12, 2026-10-04) is refused in the helper before
+/// anything ran, one or several alike. The line and its tooltip say so in plain words with
+/// no path; nothing is listed, the selection stays, and no job end is waited for (none
+/// began), so the next end of that kind is another window's at once.
+#[test]
+fn a_delete_refused_while_a_restore_is_armed_says_so_and_changes_nothing() {
+    assert_eq!(
+        CliError::from(apsis_core::Error::RestoreArmed),
+        CliError::RestoreArmed
+    );
+    for several in [false, true] {
+        let mut app = window();
+        click(&mut app, 1, Modifiers::empty());
+        if several {
+            click(&mut app, 2, Modifiers::CTRL);
+        }
+        let chosen = selected(&app);
+        send(&mut app, Message::Shortcut(Shortcut::Delete));
+        send(&mut app, Message::DialogConfirm);
+        let operation = app.running.clone().expect("the delete started");
+        assert_eq!(
+            matches!(operation, Operation::DeleteMany(_)),
+            several,
+            "{operation:?}"
+        );
+        send(
+            &mut app,
+            Message::Finished(operation, Err(CliError::RestoreArmed)),
+        );
+        assert_eq!(
+            app.status,
+            Some(Status::Error(
+                "Not deleted: a restart to restore is waiting.".to_owned(),
+                Some(
+                    "Restart the computer, or wait for it to time out. Nothing was deleted."
+                        .to_owned()
+                )
+            )),
+            "several: {several}"
+        );
+        assert!(app.running.is_none() && !app.loading, "nothing to list");
+        assert_eq!(selected(&app), chosen, "the selection stays");
+        assert!(app.own_end.is_none(), "no job began");
+        send(
+            &mut app,
+            Message::Job(JobEvent::Changed(job(
+                JobKind::Delete,
+                JobState::Done,
+                THIRD,
+            ))),
+        );
+        assert_eq!(app.status, Some(Status::Info(fl!("deleted-elsewhere"))));
+    }
+}
+
 /// The helper leaving the bus clears what was waited for; an end of another kind too.
 #[test]
 fn a_waited_for_end_is_dropped_when_something_else_comes() {

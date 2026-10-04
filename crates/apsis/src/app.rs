@@ -367,6 +367,9 @@ pub enum CliError {
     /// The helper refused a full-system restore (PLAN 6b.7). Nothing ran, or (from "Restart
     /// now") the plan was dropped.
     RestoreRefused(Refusal),
+    /// The helper refused a delete because a restore is armed and waits for the restart.
+    /// Nothing ran and no job began.
+    RestoreArmed,
     Other(String),
 }
 
@@ -377,6 +380,7 @@ impl From<apsis_core::Error> for CliError {
                 Some(refusal) => Self::RestoreRefused(refusal),
                 None => Self::Other(word),
             },
+            apsis_core::Error::RestoreArmed => Self::RestoreArmed,
             apsis_core::Error::NotAuthorized => Self::NotAuthorized,
             apsis_core::Error::DeviceNotFound { device } => Self::DeviceNotFound { device },
             apsis_core::Error::Busy => Self::Busy,
@@ -2125,7 +2129,8 @@ impl AppModel {
                 | CliError::DeviceNotFound { .. }
                 | CliError::DiskRemoved { .. }
                 | CliError::Busy
-                | CliError::RestoreRefused(_),
+                | CliError::RestoreRefused(_)
+                | CliError::RestoreArmed,
             ) => false,
         };
         self.status = Some(match (operation, result) {
@@ -2187,6 +2192,13 @@ impl AppModel {
                         &labels(&deleted),
                         &labels(&not_deleted),
                     )),
+                )
+            }
+            // Refused while a restore is armed: nothing was deleted, of one or of several.
+            (Operation::Delete(_) | Operation::DeleteMany(_), Err(CliError::RestoreArmed)) => {
+                Status::Error(
+                    fl!("delete-refused-armed"),
+                    Some(fl!("delete-refused-armed-tip")),
                 )
             }
             // A delete refused before anything ran, or one that failed.
@@ -2272,7 +2284,12 @@ impl AppModel {
                 None
             }
             None => match result {
-                Err(CliError::NoHelper | CliError::NotAuthorized | CliError::Busy) => None,
+                Err(
+                    CliError::NoHelper
+                    | CliError::NotAuthorized
+                    | CliError::Busy
+                    | CliError::RestoreArmed,
+                ) => None,
                 // A restore refused as armed is refused before the lock. (The helper's guard
                 // under the lock gives the same refusal with a job, in the seconds while
                 // another window's arm is being made; if `Finished` beats that job's every
@@ -2778,6 +2795,7 @@ fn error_summary(error: &CliError, known_uuid: Option<&str>) -> String {
             reason = error_summary(reason, known_uuid)
         ),
         CliError::RestoreRefused(refusal) => refusal_lines(refusal).0,
+        CliError::RestoreArmed => fl!("refused-restore-armed"),
         CliError::Other(message) => message.clone(),
     }
 }

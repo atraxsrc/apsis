@@ -307,6 +307,8 @@ const DEVICE_REMOVED_HEADER: &str = "backup disk removed: ";
 const STOPPED: &str = "stopped";
 /// An encoded [`Error::RestoreRefused`]; the refusal's word follows.
 const RESTORE_REFUSED_HEADER: &str = "restore refused: ";
+/// An encoded [`Error::RestoreArmed`].
+const RESTORE_ARMED: &str = "restore armed";
 /// An encoded [`Error::DeleteManyStopped`]: `deleted=<a,b> failed=<c> left=<d,e> reason=`
 /// and the encoded reason follow. Snapshot names have no spaces or commas, so the fields are
 /// unambiguous; the reason comes last because it can hold anything.
@@ -314,8 +316,9 @@ const DELETE_MANY_HEADER: &str = "delete stopped: ";
 
 /// An error as one message for the bus (a D-Bus error's text, or `Finished`'s `message`).
 /// [`Error::DeviceNotFound`], [`Error::DeviceRemoved`], [`Error::InvalidInput`],
-/// [`Error::RestoreRefused`], [`Error::Stopped`] and [`Error::DeleteManyStopped`] keep their
-/// kind, so [`decode_error`] gives them back; anything else is its text.
+/// [`Error::RestoreRefused`], [`Error::RestoreArmed`], [`Error::Stopped`] and
+/// [`Error::DeleteManyStopped`] keep their kind, so [`decode_error`] gives them back;
+/// anything else is its text.
 #[must_use]
 pub fn encode_error(error: &Error) -> String {
     match error {
@@ -325,6 +328,7 @@ pub fn encode_error(error: &Error) -> String {
         }
         Error::InvalidInput(reason) => format!("{INVALID_INPUT_HEADER}{reason}"),
         Error::RestoreRefused(word) => format!("{RESTORE_REFUSED_HEADER}{word}"),
+        Error::RestoreArmed => RESTORE_ARMED.to_owned(),
         Error::Stopped => STOPPED.to_owned(),
         Error::DeleteManyStopped {
             deleted,
@@ -367,6 +371,9 @@ pub fn decode_error(message: &str) -> Error {
     }
     if let Some(word) = message.strip_prefix(RESTORE_REFUSED_HEADER) {
         return Error::RestoreRefused(word.to_owned());
+    }
+    if message == RESTORE_ARMED {
+        return Error::RestoreArmed;
     }
     if message == STOPPED {
         return Error::Stopped;
@@ -683,6 +690,17 @@ mod tests {
         assert!(
             matches!(decode_error(&encode_error(&refused)), Error::RestoreRefused(w) if w == "boot-files:no-entry")
         );
+    }
+
+    /// A delete refused while a restore is armed travels as itself, so the window says it
+    /// in its own words, not in the helper's.
+    #[test]
+    fn a_delete_refused_while_a_restore_is_armed_survives_the_bus() {
+        assert_eq!(encode_error(&Error::RestoreArmed), "restore armed");
+        assert!(matches!(
+            decode_error(&encode_error(&Error::RestoreArmed)),
+            Error::RestoreArmed
+        ));
     }
 
     #[test]

@@ -261,6 +261,7 @@ in the snapshot too.
 | Apsis needs apsis-helper | reinstall the .deb, or `sudo just install` |
 | the applet doesn't show after installing | log out and back in, or re-add it in *Configure panel applets* |
 | Can't restore this snapshot | the dialog says why and what to do; see "Known limitations of restore" |
+| Not deleted: a restart to restore is waiting | "Restart now" was clicked and the restore waits for the restart; restart the computer, or wait ten minutes for it to time out, then delete |
 | The preparation is too old / is gone | the "Ready to restore" prompt waited more than 30 minutes, or the helper was restarted; start the restore again |
 | Restore incomplete · system partly restored | the copy broke; reconnect the backup disk and **Restore again**, or restore the safety snapshot; see "If a restore goes wrong" |
 | System restored · still boots the previous kernel | the boot files couldn't be refreshed, or failed the check, and the old ones were kept; the next kernel update should set it right |
