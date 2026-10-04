@@ -47,6 +47,15 @@ with systemd-boot only.
 - While a restore plan waits at its prompt, creating, deleting and saving the settings are
   refused as busy in every window, and lists go on.
 
+### Fixed
+
+- A delete cut off part-way (power loss, or the helper stopped during a reinstall) no longer
+  leaves a half-removed snapshot that Apsis could only warn about: a delete first moves the
+  folder into `timeshift/apsis-staging/`, so what's left is a dimmed row that **Delete**
+  removes. A folder an earlier version left half-deleted in `timeshift/snapshots/` (an
+  `info.json`, no `exclude.list`) is shown as such a row too. These rows now read "Unfinished
+  snapshot or delete · Delete removes it".
+
 ## [0.4.2] - 2026-10-01
 
 Deleting several snapshots works again with more than one display, and lists never get in

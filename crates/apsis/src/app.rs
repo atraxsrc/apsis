@@ -2569,7 +2569,8 @@ impl AppModel {
 #[derive(Debug, Clone, Copy)]
 enum RowItem<'a> {
     Snapshot(&'a Snapshot),
-    /// An interrupted create's folder; its name is when it started.
+    /// A leftover (see [`SnapshotList::leftovers`]): an unfinished create's or delete's folder;
+    /// its name is a snapshot name.
     Leftover(&'a str),
 }
 

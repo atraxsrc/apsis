@@ -16,7 +16,7 @@
 //!       info.json                   see `info`
 //!   snapshots-ondemand/2026-09-25_11-28-53 -> ../snapshots/2026-09-25_11-28-53
 //!   snapshots-{boot,hourly,daily,weekly,monthly}/  the same, per tag
-//!   apsis-staging/                  Apsis only: a native create in progress
+//!   apsis-staging/                  Apsis only: a native create or delete in progress
 //! ```
 //!
 //! One deliberate difference: Timeshift builds a new snapshot in place, protected by its own
@@ -412,17 +412,27 @@ impl<R: Runner> NativeRsync<R> {
     /// - `<name>/info.json` must be a regular file: a folder that isn't a snapshot is refused;
     /// - nothing may be mounted at or below `<name>/` (`/proc/self/mountinfo`): a bind mount
     ///   has the same device number, so the walk alone couldn't tell;
-    /// - the folder is removed with [`prune::remove_at`] (never follows a symlink, never leaves
-    ///   the filesystem);
+    /// - `apsis-staging/` is opened with `O_NOFOLLOW` too (made if it isn't there), and the
+    ///   folder is moved there with `RENAME_NOREPLACE` before anything is removed. A name
+    ///   already taken there, or a filesystem without `RENAME_NOREPLACE`, refuses the delete:
+    ///   there is no plain rename to fall back to. Both folders are flushed after the move;
     /// - then its links in `snapshots-<tag>/` go, as Timeshift's delete leaves no dangling link;
-    ///   nothing else there is touched.
+    ///   nothing else there is touched;
+    /// - then the folder is removed with [`prune::remove_at`] (never follows a symlink, never
+    ///   leaves the filesystem), and `apsis-staging/` if that's empty now.
+    ///
+    /// Cut anywhere after the move, what's left is a leftover in `apsis-staging/` (listed, and
+    /// removed by Delete or the next create), never a half-removed snapshot in `snapshots/`.
     ///
     /// # Errors
     ///
     /// [`Error::InvalidSnapshotName`], [`Error::NoSuchSnapshot`], [`Error::InvalidInput`] (the
-    /// refusals above, before anything is deleted), or the delete failed part-way.
+    /// refusals above, before anything is moved or deleted), or the delete failed part-way.
     pub fn delete_snapshot(&self, name: &str) -> Result<()> {
-        use rustix::fs::{AtFlags, FileType, Mode, OFlags, open, openat, statat};
+        use rustix::fs::{
+            AtFlags, FileType, Mode, OFlags, RenameFlags, fsync, mkdirat, open, openat,
+            renameat_with, statat, unlinkat,
+        };
         use rustix::io::Errno;
 
         if parse_snapshot_name(name).is_none() {
@@ -460,8 +470,31 @@ impl<R: Runner> NativeRsync<R> {
                 list.join(", ")
             )));
         }
-        prune::remove_at(&snapshots, &self.snapshots_dir(), name)?;
+        match mkdirat(&timeshift, STAGING_DIR, Mode::from_raw_mode(0o755)) {
+            Ok(()) | Err(Errno::EXIST) => {}
+            Err(errno) => return Err(Error::Io(io::Error::from(errno))),
+        }
+        let staging = openat(&timeshift, STAGING_DIR, flags, Mode::empty())
+            .map_err(|e| folder(e, "timeshift/apsis-staging/"))?;
+        // Any error, `EINVAL` (no `RENAME_NOREPLACE` here) included, refuses: nothing moved.
+        if let Err(errno) = renameat_with(&snapshots, name, &staging, name, RenameFlags::NOREPLACE)
+        {
+            drop(staging);
+            let _ = unlinkat(&timeshift, STAGING_DIR, AtFlags::REMOVEDIR);
+            return Err(refuse(&match errno {
+                Errno::EXIST => format!("apsis-staging/{name} is already there"),
+                other => format!("can't move it into apsis-staging/ ({other})"),
+            }));
+        }
+        (self.log)(&format!("moved {name} to {STAGING_DIR}/"));
+        // The move is on disk before the first removal.
+        fsync(&snapshots).map_err(|e| Error::Io(io::Error::from(e)))?;
+        fsync(&staging).map_err(|e| Error::Io(io::Error::from(e)))?;
         self.remove_tag_links(name)?;
+        prune::remove_at(&staging, &self.staging_dir(), name)?;
+        drop(staging);
+        // Only if it's empty now; anything else there stays.
+        let _ = unlinkat(&timeshift, STAGING_DIR, AtFlags::REMOVEDIR);
         (self.log)(&format!(
             "deleted {}",
             self.snapshots_dir().join(name).display()
@@ -538,8 +571,8 @@ impl<R: Runner> NativeRsync<R> {
         Ok(())
     }
 
-    /// Interrupted creates' folders in `apsis-staging/`: real folders with a snapshot name,
-    /// oldest first. Anything else there is a warning (and is never removed).
+    /// Interrupted creates' and deletes' folders in `apsis-staging/`: real folders with a
+    /// snapshot name, oldest first. Anything else there is a warning (and is never removed).
     fn leftovers(&self) -> (Vec<String>, Vec<String>) {
         let mut names = Vec::new();
         let mut warnings = Vec::new();
@@ -566,15 +599,16 @@ impl<R: Runner> NativeRsync<R> {
         (names, warnings)
     }
 
-    /// Removes every interrupted create's folder (see [`NativeRsync::remove_staging`]). A
-    /// refusal is logged and the rest go on.
+    /// Removes every interrupted create's or delete's folder in `apsis-staging/` (see
+    /// [`NativeRsync::remove_staging`]); never anything in `snapshots/`. A refusal is logged
+    /// and the rest go on.
     fn remove_leftovers(&self) {
         for name in self.leftovers().0 {
             let started = parse_snapshot_name(&name)
                 .map(|t| t.strftime("%Y-%m-%d %H:%M:%S").to_string())
                 .unwrap_or_default();
             (self.log)(&format!(
-                "removing leftover {} (an interrupted create, started {started})",
+                "removing leftover {} (an interrupted create or delete, started {started})",
                 self.staging_dir().join(&name).display()
             ));
             if let Err(error) = self.remove_staging(&name) {
@@ -626,12 +660,18 @@ impl<R: Runner> NativeRsync<R> {
 }
 
 impl<R: Runner> Backend for NativeRsync<R> {
-    /// Reads every `info.json` directly. Folders Timeshift would count as incomplete are
-    /// warnings; interrupted creates' folders are [`SnapshotList::leftovers`].
+    /// Reads every `info.json` directly. [`SnapshotList::leftovers`] are the folders in
+    /// `apsis-staging/` and the half-deleted ones in `snapshots/` (see `Found::half_deleted`);
+    /// any other folder Timeshift would count as incomplete is a warning.
     fn list(&self) -> Result<SnapshotList> {
         let mut warnings = Vec::new();
         let mut snapshots = Vec::new();
+        let mut half_deleted = Vec::new();
         for found in self.scan()? {
+            if found.half_deleted() {
+                half_deleted.push(found.name);
+                continue;
+            }
             if let Some(problem) = found.problem() {
                 warnings.push(format!("{}: {problem}", found.name));
                 continue;
@@ -648,8 +688,11 @@ impl<R: Runner> Backend for NativeRsync<R> {
                 rsync_flags: info.rsync_flags,
             });
         }
-        let (leftovers, odd) = self.leftovers();
+        let (mut leftovers, odd) = self.leftovers();
         warnings.extend(odd);
+        leftovers.extend(half_deleted);
+        leftovers.sort();
+        leftovers.dedup();
         Ok(SnapshotList {
             device: self.config.device.clone(),
             uuid: self.config.device_uuid.clone(),
@@ -672,8 +715,9 @@ impl<R: Runner> Backend for NativeRsync<R> {
         self.execute(&plan)
     }
 
-    /// Deletes one snapshot ([`NativeRsync::delete_snapshot`]), or one interrupted create's
-    /// folder ([`NativeRsync::remove_staging`]) when `name` is a leftover and no snapshot.
+    /// Deletes one snapshot ([`NativeRsync::delete_snapshot`], which also takes a half-deleted
+    /// folder in `snapshots/`), or one interrupted create's or delete's folder
+    /// ([`NativeRsync::remove_staging`]) when `name` is in `apsis-staging/` only.
     fn delete(&self, name: &str) -> Result<()> {
         if parse_snapshot_name(name).is_none() {
             return Err(Error::InvalidSnapshotName(name.to_owned()));
@@ -695,6 +739,9 @@ struct Found {
     info: Option<Info>,
     info_exists: bool,
     has_exclude: bool,
+    /// A real folder (not a symlink) whose `info.json` is a regular file: what
+    /// [`NativeRsync::delete_snapshot`] asks for.
+    deletable: bool,
 }
 
 impl Found {
@@ -706,7 +753,22 @@ impl Found {
             info_exists: text.is_ok(),
             info: text.ok().as_deref().and_then(Info::parse),
             has_exclude: path.join(EXCLUDE_FILE).exists(),
+            deletable: fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+                && fs::symlink_metadata(path.join(INFO_FILE)).is_ok_and(|m| m.is_file()),
         }
+    }
+
+    /// What a delete cut part-way in place leaves (an Apsis delete before fix 2, or perhaps
+    /// Timeshift's): a snapshot name, a readable `info.json`, no `exclude.list` (the walk goes
+    /// in `readdir` order). A leftover row that Delete removes; never the `--link-dest` base,
+    /// never removed unasked. Whether Timeshift building a snapshot in place ever looks the
+    /// same isn't known; it would be a row too, and Delete needs a click, a confirm and a
+    /// password (PLAN 6b.9, left knowingly).
+    fn half_deleted(&self) -> bool {
+        parse_snapshot_name(&self.name).is_some()
+            && self.deletable
+            && self.info.is_some()
+            && !self.has_exclude
     }
 
     /// Why Timeshift would count it as incomplete (`Snapshot.vala:190-213`, `:282-287`, `:291-315`).

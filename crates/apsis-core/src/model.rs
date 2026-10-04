@@ -125,8 +125,10 @@ pub struct SnapshotList {
     /// Problems in an otherwise good list: folders that aren't complete snapshots, anything
     /// odd in the staging folder. Shown to the user; they don't fail the list.
     pub warnings: Vec<String>,
-    /// Names of interrupted creates' folders in `timeshift/apsis-staging/` (each a snapshot
-    /// name: when that create started). The next create removes them; so does `Delete`.
+    /// Names of unfinished folders, each a snapshot name: interrupted creates' and deletes'
+    /// folders in `timeshift/apsis-staging/` (the next create removes those), and folders
+    /// half-deleted in place in `timeshift/snapshots/` (a readable `info.json`, no
+    /// `exclude.list`; only `Delete` removes those). `Delete` removes either kind.
     pub leftovers: Vec<String>,
     /// The backup filesystem's size, used and free space from `statvfs` while `apsis-helper`
     /// has it mounted. `None` means unknown: the applet shows no bar then.

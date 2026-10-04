@@ -1467,7 +1467,18 @@ Until it is built, the table and the list above are what the code does.
   is a leftover, which the list, Delete and the next create handle. A folder already
   half-deleted in `snapshots/` (a readable `info.json`, no `exclude.list`) is listed as
   such a row. Nothing is removed from `snapshots/` unasked, and a folder there with no
-  `info.json` stays refused (a known limit).
+  `info.json` stays refused (a known limit). **Built (fix 2)**, with the owner's rulings: the
+  move is `RENAME_NOREPLACE` (any error refuses, nothing moves, no plain-rename fallback),
+  then `fsync` of both folders before the first removal; one text for every leftover row,
+  "Unfinished snapshot or delete · Delete removes it"; no `incomplete: no exclude.list`
+  warning for a folder that is now a row. **Knowingly left** (owner): Timeshift making a
+  snapshot in place could show as such a row while it runs (not known whether it ever has
+  `info.json` without `exclude.list`); Delete needs a click, a confirm and a password.
+  **Knowingly left** (owner, 2026-10-04): a folder half-deleted in place by Apsis 0.4.x or
+  Timeshift that still has `info.json` and `exclude.list` is listed as a whole snapshot. It
+  can be the `--link-dest` base (costs space only) and it is offered for Restore: a
+  full-system restore of that partial tree would remove what it lacks; the safety snapshot
+  is the way back. Not detectable reliably; no code.
 - **The arm's cleanup also removes the wants folder when it is empty**
   (`remove_arm_files`, as for the drop-in's folder), and `postrm` does the same.
 - **The state folder gains** `restore.note` (a working file, like `restore.filter`), and

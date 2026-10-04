@@ -1139,7 +1139,7 @@ fn leftovers_are_listed_then_removed_by_the_next_create() {
         assert!(staging.join("notes.txt").exists(), "{kind}");
         let log = log.lock().unwrap().join("\n");
         assert!(
-            log.contains("an interrupted create, started 2026-09-01 00:00:00"),
+            log.contains("an interrupted create or delete, started 2026-09-01 00:00:00"),
             "{kind}: {log}"
         );
         assert!(backend.list().unwrap().leftovers.is_empty(), "{kind}");
@@ -1209,6 +1209,404 @@ fn a_mount_inside_a_leftover_refuses_its_removal() {
             "{kind}: {error}"
         );
         assert!(leftover.join("localhost/mnt/x").exists(), "{kind}");
+    }
+}
+
+/// A folder made read-only (`0500`) for as long as this lives: a removal inside it, or a
+/// rename into or out of it, fails with `EACCES` for a normal user, as a stopped helper cuts a
+/// delete. The mode comes back on drop, so a failed assertion leaves nothing `labs` can't
+/// remove.
+struct ReadOnly(PathBuf, u32);
+
+impl ReadOnly {
+    fn new(path: &Path) -> Self {
+        let mode = fs::metadata(path).unwrap().permissions().mode();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o500)).unwrap();
+        Self(path.to_owned(), mode)
+    }
+}
+
+impl Drop for ReadOnly {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(self.1));
+    }
+}
+
+/// Root removes from a read-only folder anyway, so the cut can't be made; the tests that need
+/// it say so and skip.
+fn root_skips(test: &str) -> bool {
+    let root = rustix::process::geteuid().is_root();
+    if root {
+        eprintln!("{test} skipped: as root a read-only folder doesn't stop a removal");
+    }
+    root
+}
+
+fn staging_dir(lab: &Lab, name: &str) -> PathBuf {
+    lab.repo.join("timeshift/apsis-staging").join(name)
+}
+
+fn tag_link(lab: &Lab, tag: &str, name: &str) -> PathBuf {
+    lab.repo
+        .join(format!("timeshift/snapshots-{tag}"))
+        .join(name)
+}
+
+/// What [`cut_delete`] leaves for a test.
+struct Cut {
+    backend: NativeRsync<QuietRunner>,
+    /// `etc/` stays read-only while this lives.
+    guard: ReadOnly,
+    /// The files of `etc/` before the delete.
+    before: BTreeMap<PathBuf, (u64, u64)>,
+    log: Log,
+}
+
+/// Two snapshots, then a delete of the first cut inside its `localhost/etc/`.
+fn cut_delete(lab: &Lab) -> Cut {
+    populate(&lab.source);
+    let (backend, log) = backend(lab, false);
+    backend.create("").unwrap();
+    backend.create("").unwrap();
+    let etc = localhost(lab, FIRST).join("etc");
+    let before = files(&etc);
+    let mut guard = ReadOnly::new(&etc);
+    let error = backend.delete(FIRST).unwrap_err();
+    // The mode goes back where the folder is now.
+    let moved = staging_dir(lab, FIRST).join("localhost/etc");
+    if moved.exists() {
+        guard.0 = moved;
+    }
+    assert!(matches!(error, Error::Native(_)), "{}: {error:?}", lab.kind);
+    Cut {
+        backend,
+        guard,
+        before,
+        log,
+    }
+}
+
+/// Fix 2, test 1. The move comes first: a delete cut part-way leaves the folder in the
+/// staging folder, not in `snapshots/`. (Which files at the top of the folder went before the
+/// cut depends on `readdir`'s order; test A shows nothing goes before the move.)
+#[test]
+fn a_delete_moves_the_folder_out_of_snapshots_before_it_removes_anything() {
+    if root_skips("a_delete_moves_the_folder_out_of_snapshots_before_it_removes_anything") {
+        return;
+    }
+    for lab in labs("fix2-moved") {
+        let kind = lab.kind;
+        let Cut { before, log, .. } = cut_delete(&lab);
+        assert!(!snapshot_dir(&lab, FIRST).exists(), "{kind}");
+        let moved = staging_dir(&lab, FIRST).join("localhost/etc");
+        assert_eq!(
+            files(&moved),
+            before,
+            "{kind}: the cut part is there, whole"
+        );
+        assert!(
+            fs::symlink_metadata(tag_link(&lab, "ondemand", FIRST)).is_err(),
+            "{kind}: its links go before the folder"
+        );
+        assert!(tag_link(&lab, "ondemand", SECOND).is_symlink(), "{kind}");
+        let log = log.lock().unwrap().join("\n");
+        assert!(
+            log.contains(&format!("moved {FIRST} to apsis-staging/")),
+            "{kind}: {log}"
+        );
+        assert!(!log.contains("deleted"), "{kind}: {log}");
+    }
+}
+
+/// Fix 2, test 2.
+#[test]
+fn a_cut_delete_is_a_leftover_row_and_delete_removes_it() {
+    if root_skips("a_cut_delete_is_a_leftover_row_and_delete_removes_it") {
+        return;
+    }
+    for lab in labs("fix2-cut-row") {
+        let kind = lab.kind;
+        let Cut { backend, guard, .. } = cut_delete(&lab);
+        let list = backend.list().unwrap();
+        assert_eq!(list.leftovers, [FIRST], "{kind}");
+        assert_eq!(names(&backend), [SECOND], "{kind}");
+        assert!(list.warnings.is_empty(), "{kind}: {:?}", list.warnings);
+        drop(guard);
+        backend.delete(FIRST).unwrap();
+        assert!(!lab.repo.join("timeshift/apsis-staging").exists(), "{kind}");
+        assert!(backend.list().unwrap().leftovers.is_empty(), "{kind}");
+        assert_eq!(names(&backend), [SECOND], "{kind}");
+    }
+}
+
+/// Fix 2, test 3.
+#[test]
+fn the_next_create_removes_a_cut_deletes_folder() {
+    if root_skips("the_next_create_removes_a_cut_deletes_folder") {
+        return;
+    }
+    for lab in labs("fix2-cut-create") {
+        let kind = lab.kind;
+        let Cut {
+            backend,
+            guard,
+            log,
+            ..
+        } = cut_delete(&lab);
+        drop(guard);
+        backend.create("").unwrap();
+        assert!(!staging_dir(&lab, FIRST).exists(), "{kind}");
+        assert_eq!(names(&backend), [SECOND, THIRD], "{kind}");
+        let log = log.lock().unwrap().join("\n");
+        assert!(
+            log.contains("an interrupted create or delete, started 2026-09-25 11:28:53"),
+            "{kind}: {log}"
+        );
+    }
+}
+
+/// `snapshots/<FIRST>` as the reinstall on apsis-test left it: `info.json` and part of
+/// `localhost/`, no `exclude.list`.
+fn half_deleted(lab: &Lab) -> NativeRsync<QuietRunner> {
+    let backend = two_snapshots(lab);
+    fs::remove_file(snapshot_dir(lab, FIRST).join("exclude.list")).unwrap();
+    fs::remove_dir_all(localhost(lab, FIRST).join("usr")).unwrap();
+    backend
+}
+
+/// Fix 2, test 4 (and owner's Q2: no warning for it).
+#[test]
+fn a_half_deleted_folder_in_snapshots_is_listed_as_a_leftover() {
+    for lab in labs("fix2-half-row") {
+        let kind = lab.kind;
+        let backend = half_deleted(&lab);
+        let list = backend.list().unwrap();
+        assert_eq!(list.leftovers, [FIRST], "{kind}");
+        assert_eq!(names(&backend), [SECOND], "{kind}");
+        assert!(list.warnings.is_empty(), "{kind}: {:?}", list.warnings);
+    }
+}
+
+/// Fix 2, test 5.
+#[test]
+fn delete_removes_a_half_deleted_folder_in_snapshots() {
+    for lab in labs("fix2-half-delete") {
+        let kind = lab.kind;
+        let backend = half_deleted(&lab);
+        backend.delete(FIRST).unwrap();
+        assert!(!snapshot_dir(&lab, FIRST).exists(), "{kind}");
+        assert!(!lab.repo.join("timeshift/apsis-staging").exists(), "{kind}");
+        let list = backend.list().unwrap();
+        assert!(list.leftovers.is_empty(), "{kind}");
+        assert_eq!(names(&backend), [SECOND], "{kind}");
+    }
+}
+
+/// Fix 2, test 6: nothing is removed from `snapshots/` unasked. Every path stays, with its
+/// inode and size; change times don't count, as the new snapshot's hard links to the same
+/// files change their link count.
+#[test]
+fn a_create_never_removes_a_half_deleted_folder_in_snapshots() {
+    let shape = |dir: &Path| -> BTreeMap<PathBuf, (u64, u64)> {
+        state(dir)
+            .into_iter()
+            .map(|(path, (ino, size, _, _))| (path, (ino, size)))
+            .collect()
+    };
+    for lab in labs("fix2-half-create") {
+        let kind = lab.kind;
+        let backend = half_deleted(&lab);
+        let before = shape(&snapshot_dir(&lab, FIRST));
+        backend.create("").unwrap();
+        assert_eq!(shape(&snapshot_dir(&lab, FIRST)), before, "{kind}");
+        assert_eq!(backend.list().unwrap().leftovers, [FIRST], "{kind}");
+    }
+}
+
+/// Fix 2, test 7: a row only where Delete would accept it.
+#[test]
+fn a_folder_without_info_json_stays_refused_and_is_no_leftover() {
+    for lab in labs("fix2-no-info") {
+        let kind = lab.kind;
+        let backend = half_deleted(&lab);
+        fs::remove_file(snapshot_dir(&lab, FIRST).join("info.json")).unwrap();
+        let list = backend.list().unwrap();
+        assert!(list.leftovers.is_empty(), "{kind}");
+        assert_eq!(
+            list.warnings,
+            [format!("{FIRST}: incomplete: no info.json")],
+            "{kind}"
+        );
+        let error = backend.delete(FIRST).unwrap_err();
+        assert!(
+            matches!(error, Error::InvalidInput(ref m) if m.contains("no info.json")),
+            "{kind}: {error:?}"
+        );
+        // A symlinked info.json: readable, but Delete refuses it, so no row either.
+        std::os::unix::fs::symlink(
+            snapshot_dir(&lab, SECOND).join("info.json"),
+            snapshot_dir(&lab, FIRST).join("info.json"),
+        )
+        .unwrap();
+        let list = backend.list().unwrap();
+        assert!(list.leftovers.is_empty(), "{kind}");
+        assert_eq!(
+            list.warnings,
+            [format!("{FIRST}: incomplete: no exclude.list")],
+            "{kind}"
+        );
+        assert!(
+            matches!(backend.delete(FIRST), Err(Error::InvalidInput(_))),
+            "{kind}"
+        );
+        assert!(localhost(&lab, FIRST).join("etc").exists(), "{kind}");
+    }
+}
+
+/// Fix 2, test 8: `RENAME_NOREPLACE`.
+#[test]
+fn a_delete_refuses_a_taken_staging_name_and_moves_nothing() {
+    for lab in labs("fix2-taken") {
+        let kind = lab.kind;
+        let backend = two_snapshots(&lab);
+        write(&staging_dir(&lab, FIRST).join("localhost/half"), "half");
+        let snapshot = state(&snapshot_dir(&lab, FIRST));
+        let staged = state(&staging_dir(&lab, FIRST));
+        let error = backend.delete(FIRST).unwrap_err();
+        assert!(
+            matches!(error, Error::InvalidInput(ref m) if m.contains("apsis-staging")),
+            "{kind}: {error:?}"
+        );
+        assert_eq!(state(&snapshot_dir(&lab, FIRST)), snapshot, "{kind}");
+        assert_eq!(state(&staging_dir(&lab, FIRST)), staged, "{kind}");
+        assert!(tag_link(&lab, "ondemand", FIRST).is_symlink(), "{kind}");
+    }
+}
+
+/// Fix 2, test 9.
+#[test]
+fn a_delete_refuses_a_symlinked_staging_folder_before_the_move() {
+    for lab in labs("fix2-staging-link") {
+        let kind = lab.kind;
+        let backend = two_snapshots(&lab);
+        let elsewhere = lab.repo.parent().unwrap().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, lab.repo.join("timeshift/apsis-staging")).unwrap();
+        let snapshot = state(&snapshot_dir(&lab, FIRST));
+        let error = backend.delete(FIRST).unwrap_err();
+        assert!(
+            matches!(error, Error::InvalidInput(ref m) if m.contains("apsis-staging/ is a symlink")),
+            "{kind}: {error:?}"
+        );
+        assert_eq!(state(&snapshot_dir(&lab, FIRST)), snapshot, "{kind}");
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0, "{kind}");
+        assert!(tag_link(&lab, "ondemand", FIRST).is_symlink(), "{kind}");
+    }
+}
+
+/// Fix 2, test 10.
+#[test]
+fn a_delete_makes_the_staging_folder_and_leaves_none_behind() {
+    for lab in labs("fix2-staging-gone") {
+        let kind = lab.kind;
+        let backend = two_snapshots(&lab);
+        assert!(!lab.repo.join("timeshift/apsis-staging").exists(), "{kind}");
+        backend.delete(FIRST).unwrap();
+        assert!(!lab.repo.join("timeshift/apsis-staging").exists(), "{kind}");
+        assert!(!snapshot_dir(&lab, FIRST).exists(), "{kind}");
+    }
+}
+
+/// Fix 2, addition A: the move fails (here `EACCES`, a read-only `snapshots/`; `EINVAL` from a
+/// filesystem without `RENAME_NOREPLACE` takes the same arm). The delete refuses and nothing
+/// is removed: there is no plain rename and no delete in place to fall back to.
+#[test]
+fn a_failed_move_refuses_the_delete_and_removes_nothing() {
+    if root_skips("a_failed_move_refuses_the_delete_and_removes_nothing") {
+        return;
+    }
+    for lab in labs("fix2-no-move") {
+        let kind = lab.kind;
+        let backend = two_snapshots(&lab);
+        let snapshot = state(&snapshot_dir(&lab, FIRST));
+        let guard = ReadOnly::new(&lab.repo.join("timeshift/snapshots"));
+        let error = backend.delete(FIRST).unwrap_err();
+        drop(guard);
+        assert!(
+            matches!(error, Error::InvalidInput(ref m) if m.contains("can't move it")),
+            "{kind}: {error:?}"
+        );
+        assert_eq!(state(&snapshot_dir(&lab, FIRST)), snapshot, "{kind}");
+        assert!(!lab.repo.join("timeshift/apsis-staging").exists(), "{kind}");
+        assert!(tag_link(&lab, "ondemand", FIRST).is_symlink(), "{kind}");
+        assert_eq!(names(&backend), [FIRST, SECOND], "{kind}");
+    }
+}
+
+/// Fix 2, addition B: a cut between the move and the tag links leaves a dangling link. The
+/// list ignores it, Delete of the leftover leaves it, the next create removes it.
+#[test]
+fn a_cut_before_the_tag_links_leaves_a_dangling_link_the_next_create_removes() {
+    if root_skips("a_cut_before_the_tag_links_leaves_a_dangling_link_the_next_create_removes") {
+        return;
+    }
+    for lab in labs("fix2-links") {
+        let kind = lab.kind;
+        let backend = two_snapshots(&lab);
+        let before = files(&snapshot_dir(&lab, FIRST));
+        let guard = ReadOnly::new(&lab.repo.join("timeshift/snapshots-ondemand"));
+        assert!(backend.delete(FIRST).is_err(), "{kind}");
+        drop(guard);
+        assert!(!snapshot_dir(&lab, FIRST).exists(), "{kind}");
+        assert_eq!(
+            files(&staging_dir(&lab, FIRST)),
+            before,
+            "{kind}: moved, whole"
+        );
+        let link = tag_link(&lab, "ondemand", FIRST);
+        assert!(link.is_symlink() && !link.exists(), "{kind}: dangling");
+        let list = backend.list().unwrap();
+        assert_eq!(list.leftovers, [FIRST], "{kind}");
+        assert!(list.warnings.is_empty(), "{kind}: {:?}", list.warnings);
+        assert_eq!(names(&backend), [SECOND], "{kind}");
+
+        backend.delete(FIRST).unwrap();
+        assert!(!lab.repo.join("timeshift/apsis-staging").exists(), "{kind}");
+        assert!(
+            link.is_symlink(),
+            "{kind}: Delete of a leftover leaves the link"
+        );
+        backend.create("").unwrap();
+        assert!(
+            fs::symlink_metadata(&link).is_err(),
+            "{kind}: the create removed it"
+        );
+        assert!(tag_link(&lab, "ondemand", SECOND).is_symlink(), "{kind}");
+        assert!(tag_link(&lab, "ondemand", THIRD).is_symlink(), "{kind}");
+    }
+}
+
+/// Fix 2, addition C: the `--link-dest` base is the newest valid snapshot; neither a
+/// half-deleted folder in `snapshots/` nor a cut delete's folder in `apsis-staging/` is one.
+#[test]
+fn a_create_never_links_to_a_half_deleted_folder() {
+    for lab in labs("fix2-link-dest") {
+        let kind = lab.kind;
+        let backend = two_snapshots(&lab);
+        // The newer one is half-deleted in place; a third, newer still, is in the staging
+        // folder as a cut delete leaves it.
+        fs::remove_file(snapshot_dir(&lab, SECOND).join("exclude.list")).unwrap();
+        let moved = staging_dir(&lab, "2026-09-25_11-29-59");
+        fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        Command::new("cp")
+            .arg("-a")
+            .arg(snapshot_dir(&lab, FIRST))
+            .arg(&moved)
+            .status()
+            .unwrap();
+        assert!(moved.join("exclude.list").exists(), "{kind}");
+        let plan = backend.plan("").unwrap();
+        assert_eq!(plan.link_from, Some(localhost(&lab, FIRST)), "{kind}");
     }
 }
 

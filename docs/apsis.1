@@ -233,9 +233,17 @@ never written.
 .TP
 .I timeshift/apsis-staging/
 On the backup disk: where a snapshot is built before it's moved into
-.IR timeshift/snapshots/ .
-What an interrupted snapshot leaves there is shown in the list and removed by the next
-snapshot (or with Delete).
+.IR timeshift/snapshots/ ,
+and where a delete moves a snapshot before removing it.
+What an interrupted snapshot or delete leaves there is shown in the list as an unfinished row
+and removed by the next snapshot (or with Delete).
+A folder an older Apsis left half\-deleted in
+.I timeshift/snapshots/
+(an
+.IR info.json ,
+no
+.IR exclude.list )
+is such a row too; only Delete removes it.
 .TP
 .I timeshift/apsis\-restore\-RECOVER.txt
 On the backup disk: the recovery steps with this machine's disk UUIDs and the snapshots' names
@@ -305,6 +313,10 @@ A delete only removes a folder named like a snapshot under
 .IR timeshift/apsis-staging/ ),
 reached without any symlink and with nothing mounted inside it; it never follows a symlink or
 crosses into another filesystem.
+It first moves the snapshot into
+.I timeshift/apsis-staging/
+(never over a folder already there), so a delete cut off part-way leaves an unfinished row,
+not a half\-removed snapshot.
 Stopping a snapshot ends rsync's process group (SIGTERM, then SIGKILL after 10 seconds) and
 removes what it copied the same way.
 Calls and results are logged to the journal

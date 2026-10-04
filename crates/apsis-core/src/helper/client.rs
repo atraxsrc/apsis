@@ -188,8 +188,8 @@ impl HelperClient {
             .await
     }
 
-    /// Deletes the snapshot `name` (or the interrupted create's folder `name`) and waits until
-    /// it's done.
+    /// Deletes the snapshot `name` (or the leftover `name`, see [`SnapshotList::leftovers`])
+    /// and waits until it's done.
     ///
     /// # Errors
     ///
@@ -199,7 +199,7 @@ impl HelperClient {
             .await
     }
 
-    /// Deletes `names` (snapshots or interrupted creates' folders) as one job, in order, and
+    /// Deletes `names` (snapshots or leftovers) as one job, in order, and
     /// waits until it's done. The password is asked once. It stops at the first failure:
     /// [`Error::DeleteManyStopped`] says what was deleted, what failed and why, and what's
     /// left. `on_progress` gets each step (`percent` is done of total).

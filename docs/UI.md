@@ -57,7 +57,7 @@ terminal; that design is in git history and DECISIONS.md.
 │  Snapshot             Comment                              │
 │▌ 2026-09-25 11:28     before driver update                 │  selected
 │  2026-09-23 08:33                                          │
-│  2026-09-26 14:02     Interrupted snapshot, removed by ... │  dimmed (a leftover)
+│  2026-09-26 14:02     Unfinished snapshot or delete · D... │  dimmed (a leftover)
 │ ────────────────────────────────────────────────────────── │
 │  Last snapshot   5d ago                                    │
 │  Backup disk     sdb1  885G / 932G · 95% used · 47G free (under 10%)
@@ -73,9 +73,9 @@ terminal; that design is in git history and DECISIONS.md.
 - Toolbar: **Create** (enabled with a backup device listed and connected and no job running),
   **Restore** (0.5.0: also needs exactly one snapshot selected, not a leftover; no tooltip, no
   key), **Delete** (also needs a selection), **Settings**.
-- List: libcosmic list rows, date and comment, newest first, then leftovers of interrupted
-  creates (dimmed, "Interrupted snapshot, removed by the next one"). Click selects one;
-  Ctrl-click adds or removes; Shift-click selects a range.
+- List: libcosmic list rows, date and comment, newest first, then leftovers of unfinished
+  creates and deletes (dimmed, "Unfinished snapshot or delete · Delete removes it"). Click
+  selects one; Ctrl-click adds or removes; Shift-click selects a range.
 - Status area: last snapshot (with the reminder's note in the warning colour), backup disk with
   its bar (accent, warning under 10% free, destructive under 5%), the running job's line and bar
   with **Stop** for a create or a restore's preparation, the last result (an error in the

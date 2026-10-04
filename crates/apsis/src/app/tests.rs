@@ -260,6 +260,16 @@ fn the_list_is_newest_first_then_the_leftovers() {
             when = fmt::when(apsis_core::parse_snapshot_name(LEFTOVER).unwrap())
         )
     );
+    // Fix 2 (owner, Q1 A): one text for an interrupted create and a cut or half-done delete;
+    // the next create removes only the first kind.
+    assert_eq!(
+        fl!("leftover-row"),
+        "Unfinished snapshot or delete · Delete removes it"
+    );
+    assert_eq!(
+        fl!("leftover-label", when = "09-26 14:02"),
+        "unfinished snapshot or delete from 09-26 14:02"
+    );
 }
 
 #[test]

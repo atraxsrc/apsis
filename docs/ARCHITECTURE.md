@@ -32,7 +32,7 @@ pub struct SnapshotList {
     pub mode: Option<Mode>,       // Rsync (the wire format still has btrfs)
     pub snapshots: Vec<Snapshot>,
     pub warnings: Vec<String>,    // incomplete folders, odd things in the staging folder
-    pub leftovers: Vec<String>,   // interrupted creates' folders in apsis-staging/
+    pub leftovers: Vec<String>,   // unfinished creates/deletes, half-deleted folders (below)
     pub usage: Option<DiskUsage>, // statvfs of the backup device, when known
 }
 
@@ -53,8 +53,11 @@ parent folders of each `+` path let in, then `+ /root/**` / `+ /home/**` if incl
 built-in `/root/**` and `/home/*/**`).
 
 - `list`: reads `timeshift/snapshots/*/info.json`; folders Timeshift would count as incomplete
-  are warnings; snapshot-named folders in `timeshift/apsis-staging/` are `leftovers` (anything
-  else there is a warning and is never touched).
+  are warnings, except a half-deleted one (a real folder with a snapshot name, a regular,
+  readable `info.json` and no `exclude.list`: what a delete cut off in place leaves), which is
+  a `leftover`; snapshot-named folders in `timeshift/apsis-staging/` are `leftovers` too
+  (anything else there is a warning and is never touched). A create removes the staging
+  folder's leftovers only, never anything in `snapshots/`.
 - `create`: `plan` works out the name (local time), the `--link-dest` snapshot (newest valid
   one with this `sys-uuid`), `exclude.list`, the rsync argv and `info.json` (tag `ondemand`).
   Since 0.4.1 the argv has `-A -X --numeric-ids` (ACLs, extended attributes, owners by number;
@@ -78,11 +81,21 @@ built-in `/root/**` and `/home/*/**`).
   - `<name>/info.json` is a regular file;
   - nothing is mounted at or below `<name>/` (`/proc/self/mountinfo`, `usage::mounts_under`):
     a bind mount has the same `st_dev`, so the walk alone couldn't tell;
-  - removal is `native::prune::remove_at`: every folder opened with `O_NOFOLLOW` relative to
-    the one above, symlinks removed as links, and a folder on another filesystem stops it;
-  - then `snapshots-<tag>/<name>` links are removed (only symlinks, only that name).
-- `delete` of a name that isn't a snapshot but is a leftover removes the staging folder
-  (`remove_staging`); anything else goes through `delete_snapshot`.
+  - `apsis-staging/` is opened with `O_NOFOLLOW` too (made, 0755, if it isn't there), and
+    the folder is moved into it with `renameat2(RENAME_NOREPLACE)` before anything is
+    removed. Any error refuses with nothing moved: a name already there (`EEXIST`), a
+    filesystem without the flag (`EINVAL`), anything else; there is no plain-rename
+    fallback. Then `fsync` of `snapshots/` and `apsis-staging/` (fix 2);
+  - then `snapshots-<tag>/<name>` links are removed (only symlinks, only that name). A cut
+    between the move and here leaves dangling links: the list never reads the tag folders,
+    and the next create rebuilds them (`update_symlinks`);
+  - then removal is `native::prune::remove_at` in `apsis-staging/`: every folder opened with
+    `O_NOFOLLOW` relative to the one above, symlinks removed as links, and a folder on
+    another filesystem stops it; then `apsis-staging/` if it is empty. A delete cut after
+    the move is a leftover there.
+- `delete` of a name that isn't in `snapshots/` but is in `apsis-staging/` removes that
+  folder (`remove_staging`); anything else, a half-deleted folder in `snapshots/` included,
+  goes through `delete_snapshot`.
 - Refuses to write through a symlinked `timeshift/`, `snapshots/` or staging folder.
 
 The applet calls the helper on a background task (libcosmic `Task`) and never blocks the UI

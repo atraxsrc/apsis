@@ -127,8 +127,12 @@ any `*.apsis-before-*` file next to an original, is yours and can be deleted by 
 
 To delete: select one or more snapshots (Ctrl-click or Shift-click for several), **Delete**,
 confirm. Several are deleted in one go, in list order, and your password is asked once; if one
-fails, the rest are left alone and the status line says which were deleted. A dimmed "Interrupted snapshot" row is what's left of a snapshot that was cut off
-(power loss, a crash); the next snapshot removes it, or delete it yourself.
+fails, the rest are left alone and the status line says which were deleted. A dimmed "Unfinished
+snapshot or delete" row is what's left of a snapshot or a delete that was cut off (power loss, a
+crash): select it and **Delete**. The next snapshot removes most of them by itself, but never
+one still in `timeshift/snapshots/` (a delete cut off by an older Apsis leaves it there).
+**Known limit:** a folder in `timeshift/snapshots/` with no `info.json` is only a warning, and
+Apsis won't delete it; it needs removing by hand, as root.
 
 4. **Restore the system** (0.5.0, experimental): select one snapshot, **Restore**. Apsis checks
    that the snapshot fits this computer (same installation, UEFI, Pop!_OS with systemd-boot,

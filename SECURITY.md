@@ -53,8 +53,8 @@ It is not sandboxed by systemd: a snapshot reads the whole filesystem and the he
 devices, which hardening options would break.
 
 **Deleting a snapshot** is a recursive delete as root, so it refuses anything that isn't plainly
-one snapshot folder, before deleting anything (the unfinished copy of a stopped or interrupted
-snapshot, under `timeshift/apsis-staging/`, is removed by the same rules):
+one snapshot folder, before deleting anything (what a stopped or interrupted snapshot or
+delete leaves under `timeshift/apsis-staging/` is removed by the same rules):
 
 - the name must match `YYYY-MM-DD_HH-MM-SS` (so it can't be `snapshots/` itself, `..` or a
   path), and the fresh list must have it;
@@ -64,9 +64,14 @@ snapshot, under `timeshift/apsis-staging/`, is removed by the same rules):
 - the folder must contain a regular `info.json`;
 - nothing may be mounted at or below it (`/proc/self/mountinfo`: a bind mount has the same
   device number, so the walk alone couldn't tell);
-- the walk that deletes opens every folder with `O_NOFOLLOW` relative to the one above, removes
-  symlinks as links, and stops at any folder on another filesystem;
-- afterwards only that snapshot's links in `timeshift/snapshots-<tag>/` are removed.
+- the folder is then moved into `timeshift/apsis-staging/` (opened with `O_NOFOLLOW`, so a
+  symlink there is refused) with `RENAME_NOREPLACE`, before anything is removed: a name already
+  there, or a filesystem without that flag, refuses the delete with nothing moved, and there
+  is no plain rename to fall back to. A delete cut off after the move leaves a leftover there,
+  never a half-removed snapshot in `timeshift/snapshots/`;
+- then only that snapshot's links in `timeshift/snapshots-<tag>/` are removed;
+- then the walk that deletes opens every folder with `O_NOFOLLOW` relative to the one above,
+  removes symlinks as links, and stops at any folder on another filesystem.
 
 **The config** `/etc/apsis/config.toml` (backup device UUID, `/root` and `/home` includes, and
 rsync filters) is written only

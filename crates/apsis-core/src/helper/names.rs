@@ -18,14 +18,16 @@ pub const OBJECT_PATH: &str = "/io/github/atraxsrc/Apsis/Helper";
 pub const INTERFACE: &str = "io.github.atraxsrc.Apsis.Helper3";
 
 /// `List() -> ((sssa(ssss)asas)a{st})`: the snapshots on the backup device (mounted read-only
-/// for the call), each with its format, leftovers of interrupted creates, and its disk usage.
+/// for the call), each with its format, leftovers of unfinished creates or deletes, and its
+/// disk usage.
 /// See [`super::WireListWithUsage3`].
 pub const METHOD_LIST: &str = "List";
 /// `Create(s comment)`: a new snapshot (rsync at idle priority); removes leftovers first.
 /// Returns once started; [`SIGNAL_FINISHED`] with [`OP_CREATE`] follows.
 pub const METHOD_CREATE: &str = "Create";
 /// `Delete(s name)`: deletes one snapshot folder (and its tag links), or one leftover of an
-/// interrupted create. Returns once started; [`SIGNAL_FINISHED`] with [`OP_DELETE`] follows.
+/// unfinished create or delete. Returns once started; [`SIGNAL_FINISHED`] with [`OP_DELETE`]
+/// follows.
 pub const METHOD_DELETE: &str = "Delete";
 /// `DeleteMany(as names)` (0.4.2): deletes several snapshots or leftovers as one job, each in
 /// order, stopping at the first failure. At least two names, each a snapshot name, none

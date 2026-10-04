@@ -105,7 +105,7 @@ impl From<Error> for HelperError {
 impl Helper {
     /// The snapshots on the backup device (each one's `info.json`, read on the read-only
     /// mount the lists share, with its format as the raw rsync flags string, `""` for an old
-    /// one), leftovers of interrupted creates, and its `statvfs` (polkit:
+    /// one), leftovers of unfinished creates or deletes, and its `statvfs` (polkit:
     /// `list`, no password for the active session). A read, not a job: lists run at the same
     /// time as each other and are never announced; one that arrives while a write runs or
     /// waits is refused `Busy`.
@@ -491,7 +491,7 @@ impl Helper {
         )
     }
 
-    /// Starts deleting snapshot `name`, or the interrupted create's folder `name` (polkit:
+    /// Starts deleting snapshot `name`, or the leftover `name` (polkit:
     /// `delete`) and returns; `Finished("delete", ..)` follows. The backup device is mounted
     /// read-write for the delete only; the name must be one the list has. Refused while a
     /// restore is armed, before the password ([`Helper::begin_delete`]).
@@ -536,7 +536,7 @@ impl Helper {
         )
     }
 
-    /// Starts deleting `names` (snapshots or interrupted creates' folders) as one job, in
+    /// Starts deleting `names` (snapshots or leftovers) as one job, in
     /// order (polkit: `delete`, asked once), and returns; `Finished("delete-many", ..)`
     /// follows. At least two names, each a snapshot name, none repeated. It stops at the first
     /// failure; the message then says what was deleted, what failed and what's left. Refused
@@ -1175,10 +1175,7 @@ fn describe_list(list: &SnapshotList) -> String {
         ));
     }
     if !list.leftovers.is_empty() {
-        text.push_str(&format!(
-            "; interrupted creates: {}",
-            list.leftovers.join(", ")
-        ));
+        text.push_str(&format!("; unfinished: {}", list.leftovers.join(", ")));
     }
     if !list.warnings.is_empty() {
         text.push_str(&format!("; warnings: {}", list.warnings.join(" | ")));
@@ -1728,6 +1725,41 @@ mod tests {
         }
     }
 
+    /// A backend that records the names it's asked to delete.
+    #[derive(Default)]
+    struct Deletes(std::sync::Mutex<Vec<String>>);
+
+    impl Backend for Deletes {
+        fn list(&self) -> apsis_core::Result<SnapshotList> {
+            Ok(SnapshotList::default())
+        }
+        fn create(&self, _comment: &str) -> apsis_core::Result<()> {
+            unreachable!()
+        }
+        fn delete(&self, name: &str) -> apsis_core::Result<()> {
+            self.0.lock().unwrap().push(name.to_owned());
+            Ok(())
+        }
+    }
+
+    /// Fix 2, test 12: a half-deleted folder in `snapshots/` travels in `leftovers`, and that
+    /// is enough for `Delete` (and `DeleteMany`, which goes through the same check).
+    #[test]
+    fn delete_known_accepts_a_half_deleted_folder_the_list_shows() {
+        let half = "2026-10-03_09-00-00";
+        let list = SnapshotList {
+            leftovers: vec![half.to_owned()],
+            ..SnapshotList::default()
+        };
+        let backend = Deletes::default();
+        delete_known(&backend, &list, half).unwrap();
+        assert!(matches!(
+            delete_known(&backend, &list, "2026-10-03_09-00-01"),
+            Err(Error::NoSuchSnapshot(_))
+        ));
+        assert_eq!(*backend.0.lock().unwrap(), [half]);
+    }
+
     #[test]
     fn a_stopped_delete_of_several_travels_as_a_failure_with_its_parts() {
         let stopped = Error::DeleteManyStopped {
@@ -1813,7 +1845,7 @@ mod tests {
         list.leftovers = vec!["2026-09-29_14-02-11".to_owned()];
         assert_eq!(
             describe_list(&list),
-            "ok, 0 snapshots; interrupted creates: 2026-09-29_14-02-11"
+            "ok, 0 snapshots; unfinished: 2026-09-29_14-02-11"
         );
         list.leftovers.clear();
         list.usage = apsis_core::DiskUsage::from_statvfs(1000, 400, 350, 1000);
