@@ -214,9 +214,10 @@ pub trait Runner {
     /// (`systemd.offline-updates(7)`).
     fn remove_link(&mut self) -> Result<(), String>;
 
-    /// Removes the rest of the arm: the unit, its wants link, the drop-in (and its folder
-    /// once that's empty), the helper copy and `state.json`. Only called once Apsis's link
-    /// is gone, or when the link was never Apsis's.
+    /// Removes the rest of the arm: the unit, its wants link, the drop-in (and the wants
+    /// folder and the drop-in's folder once they're empty), the helper copy and
+    /// `state.json`. Only called once Apsis's link is gone, or when the link was never
+    /// Apsis's.
     ///
     /// # Errors
     ///

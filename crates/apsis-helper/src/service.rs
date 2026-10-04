@@ -330,12 +330,15 @@ impl Helper {
                     ready.end(JobState::Done).wait().await;
                     if let Err(error) = reboot(connection).await {
                         // Known not to have begun: undo now rather than in ten minutes.
-                        let _ = blocking(|| {
+                        let disarmed = blocking(|| {
                             let _ =
                                 DirectRunner.run(&arm::stop_disarm_timer_argv().map(Into::into));
                             arm::disarm(&arm::Paths::system()).map_err(Error::Io)
                         })
                         .await;
+                        if let Err(disarm) = disarmed {
+                            log(&format!("{label}: couldn't disarm: {disarm}"));
+                        }
                         return Err(error);
                     }
                     Ok(())

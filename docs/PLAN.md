@@ -659,7 +659,7 @@ Until it is built, the text above is what the code does.
 - **The helper takes its job lock around the arm** (6b.9), so a package script can't land
   inside one.
 - **`disarm()` syncs after it removes the link**, for the timer and for the package script.
-  A power cut seconds after a disarm must not bring the link back.
+  A power cut seconds after a disarm must not bring the link back. **Built (step 7b).**
 - **Knowingly left** (owner): in the seconds between "Restart now" and the reboot, a
   package operation on Apsis cancels the arm, and only apt's output says so.
 

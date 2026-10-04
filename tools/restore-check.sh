@@ -26,6 +26,8 @@ if [ -d /etc/systemd/system/pop-upgrade-init.service.d ]; then
 else
   ok "no drop-in folder"
 fi
+wants=/etc/systemd/system/system-update.target.wants
+if [ -d "$wants" ] && [ -z "$(ls -A "$wants" 2>/dev/null)" ]; then fail "empty wants folder left: $wants"; else ok "no empty wants folder"; fi
 if systemctl list-units --all 'apsis-disarm*' --no-legend 2>/dev/null | grep -q .; then
   fail "a disarm timer or service is still loaded"
 else

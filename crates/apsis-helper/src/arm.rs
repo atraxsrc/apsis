@@ -144,24 +144,48 @@ fn remove_plan_files(paths: &Paths) -> io::Result<Vec<&'static str>> {
 /// the helper copy, `state.json`, the plan and its working files. What was removed, by name,
 /// for the journal. The pair the arm kept and rsync's log stay.
 ///
+/// The link's removal is flushed before anything else goes (its folder, then everything
+/// once, as the arm does): a power cut seconds after a disarm must not bring the link back
+/// over an arm that's still whole (PLAN 6b.5). The timer and the package script both come
+/// through here.
+///
 /// # Errors
 ///
 /// Something that was there couldn't be removed. The link going first means a disarm cut
-/// short leaves only leftovers.
+/// short leaves only leftovers. Or the flush failed: the rest is removed all the same, and
+/// the error says that the disarm may not outlast a power cut, and what was removed.
 pub fn disarm(paths: &Paths) -> io::Result<Vec<&'static str>> {
+    disarm_with(paths, |folder| fs::File::open(folder)?.sync_all())
+}
+
+/// [`disarm`], with the flush of the link's folder as `flush` (the tests make it fail).
+fn disarm_with(
+    paths: &Paths,
+    flush: impl Fn(&Path) -> io::Result<()>,
+) -> io::Result<Vec<&'static str>> {
     let mut removed = Vec::new();
+    let mut unflushed = None;
     match link_state(&paths.link) {
         UpdateLink::Nothing => {}
         _ if is_armed(paths) => {
             fs::remove_file(&paths.link)?;
             removed.push("/system-update");
+            unflushed = paths.link.parent().and_then(|folder| flush(folder).err());
+            rustix::fs::sync();
         }
         // Another tool's update: not Apsis's to touch (PLAN 6b.6 step 1).
         _ => return Ok(removed),
     }
     removed.extend(remove_arm_files(paths)?);
     removed.extend(remove_plan_files(paths)?);
-    Ok(removed)
+    match unflushed {
+        None => Ok(removed),
+        Some(error) => Err(io::Error::other(format!(
+            "the removal of /system-update couldn't be flushed to disk ({error}), so a power \
+             cut now could bring the link back; removed: {}",
+            removed.join(", ")
+        ))),
+    }
 }
 
 /// Leftovers of an arm that was cut short, or of a disarm that was (PLAN 6b.5): without
@@ -195,9 +219,10 @@ pub fn clean_at_start(paths: &Paths) -> io::Result<Vec<&'static str>> {
     Ok(removed)
 }
 
-/// The unit, its wants link, the drop-in, the helper copy and `state.json`. The apply calls
-/// it once Apsis's link is gone, or when the link was never Apsis's. Not the plan, its
-/// filter or its note: [`clean_leftovers`] calls this right before an arm.
+/// The unit, its wants link, the drop-in, the helper copy and `state.json`, and the wants
+/// folder and the drop-in's folder once they're empty. The apply calls it once Apsis's link
+/// is gone, or when the link was never Apsis's. Not the plan, its filter or its note:
+/// [`clean_leftovers`] calls this right before an arm.
 pub fn remove_arm_files(paths: &Paths) -> io::Result<Vec<&'static str>> {
     let mut removed = Vec::new();
     for (path, name) in [
@@ -212,8 +237,13 @@ pub fn remove_arm_files(paths: &Paths) -> io::Result<Vec<&'static str>> {
         }
     }
     // The drop-in's folder is Apsis's too: Pop's unit ships none (check 1, 2026-10-02). It
-    // stays if another drop-in is in it.
-    if let Some(folder) = paths.drop_in.parent() {
+    // stays if another drop-in is in it. The wants folder the same: the arm made it if it
+    // wasn't there, and each restore left it behind empty (N3, check 8). It stays if another
+    // unit's link is in it.
+    for folder in [paths.drop_in.parent(), paths.wants_link.parent()]
+        .into_iter()
+        .flatten()
+    {
         match fs::remove_dir(folder) {
             Ok(()) => {}
             Err(error)
@@ -575,6 +605,8 @@ mod tests {
             &paths.state_dir.join("request.json"),
             // The drop-in's folder too: Pop's unit has none of its own (check 1, 2026-10-02).
             paths.drop_in.parent().unwrap(),
+            // And the wants folder, empty once Apsis's link is out of it (N3, check 8).
+            paths.wants_link.parent().unwrap(),
         ] {
             assert!(fs::symlink_metadata(path).is_err(), "{}", path.display());
         }
@@ -588,6 +620,93 @@ mod tests {
         assert_eq!(link_state(&paths.link), UpdateLink::Dangling);
         assert!(paths.unit.exists());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// N3 (check 8): each restore left an empty `system-update.target.wants/`. It goes with
+    /// Apsis's link when nothing else is in it, and stays, with what's in it, when another
+    /// unit's link is there.
+    #[test]
+    fn the_wants_folder_goes_when_empty_and_stays_with_another_units_link() {
+        let (root, paths, exe) = lab();
+        let wants = paths.wants_link.parent().unwrap().to_owned();
+        arm(&paths, &exe).unwrap();
+        fs::remove_file(&paths.link).unwrap();
+        remove_arm_files(&paths).unwrap();
+        assert!(fs::symlink_metadata(&wants).is_err(), "the empty folder");
+        // Its parent is systemd's, and stays.
+        assert!(wants.parent().unwrap().is_dir());
+        // Another unit's link in it: the folder and that link stay, Apsis's link goes.
+        let (root2, paths2, exe2) = lab();
+        let wants2 = paths2.wants_link.parent().unwrap().to_owned();
+        arm(&paths2, &exe2).unwrap();
+        symlink(
+            "../other-update.service",
+            wants2.join("other-update.service"),
+        )
+        .unwrap();
+        fs::remove_file(&paths2.link).unwrap();
+        remove_arm_files(&paths2).unwrap();
+        assert!(fs::symlink_metadata(&paths2.wants_link).is_err());
+        assert_eq!(
+            fs::read_link(wants2.join("other-update.service")).unwrap(),
+            std::path::Path::new("../other-update.service")
+        );
+        // Nothing there at all: no error.
+        assert_eq!(remove_arm_files(&paths).unwrap(), Vec::<&str>::new());
+        fs::remove_dir_all(&root).unwrap();
+        fs::remove_dir_all(&root2).unwrap();
+    }
+
+    /// The link's removal is flushed to disk (PLAN 6b.5): a power cut seconds after a
+    /// disarm must not bring the link back. If the flush fails, the rest is still removed
+    /// and the error says what may not last and what was removed.
+    #[test]
+    fn a_disarm_that_cant_flush_still_removes_everything_and_says_so() {
+        let (root, paths, exe) = lab();
+        arm(&paths, &exe).unwrap();
+        let flushed = std::cell::RefCell::new(Vec::new());
+        let error = disarm_with(&paths, |folder| {
+            flushed.borrow_mut().push(folder.to_owned());
+            Err(io::Error::other("Input/output error"))
+        })
+        .unwrap_err()
+        .to_string();
+        // The folder the link was in, once, after the link was removed.
+        assert_eq!(*flushed.borrow(), [root.as_path()]);
+        assert!(
+            error.contains("/system-update") && error.contains("Input/output error"),
+            "{error}"
+        );
+        assert!(error.contains("request.json"), "what was removed: {error}");
+        for path in [
+            &paths.link,
+            &paths.unit,
+            &paths.wants_link,
+            &paths.drop_in,
+            &paths.helper_copy,
+            &paths.state_dir.join("state.json"),
+            &paths.state_dir.join("request.json"),
+            &paths.state_dir.join("restore.filter"),
+            &paths.state_dir.join("restore.note"),
+        ] {
+            assert!(fs::symlink_metadata(path).is_err(), "{}", path.display());
+        }
+        // Nothing armed and no link of another tool's: nothing is flushed.
+        let none = std::cell::Cell::new(0);
+        let count = |_: &std::path::Path| {
+            none.set(none.get() + 1);
+            Ok(())
+        };
+        assert_eq!(disarm_with(&paths, count).unwrap(), Vec::<&str>::new());
+        symlink("/var/lib/other-tool", &paths.link).unwrap();
+        assert_eq!(disarm_with(&paths, count).unwrap(), Vec::<&str>::new());
+        assert_eq!(none.get(), 0);
+        // The real flush works on a real folder: the disarm of an arm is `Ok`.
+        let (root2, paths2, exe2) = lab();
+        arm(&paths2, &exe2).unwrap();
+        assert_eq!(disarm(&paths2).unwrap().first(), Some(&"/system-update"));
+        fs::remove_dir_all(&root).unwrap();
+        fs::remove_dir_all(&root2).unwrap();
     }
 
     #[test]
