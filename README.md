@@ -180,6 +180,10 @@ A restore asks every time.
 - Home folders restored "too" go back to the snapshot entirely: files created or changed
   since are deleted or put back to their old version. The safety snapshot includes your home
   folders in that case, so they're on the backup disk.
+- **A snapshot whose delete was cut off by Apsis 0.4.x or Timeshift can look whole** when
+  the cut came before its `info.json` and `exclude.list` went. Restoring it would remove
+  from the system what it lacks; the safety snapshot is the way back. Delete such a
+  snapshot instead of restoring it.
 
 ### If a restore goes wrong
 
