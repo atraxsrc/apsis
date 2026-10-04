@@ -1077,7 +1077,11 @@ fn describe_list(list: &SnapshotList) -> String {
     text
 }
 
-/// One journal line for an error: `refused: ...` when nothing ran, else `failed: ...`.
+/// One journal line for an error: `refused: ...` when nothing ran, else `failed: ...`. A
+/// restore the helper refused is `refused:` too (check 4, 2026-10-03). While preparing, a
+/// refusal comes before anything is written but the working files in the state folder: the
+/// safety snapshot isn't made yet. At "Restart now" it comes after the preparation (the
+/// safety snapshot exists and stays) and before anything is armed.
 fn describe_error(error: &Error) -> String {
     match error {
         Error::NotAuthorized
@@ -1089,7 +1093,8 @@ fn describe_error(error: &Error) -> String {
         | Error::InvalidInput(_)
         | Error::NoSuchSnapshot(_)
         | Error::NoSnapshotDevice
-        | Error::ConfigChanged => format!("refused: {error}"),
+        | Error::ConfigChanged
+        | Error::RestoreRefused(_) => format!("refused: {error}"),
         Error::Stopped => "stopped".to_owned(),
         other => format!("failed: {other}"),
     }
@@ -1406,6 +1411,17 @@ mod tests {
             format!("refused: {}", Error::Busy)
         );
         assert_eq!(describe_error(&Error::Stopped), "stopped");
+        // A refused restore is a refusal in the journal, not a failure (check 4).
+        assert_eq!(
+            describe_error(&Error::RestoreRefused(
+                "system-space:10106179719:209661952".to_owned()
+            )),
+            "refused: can't restore this snapshot: system-space:10106179719:209661952"
+        );
+        assert_eq!(
+            describe_error(&Error::RestoreRefused("pop-upgrade-pending".to_owned())),
+            "refused: can't restore this snapshot: pop-upgrade-pending"
+        );
 
         let mut list = SnapshotList::default();
         assert_eq!(describe_list(&list), "ok, 0 snapshots");
