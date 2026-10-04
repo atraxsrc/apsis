@@ -138,11 +138,23 @@ The whole flow is PLAN.md's Phase 6b; the window's part:
 - While a plan is ready, here or in another window, Create, Restore and Delete are off; the
   other window's line says `Restore ready in another window`. Its end refreshes the list.
 - **After login** the window asks `RestoreResult` and shows the last restore on the status
-  line, with the full text in a tooltip: `System restored to {date}`; `System restored ·`
-  **`still boots the previous kernel`** `· see README` (warning); `Restore` **`incomplete`**
-  `· system partly restored · {what to do}` (destructive) with **Restore again**, which opens
-  the normal dialog for the same snapshot; `The restore didn't start · nothing was changed ·
-  {what to do}`. No notification, and the panel icon and tooltip don't change.
+  line, with the full text in a tooltip: `System restored to {date}`; `Restore finished ·`
+  **`some files were not restored`** or **`a cleanup step failed`** `· point here for
+  details` (warning; `problems`); `System restored ·` **`still boots the previous kernel`**
+  `· see README` (warning; `boot-kept`); `Restore finished ·` **`the computer may not start
+  next time`** `· read the README before restarting` (destructive; `boot-broken`); `Restore`
+  **`incomplete`** `· system partly restored · {what to do}` (destructive) with **Restore
+  again**, which opens the normal dialog for the same snapshot; `The restore didn't start ·
+  nothing was changed · {what to do}`. The tooltips: after `done`, the snapshot, what
+  happened to the home folders and the safety snapshot; after `problems`, the same and the
+  helper's own words (which name the log when files weren't restored); after `boot-kept`,
+  that the boot files couldn't be refreshed, so the computer keeps the ones it had and runs
+  the kernel from before the restore, and that the next kernel update should set this right;
+  after `boot-broken`, that the computer may not start the next time it restarts and that
+  "If a restore goes wrong" should be read first, with the helper's words; after a failure,
+  the reason and, only if one was taken, the safety snapshot to restore; after a restore
+  that didn't start, the helper's words. No notification, and the panel icon and tooltip
+  don't change.
 - The boot screen (plymouth) is the helper's: "Restoring the system. Don't turn off the
   computer." and a progress bar.
 

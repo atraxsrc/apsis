@@ -20,7 +20,7 @@ use cosmic::widget::{self, icon, settings};
 use cosmic::{Theme, theme};
 
 use super::{
-    AppModel, CliError, Dialog, Listing, Message, Page, RowItem, SettingsLoad, Status,
+    AppModel, CliError, Dialog, Listing, Message, Page, RowItem, SettingsLoad, Status, Tone,
     error_summary,
 };
 use crate::settings_view::{MAX_REMIND_DAYS, Row, Section, SettingsView};
@@ -851,31 +851,22 @@ impl AppModel {
             .into()
     }
 
-    /// The last restore's result (PLAN 6b.8, "After login"): plain for done, the role on the
-    /// phrase only for boot-kept and failed, the full text in a tooltip, and Restore again
-    /// after a failure.
+    /// The last restore's result (PLAN 6b.8, "After login"): plain for done and not-started,
+    /// else the colour on the phrase only (`result_phrase`), the full text in a tooltip, and
+    /// Restore again after a failure.
     fn restore_result_line(&self) -> Option<Element<'_, Message>> {
-        use apsis_core::restore::state::{Outcome, ResultState};
         let (text, tooltip) = self.result_text()?;
-        let ResultState::Ended(outcome) = self.restore_result.as_ref()?.state else {
-            return None;
-        };
-        let line: Element<'_, Message> = match outcome {
-            Outcome::BootKept | Outcome::BootBroken => phrase_line(
-                fl!("result-boot-kept-before"),
-                fl!("result-boot-kept-phrase"),
-                warning_text,
-                fl!("result-boot-kept-after"),
+        let line: Element<'_, Message> = match self.result_phrase() {
+            Some(parts) => phrase_line(
+                parts.before,
+                parts.phrase,
+                match parts.tone {
+                    Tone::Warning => warning_text,
+                    Tone::Error => error_text,
+                },
+                parts.after,
             ),
-            Outcome::Failed => {
-                let phrase = fl!("result-failed-phrase");
-                let after = text
-                    .split_once(phrase.as_str())
-                    .map(|(_, after)| after.trim().to_owned())
-                    .unwrap_or_default();
-                phrase_line(fl!("result-failed-before"), phrase, error_text, after)
-            }
-            _ => body(text).width(Length::Fill).into(),
+            None => body(text).width(Length::Fill).into(),
         };
         let line: Element<'_, Message> =
             widget::tooltip(line, body(tooltip), widget::tooltip::Position::Top).into();

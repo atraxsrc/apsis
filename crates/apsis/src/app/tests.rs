@@ -2002,53 +2002,213 @@ mod restore {
         );
     }
 
+    /// A window that read this result when it opened.
+    fn with_result(outcome: Outcome, message: &str, home: Home, safety: Option<&str>) -> AppModel {
+        let mut app = window();
+        send(
+            &mut app,
+            Message::RestoreResultRead(Ok(RestoreResult {
+                state: apsis_core::restore::state::ResultState::Ended(outcome),
+                snapshot: Some(NEWEST.to_owned()),
+                message: message.to_owned(),
+                when: Some(1_790_000_000),
+                home: Some(home),
+                safety_snapshot: safety.map(str::to_owned),
+            })),
+        );
+        app
+    }
+
+    /// The line and the tooltip of that result.
+    fn shown(
+        outcome: Outcome,
+        message: &str,
+        home: Home,
+        safety: Option<&str>,
+    ) -> (String, String) {
+        with_result(outcome, message, home, safety)
+            .result_text()
+            .expect("a result line")
+    }
+
+    /// The colour of that result's phrase, if its line has one.
+    fn tone(outcome: Outcome, message: &str) -> Option<Tone> {
+        with_result(outcome, message, Home::Keep, None)
+            .result_phrase()
+            .map(|phrase| phrase.tone)
+    }
+
     /// The result's tooltip says what happened to home and names the safety snapshot, from
     /// `result.json` through `RestoreResult` (fix 6, 2026-10-04): the four combinations.
     #[test]
     fn the_result_tooltip_has_home_and_the_safety_snapshot_from_the_result() {
-        for outcome in [Outcome::Done, Outcome::Problems] {
-            for (home, safety, tooltip) in [
-                (
-                    Home::Keep,
-                    Some(SECOND),
-                    "Restored from snapshot 2026-09-25_11-28-53. Home folders were kept. \
-                     Safety snapshot: 2026-09-23_08-33-55.",
-                ),
-                (
-                    Home::Keep,
-                    None,
-                    "Restored from snapshot 2026-09-25_11-28-53. Home folders were kept. \
-                     Safety snapshot: none.",
-                ),
-                (
-                    Home::Restore,
-                    Some(SECOND),
-                    "Restored from snapshot 2026-09-25_11-28-53. Home folders were restored \
-                     too. Safety snapshot: 2026-09-23_08-33-55.",
-                ),
-                (
-                    Home::Restore,
-                    None,
-                    "Restored from snapshot 2026-09-25_11-28-53. Home folders were restored \
-                     too. Safety snapshot: none.",
-                ),
-            ] {
-                let mut app = window();
-                send(
-                    &mut app,
-                    Message::RestoreResultRead(Ok(RestoreResult {
-                        state: apsis_core::restore::state::ResultState::Ended(outcome),
-                        snapshot: Some(NEWEST.to_owned()),
-                        message: String::new(),
-                        when: Some(1_790_000_000),
-                        home: Some(home),
-                        safety_snapshot: safety.map(str::to_owned),
-                    })),
-                );
-                let (_, shown) = app.result_text().expect("a result line");
-                assert_eq!(shown, tooltip, "{outcome:?}");
-            }
+        for (home, safety, tooltip) in [
+            (
+                Home::Keep,
+                Some(SECOND),
+                "Restored from snapshot 2026-09-25_11-28-53. Home folders were kept. Safety \
+                 snapshot: 2026-09-23_08-33-55.",
+            ),
+            (
+                Home::Keep,
+                None,
+                "Restored from snapshot 2026-09-25_11-28-53. Home folders were kept. Safety \
+                 snapshot: none.",
+            ),
+            (
+                Home::Restore,
+                Some(SECOND),
+                "Restored from snapshot 2026-09-25_11-28-53. Home folders were restored too. \
+                 Safety snapshot: 2026-09-23_08-33-55.",
+            ),
+            (
+                Home::Restore,
+                None,
+                "Restored from snapshot 2026-09-25_11-28-53. Home folders were restored too. \
+                 Safety snapshot: none.",
+            ),
+        ] {
+            let (line, shown) = shown(Outcome::Done, "", home, safety);
+            assert_eq!(line, "System restored to 2026-09-25 11:28");
+            assert_eq!(shown, tooltip);
         }
+        assert_eq!(tone(Outcome::Done, ""), None);
+    }
+
+    /// Fix 5 (check 6): `problems` isn't shown as `done`. Its line says that some files
+    /// weren't restored when the helper names the log, and that a cleanup step failed for
+    /// anything else; the tooltip has the helper's own words, which name the log.
+    #[test]
+    fn problems_has_a_line_and_a_tooltip_of_its_own() {
+        const FILES: &str =
+            "some files couldn't be written or deleted; see /var/lib/apsis/restore/rsync-log";
+        const KERNEL: &str =
+            "the kernel from before the restore couldn't be removed (Read-only file system)";
+        let (line, tooltip) = shown(Outcome::Problems, FILES, Home::Keep, Some(SECOND));
+        assert_eq!(
+            line,
+            "Restore finished · some files were not restored · point here for details"
+        );
+        assert_eq!(
+            tooltip,
+            "Restored from snapshot 2026-09-25_11-28-53. Home folders were kept. Safety \
+             snapshot: 2026-09-23_08-33-55. What went wrong: some files couldn't be written or \
+             deleted; see /var/lib/apsis/restore/rsync-log"
+        );
+        let (line, tooltip) = shown(Outcome::Problems, KERNEL, Home::Restore, None);
+        assert_eq!(
+            line,
+            "Restore finished · a cleanup step failed · point here for details"
+        );
+        assert_eq!(
+            tooltip,
+            "Restored from snapshot 2026-09-25_11-28-53. Home folders were restored too. Safety \
+             snapshot: none. What went wrong: the kernel from before the restore couldn't be \
+             removed (Read-only file system)"
+        );
+        // Both at once: the files come first.
+        let (line, _) = shown(
+            Outcome::Problems,
+            &format!("{FILES}; {KERNEL}"),
+            Home::Keep,
+            None,
+        );
+        assert!(line.contains("some files were not restored"), "{line}");
+        assert_eq!(tone(Outcome::Problems, FILES), Some(Tone::Warning));
+        assert_eq!(tone(Outcome::Problems, KERNEL), Some(Tone::Warning));
+    }
+
+    /// `boot-broken` isn't shown as `boot-kept` (triage, 2026-10-03): nothing was put back,
+    /// so the line says the computer may not start next time, in the error colour, and both
+    /// the line and the tooltip send the reader to the README before a restart.
+    #[test]
+    fn boot_broken_has_a_line_and_a_tooltip_of_its_own() {
+        const WHY: &str = "the boot refresh failed (kernelstub exited 1); the boot files from \
+                           before couldn't be put back (initrd.img doesn't match)";
+        let (line, tooltip) = shown(Outcome::BootBroken, WHY, Home::Keep, Some(SECOND));
+        assert_eq!(
+            line,
+            "Restore finished · the computer may not start next time · read the README before \
+             restarting"
+        );
+        assert_eq!(
+            tooltip,
+            "Restored to 2026-09-25 11:28, but the boot files are not in order and the \
+             computer may not start the next time you restart. Before you restart, read \"If \
+             a restore goes wrong\" in Apsis's README. What went wrong: the boot refresh \
+             failed (kernelstub exited 1); the boot files from before couldn't be put back \
+             (initrd.img doesn't match)"
+        );
+        assert!(!line.contains("previous kernel"), "{line}");
+        assert!(!tooltip.contains("kernel update"), "{tooltip}");
+        assert_eq!(tone(Outcome::BootBroken, WHY), Some(Tone::Error));
+    }
+
+    /// The `boot-kept` tooltip (check 7): one wording for a refresh that failed, a check
+    /// that failed and boot files that were never touched. It doesn't say "didn't check
+    /// out" or "put back".
+    #[test]
+    fn the_boot_kept_tooltip_covers_every_way_the_boot_files_were_kept() {
+        for why in [
+            "the boot refresh failed (kernelstub exited 1); the boot files from before were \
+             put back",
+            "the new boot files didn't check out (vmlinuz.efi isn't the kernel /boot/vmlinuz \
+             links to); the boot files from before were put back",
+            "the boot files couldn't be backed up (No space left on device), so they were \
+             left as they are",
+        ] {
+            let (line, tooltip) = shown(Outcome::BootKept, why, Home::Keep, Some(SECOND));
+            assert_eq!(
+                line,
+                "System restored · still boots the previous kernel · see README"
+            );
+            assert_eq!(
+                tooltip,
+                "Restored to 2026-09-25 11:28. The boot files couldn't be refreshed, so the \
+                 computer keeps the ones it had and runs the kernel from before the restore. \
+                 The next kernel update should set this right. See \"If a restore goes \
+                 wrong\" in Apsis's README."
+            );
+            assert_eq!(tone(Outcome::BootKept, why), Some(Tone::Warning));
+        }
+    }
+
+    /// The `failed` tooltip offers the safety snapshot only if one was taken (the window
+    /// knows since fix 6).
+    #[test]
+    fn the_failed_tooltip_offers_the_safety_snapshot_only_if_there_is_one() {
+        const WHY: &str = "the backup disk was disconnected";
+        let (line, tooltip) = shown(Outcome::Failed, WHY, Home::Keep, Some(SECOND));
+        assert_eq!(
+            line,
+            "Restore incomplete · system partly restored · reconnect the backup disk"
+        );
+        assert_eq!(
+            tooltip,
+            "Stopped after 3 tries: the backup disk was disconnected. Reconnect the backup \
+             disk and click Restore again, or restore the safety snapshot."
+        );
+        let (same_line, tooltip) = shown(Outcome::Failed, WHY, Home::Keep, None);
+        assert_eq!(same_line, line);
+        assert_eq!(
+            tooltip,
+            "Stopped after 3 tries: the backup disk was disconnected. Reconnect the backup \
+             disk and click Restore again. No safety snapshot was taken."
+        );
+        assert_eq!(tone(Outcome::Failed, WHY), Some(Tone::Error));
+    }
+
+    /// `not-started` keeps its line and the helper's words as its tooltip.
+    #[test]
+    fn not_started_keeps_its_line_and_the_helpers_words() {
+        const WHY: &str = "there isn't enough free space on the system disk";
+        let (line, tooltip) = shown(Outcome::NotStarted, WHY, Home::Keep, Some(SECOND));
+        assert_eq!(
+            line,
+            "The restore didn't start · nothing was changed · free space on the system disk"
+        );
+        assert_eq!(tooltip, WHY);
+        assert_eq!(tone(Outcome::NotStarted, WHY), None);
     }
 
     /// Every restore state the window can show, by name (PLAN 6b.8's preview states).
@@ -2061,19 +2221,7 @@ mod restore {
             app
         };
         let result = |state: Outcome, message: &str| {
-            let mut app = window();
-            send(
-                &mut app,
-                Message::RestoreResultRead(Ok(RestoreResult {
-                    state: apsis_core::restore::state::ResultState::Ended(state),
-                    snapshot: Some(NEWEST.to_owned()),
-                    message: message.to_owned(),
-                    when: Some(1_790_000_000),
-                    home: Some(Home::Restore),
-                    safety_snapshot: Some(SECOND.to_owned()),
-                })),
-            );
-            app
+            with_result(state, message, Home::Restore, Some(SECOND))
         };
         let mut home_no_safety = with_dialog();
         send(&mut home_no_safety, Message::RestoreHome(1));
@@ -2171,10 +2319,43 @@ mod restore {
             ("stop-restore", stop),
             ("ready", ready()),
             ("result-done", result(Outcome::Done, "")),
+            (
+                "result-problems",
+                result(
+                    Outcome::Problems,
+                    "some files couldn't be written or deleted; see \
+                     /var/lib/apsis/restore/rsync-log",
+                ),
+            ),
+            (
+                "result-problems-other",
+                result(
+                    Outcome::Problems,
+                    "the kernel from before the restore couldn't be removed (Read-only file \
+                     system)",
+                ),
+            ),
             ("result-boot-kept", result(Outcome::BootKept, "")),
+            (
+                "result-boot-broken",
+                result(
+                    Outcome::BootBroken,
+                    "the boot refresh failed (kernelstub exited 1); the boot files from \
+                     before couldn't be put back (initrd.img doesn't match)",
+                ),
+            ),
             (
                 "result-failed",
                 result(Outcome::Failed, "the backup disk was disconnected"),
+            ),
+            (
+                "result-failed-no-safety",
+                with_result(
+                    Outcome::Failed,
+                    "the backup disk was disconnected",
+                    Home::Keep,
+                    None,
+                ),
             ),
             (
                 "result-not-started",

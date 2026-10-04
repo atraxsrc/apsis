@@ -57,8 +57,8 @@ USB and rebuilds the boot files for the bootloader it finds. Apsis restores at t
 replaced; it keeps the live `fstab` and `crypttab` and the boot partition's layout, refreshes
 the boot files with kernelstub exactly as Pop!_OS's own kernel hooks do, uses the snapshot's
 initrds as they are, keeps the kernel the computer started with until the new boot files have
-been checked, and puts the old boot files back if they don't check out. It never restores onto
-another installation, and it refuses rather than guesses.
+been checked, and keeps the old boot files if the refresh or the check fails. It never restores
+onto another installation, and it refuses rather than guesses.
 
 ## Requirements
 
@@ -165,9 +165,9 @@ A restore asks every time.
   refused.
 - **The boot files are refreshed with kernelstub only**, as Pop!_OS's own kernel hooks do,
   told which kernel the snapshot boots; the snapshot's initrds are used as they are, not
-  rebuilt. If the new boot files don't check
-  out, the ones from before are put back and the computer keeps the kernel it started with
-  ("still boots the previous kernel"); the next kernel update sets that right.
+  rebuilt. If the refresh fails, or the new boot files fail the check, the computer keeps
+  the boot files and the kernel it started with
+  ("still boots the previous kernel"); the next kernel update should set that right.
 - `/root` is restored with the system if the snapshot has it (with content); otherwise it's
   left as it is.
 - Home folders restored "too" go back to the snapshot entirely: files created or changed
@@ -263,7 +263,7 @@ in the snapshot too.
 | Can't restore this snapshot | the dialog says why and what to do; see "Known limitations of restore" |
 | The preparation is too old / is gone | the "Ready to restore" prompt waited more than 30 minutes, or the helper was restarted; start the restore again |
 | Restore incomplete · system partly restored | the copy broke; reconnect the backup disk and **Restore again**, or restore the safety snapshot; see "If a restore goes wrong" |
-| System restored · still boots the previous kernel | the new boot files didn't check out and the old ones were put back; the next kernel update sets it right |
+| System restored · still boots the previous kernel | the boot files couldn't be refreshed, or failed the check, and the old ones were kept; the next kernel update should set it right |
 | the computer keeps restarting into the restore | boot the recovery and `rm /mnt/system-update` as in "If a restore goes wrong" |
 | anything else | the helper's log: `journalctl -u apsis-helper -e` |
 

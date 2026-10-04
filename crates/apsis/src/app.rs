@@ -618,6 +618,25 @@ fn refusal_lines(refusal: &Refusal) -> (String, String) {
     }
 }
 
+/// The colour of a result line's phrase: the theme's warning or destructive text colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tone {
+    /// The system runs, and something needs attention.
+    Warning,
+    /// The restore is incomplete, or the computer may not start.
+    Error,
+}
+
+/// A result line in three parts (PLAN 6b.8): `phrase` carries the colour, `before` and
+/// `after` are plain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResultPhrase {
+    before: String,
+    phrase: String,
+    after: String,
+    tone: Tone,
+}
+
 /// `2026-09-25 11:28` for a snapshot name, or the name itself.
 fn date_of(name: &str) -> String {
     apsis_core::parse_snapshot_name(name)
@@ -1628,6 +1647,70 @@ impl AppModel {
             .is_some_and(|name| self.snapshots().iter().any(|s| s.name == name))
     }
 
+    /// What to do after a restore that stopped, from the helper's message.
+    fn result_what(message: &str) -> String {
+        if message.contains("backup disk") {
+            fl!("result-what-disk")
+        } else if message.contains("space") {
+            fl!("result-what-space")
+        } else {
+            fl!("result-what-readme")
+        }
+    }
+
+    /// The last restore's line as a coloured phrase between two plain parts; `None` for no
+    /// result and for `done` and `not-started`, whose line is one plain text.
+    fn result_phrase(&self) -> Option<ResultPhrase> {
+        let result = self.restore_result.as_ref()?;
+        let ResultState::Ended(outcome) = result.state else {
+            return None;
+        };
+        let (before, phrase, after, tone) = match outcome {
+            Outcome::Done | Outcome::NotStarted => return None,
+            // The helper names the log when rsync couldn't write or delete files; any other
+            // problem is a cleanup after a restore that worked (the old kernel's removal).
+            Outcome::Problems if result.message.contains("rsync-log") => (
+                fl!("result-problems-before"),
+                fl!("result-problems-phrase"),
+                fl!("result-problems-after"),
+                Tone::Warning,
+            ),
+            Outcome::Problems => (
+                fl!("result-problems-before"),
+                fl!("result-problems-other-phrase"),
+                fl!("result-problems-other-after"),
+                Tone::Warning,
+            ),
+            Outcome::BootKept => (
+                fl!("result-boot-kept-before"),
+                fl!("result-boot-kept-phrase"),
+                fl!("result-boot-kept-after"),
+                Tone::Warning,
+            ),
+            Outcome::BootBroken => (
+                fl!("result-boot-broken-before"),
+                fl!("result-boot-broken-phrase"),
+                fl!("result-boot-broken-after"),
+                Tone::Error,
+            ),
+            Outcome::Failed => (
+                fl!("result-failed-before"),
+                fl!("result-failed-phrase"),
+                fl!(
+                    "result-failed-after",
+                    what = Self::result_what(&result.message)
+                ),
+                Tone::Error,
+            ),
+        };
+        Some(ResultPhrase {
+            before,
+            phrase,
+            after,
+            tone,
+        })
+    }
+
     /// The last restore's line for the status area (PLAN 6b.8, "After login") and its tooltip.
     fn result_text(&self) -> Option<(String, String)> {
         let result = self.restore_result.as_ref()?;
@@ -1635,13 +1718,6 @@ impl AppModel {
             return None;
         };
         let date = result.snapshot.as_deref().map(date_of).unwrap_or_default();
-        let what = if result.message.contains("backup disk") {
-            fl!("result-what-disk")
-        } else if result.message.contains("space") {
-            fl!("result-what-space")
-        } else {
-            fl!("result-what-readme")
-        };
         let name = result.snapshot.clone().unwrap_or_default();
         // From `result.json` (fix 6, 2026-10-04). A result always says what happened to
         // home (`RestoreResult::from_wire`); without it the tooltip says nothing of home.
@@ -1654,34 +1730,37 @@ impl AppModel {
             .safety_snapshot
             .clone()
             .unwrap_or_else(|| fl!("result-safety-none"));
-        Some(match outcome {
-            Outcome::Done | Outcome::Problems => (
-                fl!("result-done", date = date.as_str()),
-                fl!("result-done-tip", name = name, home = home, safety = safety),
+        let reason = result.message.as_str();
+        let line = match self.result_phrase() {
+            Some(parts) => format!("{} {} {}", parts.before, parts.phrase, parts.after),
+            None if outcome == Outcome::Done => fl!("result-done", date = date.as_str()),
+            None => fl!(
+                "result-not-started",
+                what = Self::result_what(&result.message)
             ),
-            Outcome::BootKept | Outcome::BootBroken => (
-                format!(
-                    "{} {} {}",
-                    fl!("result-boot-kept-before"),
-                    fl!("result-boot-kept-phrase"),
-                    fl!("result-boot-kept-after")
-                ),
-                fl!("result-boot-kept-tip", date = date.as_str()),
+        };
+        let tooltip = match outcome {
+            Outcome::Done => fl!("result-done-tip", name = name, home = home, safety = safety),
+            Outcome::Problems => fl!(
+                "result-problems-tip",
+                name = name,
+                home = home,
+                safety = safety,
+                reason = reason
             ),
-            Outcome::Failed => (
-                format!(
-                    "{} {} {}",
-                    fl!("result-failed-before"),
-                    fl!("result-failed-phrase"),
-                    fl!("result-failed-after", what = what)
-                ),
-                fl!("result-failed-tip", reason = result.message.as_str()),
+            Outcome::BootKept => fl!("result-boot-kept-tip", date = date.as_str()),
+            Outcome::BootBroken => fl!(
+                "result-boot-broken-tip",
+                date = date.as_str(),
+                reason = reason
             ),
-            Outcome::NotStarted => (
-                fl!("result-not-started", what = what),
-                result.message.clone(),
-            ),
-        })
+            Outcome::Failed if result.safety_snapshot.is_some() => {
+                fl!("result-failed-tip", reason = reason)
+            }
+            Outcome::Failed => fl!("result-failed-tip-no-safety", reason = reason),
+            Outcome::NotStarted => result.message.clone(),
+        };
+        Some((line, tooltip))
     }
 
     /// `Preparing restore · …` and how far (PLAN 6b.8): this window's preparation, its ready

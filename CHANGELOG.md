@@ -21,9 +21,10 @@ with systemd-boot only.
 - The restore itself runs at the next start with the desktop stopped (systemd's
   offline-update mode, with plymouth), keeps the live `fstab` and `crypttab`, the boot and
   recovery partitions, other mounts and the kernel the computer started with, refreshes the
-  boot files with kernelstub as Pop!_OS's own hooks do, checks them byte for byte, and puts
-  the old ones back if they don't check out. A copy that breaks is tried again at the next
-  start, three times at most. After login, the window's status line says how it went.
+  boot files with kernelstub as Pop!_OS's own hooks do, checks them byte for byte, and
+  keeps the old ones if the refresh or the check fails. A copy that breaks is tried again at
+  the next start, three times at most. After login, the window's status line says how it
+  went.
 - A recovery note with this machine's UUIDs on the backup disk
   (`timeshift/apsis-restore-RECOVER.txt`), and "If a restore goes wrong" in the README.
 - Each snapshot's row says in its tooltip when it was made in the older format (without
