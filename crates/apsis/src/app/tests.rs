@@ -1797,10 +1797,12 @@ mod restore {
         assert!(app.ready.is_none());
     }
 
-    /// A refused "Restart now" drops the plan (owner, 2026-10-02): the dialog says so.
+    /// A refused "Restart now" drops the plan (owner, 2026-10-02): the dialog says so, and
+    /// the status line stops saying `ready` (check 4, 2026-10-03).
     #[test]
     fn a_refused_restart_now_says_the_plan_was_dropped() {
         let mut app = ready();
+        assert_eq!(app.status, Some(Status::Info(fl!("preparing-ready"))));
         send(&mut app, Message::RestartNow);
         send(
             &mut app,
@@ -1820,8 +1822,13 @@ mod restore {
         let lines = app.dialog.as_ref().unwrap().refusal_lines();
         assert_eq!(lines.len(), 3, "{lines:?}");
         assert_eq!(lines[2], fl!("refused-dropped"));
+        // Under the dialog and after Close: the plan is over, and the line says so.
+        assert_eq!(app.status, Some(Status::Info(fl!("restore-stopped"))));
+        assert!(!app.restarting);
         send(&mut app, Message::DialogCancel);
         assert!(app.dialog.is_none());
+        assert_eq!(app.status, Some(Status::Info(fl!("restore-stopped"))));
+        assert!(app.ready.is_none() && app.running.is_none() && app.job.is_none());
     }
 
     #[test]

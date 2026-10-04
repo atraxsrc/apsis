@@ -132,9 +132,9 @@ The whole flow is PLAN.md's Phase 6b; the window's part:
 - At the prompt, **Esc**, **Cancel restore** and closing the window all cancel: the helper
   removes the plan (a finished safety snapshot stays), and the line says `Restore cancelled`.
   **Restart now** re-checks, arms the next boot and restarts: `Restarting…`. A refusal there
-  opens "Can't restore" with the dropped-plan line; a plan older than 30 minutes, or one the
-  helper no longer has, says `The preparation is too old…` / `…is gone. Start the restore
-  again.`
+  opens "Can't restore" with the dropped-plan line, and the status says `Restore stopped`; a
+  plan older than 30 minutes, or one the helper no longer has, says `The preparation is too
+  old…` / `…is gone. Start the restore again.`
 - While a plan is ready, here or in another window, Create, Restore and Delete are off; the
   other window's line says `Restore ready in another window`. Its end refreshes the list.
 - **After login** the window asks `RestoreResult` and shows the last restore on the status

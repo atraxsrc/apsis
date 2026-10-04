@@ -1553,13 +1553,15 @@ impl AppModel {
         self.status = Some(match result {
             Ok(()) => Status::Info(fl!("restarting")),
             Err(CliError::RestoreRefused(refusal)) => {
-                // The plan was dropped with the refusal (owner, 2026-10-02).
+                // The plan was dropped with the refusal (owner, 2026-10-02), and the helper
+                // ended its job `stopped`: the line under the dialog says that, not `ready`
+                // (check 4, 2026-10-03).
                 self.dialog = Some(Dialog::Refused {
                     snapshot,
                     refusal,
                     dropped: true,
                 });
-                return;
+                Status::Info(fl!("restore-stopped"))
             }
             Err(error) => {
                 let fallback = self.error_text(&error);
