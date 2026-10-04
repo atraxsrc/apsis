@@ -266,7 +266,17 @@ fn fill(lab: &Lab) {
         "etc/systemd/system/pop-upgrade-init.service.d/50-apsis.conf",
         "[Unit]\nConditionPathExists=!/system-update/apsis-helper\n",
     );
-    for name in ["request.json", "state.json", "result.json", "apsis-helper"] {
+    for name in [
+        "request.json",
+        "state.json",
+        "result.json",
+        "apsis-helper",
+        // The note beside the filter and the pair an arm keeps (PLAN 6b.5). The filter
+        // itself is written by each run (`Lab::restore`).
+        "restore.note",
+        "last-restore.filter",
+        "last-restore.note",
+    ] {
         write(l, &format!("var/lib/apsis/restore/{name}"), name);
     }
     write(
@@ -647,6 +657,9 @@ fn everything_on_the_protect_list_is_untouched() {
         "var/lib/apsis/restore/request.json",
         "var/lib/apsis/restore/state.json",
         "var/lib/apsis/restore/result.json",
+        "var/lib/apsis/restore/restore.note",
+        "var/lib/apsis/restore/last-restore.filter",
+        "var/lib/apsis/restore/last-restore.note",
         "var/lib/apsis/restore/esp-backup/manifest.json",
         "etc/apsis/config.toml",
     ] {
@@ -665,6 +678,16 @@ fn everything_on_the_protect_list_is_untouched() {
         read(&lab.live, "var/lib/apsis/restore/request.json"),
         "request.json"
     );
+    // The four files of the filter's lifetime (PLAN 6b.5) are under the same rule: the
+    // note and the kept pair are as they were, and the filter the run read is still there
+    // though the snapshot has none.
+    for name in ["restore.note", "last-restore.filter", "last-restore.note"] {
+        assert_eq!(
+            read(&lab.live, &format!("var/lib/apsis/restore/{name}")),
+            name
+        );
+    }
+    assert!(exists(&lab.live, "var/lib/apsis/restore/restore.filter"));
     assert_eq!(
         read(
             &lab.live,

@@ -14,7 +14,11 @@ use crate::error::{Error, Result};
 use crate::usage::mounts_under;
 
 /// The filter's file in the state folder, `--exclude-from=` of the restore and its dry run.
+/// A working file of the preparation: it goes with the plan (PLAN 6b.5).
 pub const FILE: &str = "restore.filter";
+
+/// The copy of [`FILE`] that an arm keeps: the filter of the last restore that was armed.
+pub const LAST_FILE: &str = "last-restore.filter";
 
 /// Group 1, always first: what runs the restore, its state, and the live Apsis config. None of
 /// these belongs to the Apsis package (a test checks them against the .deb's file list).

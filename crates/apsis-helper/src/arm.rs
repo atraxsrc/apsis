@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Arming the next boot and undoing it (PLAN 6b.5, 6b.6): the unit, its wants link, the
-//! drop-in, the helper copy and `state.json` first, `sync`, then `/system-update` last; a
-//! disarm removes the link first. Leftovers without the link arm nothing and are cleaned.
+//! Arming the next boot and undoing it (PLAN 6b.5, 6b.6): the plan's filter and note kept
+//! as `last-restore.*` and rsync's log cleared, then the unit, its wants link, the drop-in,
+//! the helper copy and `state.json`, `sync`, then `/system-update` last; a disarm removes
+//! the link first. Leftovers without the link arm nothing and are cleaned.
 //! The disarm timer: a transient systemd timer in the current boot that runs
 //! `apsis-helper --disarm` after ten minutes without a restart.
 
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use apsis_core::restore::refusal::UpdateLink;
 use apsis_core::restore::state::{STATE_FILE, State as RestoreState};
-use apsis_core::restore::{file, plan, unit};
+use apsis_core::restore::{argv, file, plan, unit};
 
 /// The transient disarm units: `apsis-disarm.timer` and `apsis-disarm.service`.
 pub const DISARM_UNIT: &str = "apsis-disarm";
@@ -78,16 +79,22 @@ pub fn is_armed(paths: &Paths) -> bool {
     fs::read_link(&paths.link).is_ok_and(|target| target == paths.state_dir)
 }
 
-/// Arms the next boot, in PLAN 6b.5's order: the unit, its wants link, the drop-in, the
-/// helper copy (`helper_exe`, the packaged helper, copied so a restored snapshot can't take
-/// it away mid-restore), a fresh `state.json`, then everything synced to disk, then the link
-/// last. Nothing before the link arms anything; a failure part-way leaves leftovers for
+/// Arms the next boot, in PLAN 6b.5's order: first the plan's filter and note are kept as
+/// `last-restore.filter` and `last-restore.note` ([`keep_last`]) and rsync's log of the
+/// restore before is cleared; then the unit, its wants link, the drop-in, the helper copy
+/// (`helper_exe`, the packaged helper, copied so a restored snapshot can't take it away
+/// mid-restore), a fresh `state.json`, then everything synced to disk, then the link last.
+/// Nothing before the link arms anything; a failure part-way leaves leftovers for
 /// [`clean_leftovers`].
 ///
 /// # Errors
 ///
-/// A file couldn't be written; the link isn't made then.
+/// The pair couldn't be kept (nothing of the arm is written then, and the pair and the log
+/// of the arm before are as they were), or a file couldn't be written; the link isn't made
+/// either way.
 pub fn arm(paths: &Paths, helper_exe: &Path) -> io::Result<()> {
+    keep_last(paths)?;
+    remove_if_there(&paths.state_dir.join(argv::LOG_FILE))?;
     write_file(&paths.unit, unit::unit_text())?;
     make_link(&paths.wants_link, &paths.unit)?;
     write_file(&paths.drop_in, unit::drop_in_text())?;
@@ -103,9 +110,39 @@ pub fn arm(paths: &Paths, helper_exe: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Copies the plan's working files to the pair of the last arm (PLAN 6b.5):
+/// `restore.filter` to `last-restore.filter` and `restore.note` to `last-restore.note`, with
+/// the state folder's writer. "Last restore" means "last arm": an arm that's disarmed has
+/// replaced the pair too.
+///
+/// # Errors
+///
+/// A working file is missing or a copy couldn't be written: both targets are as they were.
+fn keep_last(paths: &Paths) -> io::Result<()> {
+    file::copy_all(&paths.state_dir, &plan::KEPT).map_err(|error| {
+        io::Error::other(format!(
+            "the restore's filter and note couldn't be kept: {error}"
+        ))
+    })
+}
+
+/// Removes the plan and its working files (the filter and the note); what was there, by
+/// name. Never part of [`remove_arm_files`]: that runs right before an arm, on the plan
+/// that's about to be armed.
+fn remove_plan_files(paths: &Paths) -> io::Result<Vec<&'static str>> {
+    let mut removed = Vec::new();
+    for name in [plan::FILE].into_iter().chain(plan::WORKING_FILES) {
+        if remove_if_there(&paths.state_dir.join(name))? {
+            removed.push(name);
+        }
+    }
+    Ok(removed)
+}
+
 /// Undoes an arm: Apsis's link first (the commit point; another tool's link is left exactly
 /// where it is, and then so is everything else), then the unit, its wants link, the drop-in,
-/// the helper copy, `state.json` and the plan. What was removed, by name, for the journal.
+/// the helper copy, `state.json`, the plan and its working files. What was removed, by name,
+/// for the journal. The pair the arm kept and rsync's log stay.
 ///
 /// # Errors
 ///
@@ -123,9 +160,7 @@ pub fn disarm(paths: &Paths) -> io::Result<Vec<&'static str>> {
         _ => return Ok(removed),
     }
     removed.extend(remove_arm_files(paths)?);
-    if remove_if_there(&paths.state_dir.join(plan::FILE))? {
-        removed.push("request.json");
-    }
+    removed.extend(remove_plan_files(paths)?);
     Ok(removed)
 }
 
@@ -144,9 +179,9 @@ pub fn clean_leftovers(paths: &Paths) -> io::Result<Vec<&'static str>> {
 }
 
 /// The helper's start (PLAN 6b.5, 6b.9): with Apsis's link, an arm about to be applied, kept
-/// whole. Without it, the arm files are leftovers, and so is a plan (`request.json`): the
-/// helper that held it ready is gone, and a window still at its prompt gets "the preparation
-/// is gone" from `RestartToRestore`.
+/// whole. Without it, the arm files are leftovers, and so is a plan (`request.json`) with its
+/// filter and note: the helper that held it ready is gone, and a window still at its prompt
+/// gets "the preparation is gone" from `RestartToRestore`.
 ///
 /// # Errors
 ///
@@ -156,14 +191,13 @@ pub fn clean_at_start(paths: &Paths) -> io::Result<Vec<&'static str>> {
         return Ok(Vec::new());
     }
     let mut removed = remove_arm_files(paths)?;
-    if remove_if_there(&paths.state_dir.join(plan::FILE))? {
-        removed.push("request.json");
-    }
+    removed.extend(remove_plan_files(paths)?);
     Ok(removed)
 }
 
 /// The unit, its wants link, the drop-in, the helper copy and `state.json`. The apply calls
-/// it once Apsis's link is gone, or when the link was never Apsis's.
+/// it once Apsis's link is gone, or when the link was never Apsis's. Not the plan, its
+/// filter or its note: [`clean_leftovers`] calls this right before an arm.
 pub fn remove_arm_files(paths: &Paths) -> io::Result<Vec<&'static str>> {
     let mut removed = Vec::new();
     for (path, name) in [
@@ -287,12 +321,19 @@ mod tests {
         dir
     }
 
-    /// A root with the state folder, a plan in it, and a helper binary to copy.
+    /// The preparation's filter and note, as a lab has them.
+    const FILTER: &str = "P /system-update\n- /home/***\n+ /***\n";
+    const NOTE: &str = "Apsis restore: if the computer doesn't start afterwards\n\n1. ...\n";
+
+    /// A root with the state folder, a plan and its two working files in it, and a helper
+    /// binary to copy.
     fn lab() -> (PathBuf, Paths, PathBuf) {
         let root = temp("root");
         let paths = Paths::under(&root);
         fs::create_dir_all(&paths.state_dir).unwrap();
         fs::write(paths.state_dir.join("request.json"), "{}").unwrap();
+        fs::write(paths.state_dir.join("restore.filter"), FILTER).unwrap();
+        fs::write(paths.state_dir.join("restore.note"), NOTE).unwrap();
         let exe = root.join("usr/libexec/apsis-helper");
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         fs::write(&exe, "#!/bin/sh\n").unwrap();
@@ -367,6 +408,156 @@ mod tests {
         fs::remove_dir_all(&root2).unwrap();
     }
 
+    /// What's in the state folder, by name, sorted.
+    fn in_state(paths: &Paths) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(&paths.state_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn text(paths: &Paths, name: &str) -> String {
+        fs::read_to_string(paths.state_dir.join(name)).unwrap()
+    }
+
+    /// Pull 1 (PLAN 6b.5): the arm keeps the filter and the note of the plan it arms as
+    /// `last-restore.filter` and `last-restore.note`, byte for byte and for root only, in
+    /// place of an earlier arm's, and clears rsync's log. The working files stay: the apply
+    /// reads the filter.
+    #[test]
+    fn arming_keeps_the_filter_and_the_note_and_clears_the_log() {
+        let (root, paths, exe) = lab();
+        for (name, old) in [
+            ("last-restore.filter", "an earlier arm's filter\n"),
+            ("last-restore.note", "an earlier arm's note\n"),
+            ("rsync-log", "the last restore's log\n"),
+            ("result.json", "{}"),
+        ] {
+            fs::write(paths.state_dir.join(name), old).unwrap();
+        }
+        arm(&paths, &exe).unwrap();
+        assert!(is_armed(&paths));
+        assert_eq!(text(&paths, "last-restore.filter"), FILTER);
+        assert_eq!(text(&paths, "last-restore.note"), NOTE);
+        assert_eq!(text(&paths, "restore.filter"), FILTER);
+        assert_eq!(text(&paths, "restore.note"), NOTE);
+        use std::os::unix::fs::PermissionsExt;
+        for name in ["last-restore.filter", "last-restore.note"] {
+            let mode = fs::metadata(paths.state_dir.join(name))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "{name}");
+        }
+        // The log is gone, the last result stays, and no temporary file is left.
+        assert_eq!(
+            in_state(&paths),
+            [
+                "apsis-helper",
+                "last-restore.filter",
+                "last-restore.note",
+                "request.json",
+                "restore.filter",
+                "restore.note",
+                "result.json",
+                "state.json",
+            ]
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A copy that fails refuses the arm before anything of it is written: no link, no
+    /// unit, the pair of the arm before as it was, and the log not cleared.
+    #[test]
+    fn an_arm_that_cant_keep_the_pair_is_refused_and_changes_nothing() {
+        for missing in ["restore.note", "restore.filter"] {
+            let (root, paths, exe) = lab();
+            for (name, old) in [
+                ("last-restore.filter", "an earlier arm's filter\n"),
+                ("last-restore.note", "an earlier arm's note\n"),
+                ("rsync-log", "the last restore's log\n"),
+            ] {
+                fs::write(paths.state_dir.join(name), old).unwrap();
+            }
+            fs::remove_file(paths.state_dir.join(missing)).unwrap();
+            let before = in_state(&paths);
+            let error = arm(&paths, &exe).unwrap_err().to_string();
+            assert!(error.contains("couldn't be kept"), "{missing}: {error}");
+            assert_eq!(link_state(&paths.link), UpdateLink::Nothing, "{missing}");
+            assert!(
+                !paths.unit.exists() && !paths.helper_copy.exists(),
+                "{missing}"
+            );
+            assert_eq!(
+                text(&paths, "last-restore.filter"),
+                "an earlier arm's filter\n"
+            );
+            assert_eq!(text(&paths, "last-restore.note"), "an earlier arm's note\n");
+            assert_eq!(text(&paths, "rsync-log"), "the last restore's log\n");
+            assert_eq!(in_state(&paths), before, "{missing}: no temporary file");
+            fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    /// The working files go with the plan in a disarm and at the helper's start without a
+    /// link, never with the arm's files alone (`clean_leftovers` runs right before an arm,
+    /// on the plan that is about to be armed). The kept pair and the log stay.
+    #[test]
+    fn the_working_files_go_with_the_plan_and_never_with_the_arm_files() {
+        let (root, paths, exe) = lab();
+        arm(&paths, &exe).unwrap();
+        fs::write(paths.state_dir.join("rsync-log"), "log\n").unwrap();
+        // An arm: kept whole at the helper's start.
+        assert_eq!(clean_at_start(&paths).unwrap(), Vec::<&str>::new());
+        assert!(paths.state_dir.join("restore.filter").exists());
+        // The arm's files alone, the link gone: the working files and the plan stay.
+        fs::remove_file(&paths.link).unwrap();
+        let cleaned = remove_arm_files(&paths).unwrap();
+        assert!(
+            !cleaned.iter().any(|name| name.starts_with("restore.")),
+            "{cleaned:?}"
+        );
+        assert_eq!(
+            in_state(&paths),
+            [
+                "last-restore.filter",
+                "last-restore.note",
+                "request.json",
+                "restore.filter",
+                "restore.note",
+                "rsync-log",
+            ]
+        );
+        assert_eq!(clean_leftovers(&paths).unwrap(), Vec::<&str>::new());
+        assert!(paths.state_dir.join("restore.note").exists());
+        // The helper's start with no link: they go with the plan.
+        let cleaned = clean_at_start(&paths).unwrap();
+        assert_eq!(cleaned, ["request.json", "restore.filter", "restore.note"]);
+        assert_eq!(
+            in_state(&paths),
+            ["last-restore.filter", "last-restore.note", "rsync-log"]
+        );
+        // A disarm: the same, after the link and the arm's files.
+        let (root2, paths2, exe2) = lab();
+        arm(&paths2, &exe2).unwrap();
+        fs::write(paths2.state_dir.join("rsync-log"), "log\n").unwrap();
+        let removed = disarm(&paths2).unwrap();
+        assert_eq!(removed.first(), Some(&"/system-update"));
+        assert_eq!(
+            removed[removed.len() - 3..],
+            ["request.json", "restore.filter", "restore.note"]
+        );
+        assert_eq!(
+            in_state(&paths2),
+            ["last-restore.filter", "last-restore.note", "rsync-log"]
+        );
+        assert_eq!(text(&paths2, "last-restore.filter"), FILTER);
+        fs::remove_dir_all(&root).unwrap();
+        fs::remove_dir_all(&root2).unwrap();
+    }
+
     #[test]
     fn disarming_removes_the_link_first_and_then_the_rest() {
         let (root, paths, exe) = lab();
@@ -435,7 +626,7 @@ mod tests {
         fs::remove_file(&paths.link).unwrap();
         let cleaned = clean_at_start(&paths).unwrap();
         assert!(cleaned.contains(&"request.json"), "{cleaned:?}");
-        assert_eq!(cleaned.len(), 6, "{cleaned:?}");
+        assert_eq!(cleaned.len(), 8, "{cleaned:?}");
         assert!(!paths.state_dir.join("request.json").exists());
         assert!(!paths.unit.exists());
         // Nothing at all: nothing to say.

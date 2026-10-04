@@ -10,7 +10,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
@@ -62,26 +62,75 @@ impl FileError {
 /// renamed over it, then the folder flushed so the rename survives a power cut. A reader sees
 /// the old file or the new one, never a part.
 pub(super) fn save(dir: &Path, name: &str, text: &str) -> Result<(), FileError> {
-    let path = dir.join(name);
-    let temp = dir.join(format!("{name}.apsis-tmp"));
-    // Left over from a crash: never ours to keep.
-    match fs::remove_file(&temp) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
-        _ => {}
-    }
-    let written = (|| {
-        let mut file = create_new(&temp)?;
-        // `mode` is masked by the umask on create; set it exactly.
-        file.set_permissions(fs::Permissions::from_mode(MODE))?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        fs::rename(&temp, &path)?;
+    let temp = temporary(dir, name);
+    let written = stage(&temp, text.as_bytes()).and_then(|()| {
+        fs::rename(&temp, dir.join(name))?;
         File::open(dir)?.sync_all()
-    })();
+    });
     if written.is_err() {
         let _ = fs::remove_file(&temp);
     }
     Ok(written?)
+}
+
+/// The temporary name `dir/name` is written under.
+fn temporary(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{name}.apsis-tmp"))
+}
+
+/// Writes `bytes` to the new file `temp`, for its owner only, and flushes it. One left over
+/// from a crash goes first: it's never ours to keep.
+fn stage(temp: &Path, bytes: &[u8]) -> io::Result<()> {
+    match fs::remove_file(temp) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let mut file = create_new(temp)?;
+    // `mode` is masked by the umask on create; set it exactly.
+    file.set_permissions(fs::Permissions::from_mode(MODE))?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// Copies `dir/<from>` over `dir/<to>` for each pair, byte for byte, with the writer of
+/// [`save`] (a temporary name, flushed, renamed). Every copy is written whole under its
+/// temporary name first, and only then is each renamed over its target: a source that
+/// can't be read or a copy that can't be written leaves every target as it was. The sources
+/// are regular files of any size (the filter isn't capped as the JSON files are).
+///
+/// # Errors
+///
+/// [`FileError::Io`] for a source that's missing or unreadable or a write that failed,
+/// [`FileError::Invalid`] for a source that isn't a regular file.
+pub fn copy_all(dir: &Path, pairs: &[(&str, &str)]) -> Result<(), FileError> {
+    let staged = pairs.iter().try_for_each(|(from, to)| {
+        let not_regular = || FileError::invalid("not a regular file").within(from);
+        let mut file = match open_nofollow(&dir.join(from)) {
+            // A link at the name: not followed.
+            Err(error) if error.raw_os_error() == Some(Errno::LOOP.raw_os_error()) => {
+                return Err(not_regular());
+            }
+            other => other?,
+        };
+        if !file.metadata()?.is_file() {
+            return Err(not_regular());
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(stage(&temporary(dir, to), &bytes)?)
+    });
+    let copied = staged.and_then(|()| {
+        for (_, to) in pairs {
+            fs::rename(temporary(dir, to), dir.join(to))?;
+        }
+        Ok(File::open(dir)?.sync_all()?)
+    });
+    if copied.is_err() {
+        for (_, to) in pairs {
+            let _ = fs::remove_file(temporary(dir, to));
+        }
+    }
+    copied
 }
 
 /// The text of `dir/name`, if it's a regular file of a plausible size.
@@ -283,6 +332,60 @@ pub(super) mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, ["a.json"]);
+    }
+
+    /// The arm's copies (PLAN 6b.5): byte for byte, for the owner only, over what was
+    /// there, with no temporary file left.
+    #[test]
+    fn copies_are_byte_for_byte_and_replace_their_targets() {
+        let dir = temp_dir("copy-all");
+        // Not JSON, not small: the filter is neither.
+        let large = "- /some/path/***\n".repeat(8 * 1024);
+        assert!(large.len() > MAX_BYTES);
+        fs::write(dir.join("a"), &large).unwrap();
+        fs::write(dir.join("b"), [0_u8, 159, 146, 150, b'\n']).unwrap();
+        fs::write(dir.join("last-a"), "older").unwrap();
+        copy_all(&dir, &[("a", "last-a"), ("b", "last-b")]).unwrap();
+        assert_eq!(fs::read(dir.join("last-a")).unwrap(), large.as_bytes());
+        assert_eq!(
+            fs::read(dir.join("last-b")).unwrap(),
+            [0_u8, 159, 146, 150, b'\n']
+        );
+        for name in ["last-a", "last-b"] {
+            let mode = fs::metadata(dir.join(name)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o7777, 0o600, "{name}");
+        }
+        let mut names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["a", "b", "last-a", "last-b"]);
+    }
+
+    /// All or nothing as far as a write can fail: with one source missing, or not a
+    /// regular file, no target changes and no temporary file stays.
+    #[test]
+    fn a_copy_that_cant_be_made_leaves_every_target_as_it_was() {
+        let dir = temp_dir("copy-all-fails");
+        fs::write(dir.join("a"), "new a").unwrap();
+        fs::write(dir.join("last-a"), "old a").unwrap();
+        fs::write(dir.join("last-b"), "old b").unwrap();
+        let missing = copy_all(&dir, &[("a", "last-a"), ("b", "last-b")]);
+        assert!(matches!(missing, Err(FileError::Io(_))), "{missing:?}");
+        std::os::unix::fs::symlink(dir.join("a"), dir.join("b")).unwrap();
+        assert_eq!(
+            invalid(copy_all(&dir, &[("a", "last-a"), ("b", "last-b")])),
+            "b: not a regular file"
+        );
+        assert_eq!(fs::read_to_string(dir.join("last-a")).unwrap(), "old a");
+        assert_eq!(fs::read_to_string(dir.join("last-b")).unwrap(), "old b");
+        let mut names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["a", "b", "last-a", "last-b"]);
     }
 
     #[test]

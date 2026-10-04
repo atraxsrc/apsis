@@ -570,7 +570,20 @@ fn give_up(paths: &Paths<'_>, runner: &mut impl Runner, state: State) -> End {
             "the restore's unit files weren't removed: {error}"
         ));
     }
+    remove_working_files(state_dir, runner);
     End::GaveUp
+}
+
+/// The preparation's filter and note go once the restore is over and the link is gone
+/// (PLAN 6b.5): what the arm kept of them stays, as `last-restore.*`.
+fn remove_working_files(state_dir: &Path, runner: &mut impl Runner) {
+    for name in plan::WORKING_FILES {
+        match fs::remove_file(state_dir.join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => runner.say(&format!("{name} wasn't removed: {error}")),
+        }
+    }
 }
 
 /// Removes what a put-back that was cut left on the ESP ([`esp::clear_temporaries`]).
@@ -892,6 +905,7 @@ fn clean_up(paths: &Paths<'_>, runner: &mut impl Runner) -> bool {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => runner.say(&format!("request.json wasn't removed: {error}")),
     }
+    remove_working_files(paths.state_dir, runner);
     if let Err(error) = esp::remove(paths.state_dir) {
         runner.say(&format!("the ESP backup wasn't removed: {error}"));
     }
@@ -2099,6 +2113,99 @@ mod tests {
         // The disk is back: the next attempt finishes it.
         fake.snapshot = found(&info());
         assert_eq!(boot(&mut fake), End::Finished(Outcome::Done));
+    }
+
+    /// The files of the filter's lifetime (PLAN 6b.5), as an arm leaves them: the working
+    /// pair, the pair the arm kept, and a log.
+    const LIFETIME: [&str; 5] = [
+        "restore.filter",
+        "restore.note",
+        "last-restore.filter",
+        "last-restore.note",
+        "rsync-log",
+    ];
+
+    fn armed_with_the_working_files(name: &str) -> Lab {
+        let lab = armed(name);
+        for file in LIFETIME {
+            fs::write(lab.state.join(file), file).unwrap();
+        }
+        lab
+    }
+
+    /// The lab's restore has begun [`MAX_BOOTS`] boots and ended none.
+    fn past_the_cap(lab: &Lab) {
+        State {
+            boots: MAX_BOOTS,
+            ..state(1, Step::Copy, false)
+        }
+        .save(&lab.state)
+        .unwrap();
+    }
+
+    /// Which of [`LIFETIME`] are in the state folder.
+    fn lifetime_left(lab: &Lab) -> Vec<&'static str> {
+        LIFETIME
+            .into_iter()
+            .filter(|file| lab.state.join(file).exists())
+            .collect()
+    }
+
+    /// Pull 1: a restore that's over removes the preparation's filter and note with the
+    /// plan, whatever the outcome, and keeps the pair of its arm and the log.
+    #[test]
+    fn a_finished_restore_removes_the_working_files_and_keeps_the_arms_pair() {
+        const KEPT: [&str; 3] = ["last-restore.filter", "last-restore.note", "rsync-log"];
+        let lab = armed_with_the_working_files("apply-lifetime-done");
+        let mut fake = Fake::new(&lab);
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::Done));
+        assert_eq!(lifetime_left(&lab), KEPT);
+        assert!(!lab.state.join(plan::FILE).exists());
+        // Never started (the backup disk isn't there): the same.
+        let lab = armed_with_the_working_files("apply-lifetime-not-started");
+        let mut fake = Fake::new(&lab);
+        fake.backup = Err("the backup disk wasn't found within 60 seconds".to_owned());
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::NotStarted));
+        assert_eq!(lifetime_left(&lab), KEPT);
+        // Given up after too many boots: the same.
+        let lab = armed_with_the_working_files("apply-lifetime-gave-up");
+        past_the_cap(&lab);
+        let mut fake = Fake::new(&lab);
+        assert_eq!(boot(&mut fake), End::GaveUp);
+        assert_eq!(lifetime_left(&lab), KEPT);
+    }
+
+    /// A retry needs the filter again, and a link that can't be removed keeps the arm
+    /// whole: neither end removes anything of the filter's lifetime.
+    #[test]
+    fn a_retry_and_a_stuck_link_remove_none_of_the_working_files() {
+        let lab = armed_with_the_working_files("apply-lifetime-retry");
+        let mut fake = Fake::new(&lab);
+        fake.exits = [Some(11)].into();
+        assert_eq!(boot(&mut fake), End::Retry { attempt: 2 });
+        assert_eq!(lifetime_left(&lab), LIFETIME);
+        let lab = armed_with_the_working_files("apply-lifetime-stuck");
+        let mut fake = Fake::new(&lab);
+        fake.stuck_link = true;
+        assert_eq!(
+            boot(&mut fake),
+            End::LinkStuck {
+                outcome: Outcome::Done
+            }
+        );
+        assert_eq!(lifetime_left(&lab), LIFETIME);
+        // Given up with the link stuck: nothing either.
+        let lab = armed_with_the_working_files("apply-lifetime-gave-up-stuck");
+        past_the_cap(&lab);
+        let mut fake = Fake::new(&lab);
+        fake.stuck_link = true;
+        assert_eq!(
+            boot(&mut fake),
+            End::LinkStuck {
+                outcome: Outcome::Failed
+            }
+        );
+        assert_eq!(lifetime_left(&lab), LIFETIME);
     }
 
     /// A plain 23 with the snapshot still there is what it was: a copy with problems.

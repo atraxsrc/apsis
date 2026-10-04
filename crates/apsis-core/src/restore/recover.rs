@@ -4,8 +4,29 @@
 //! restore goes wrong" steps with this machine's UUIDs and the snapshot's name filled in,
 //! written while preparing. It holds only UUIDs and the snapshot name.
 
+use std::path::Path;
+
+use super::file::{self, FileError};
+
 /// The note's name, in the backup disk's `timeshift/` folder next to `snapshots/`.
 pub const FILE: &str = "apsis-restore-RECOVER.txt";
+
+/// The note's working copy in the state folder, beside the filter and with its lifetime
+/// (PLAN 6b.5): the same text as on the backup disk.
+pub const NOTE_FILE: &str = "restore.note";
+
+/// The copy of [`NOTE_FILE`] that an arm keeps: the note of the last restore that was armed.
+pub const LAST_NOTE_FILE: &str = "last-restore.note";
+
+/// Writes `dir/restore.note` in one step (temporary file, fsync, rename), as the other
+/// files of the state folder are written.
+///
+/// # Errors
+///
+/// [`FileError::Io`] if the write fails.
+pub fn save(dir: &Path, text: &str) -> Result<(), FileError> {
+    file::save(dir, NOTE_FILE, text)
+}
 
 /// The note's text for a restore of `snapshot` on the machine whose root, ESP and backup
 /// disk have these filesystem UUIDs. `old_format`: the snapshot was made without ACLs and

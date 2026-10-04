@@ -84,9 +84,11 @@ pub fn needs(
     })
 }
 
-/// The state folder before a preparation: made root-only if it's missing, and cleared of
-/// what an earlier preparation or arm left (the plan, the filter, rsync's log, `state.json`,
-/// the ESP backup, a helper copy). The last `result.json` stays: `RestoreResult` reads it.
+/// The state folder before a preparation, and when a ready plan is dropped: made root-only
+/// if it's missing, and cleared of what an earlier preparation or arm left (the plan, its
+/// filter and note, `state.json`, the ESP backup, a helper copy). What the last restore
+/// left stays: `result.json` (`RestoreResult` reads it), rsync's log, and the filter and
+/// note its arm kept (`last-restore.*`). The log is cleared at the arm (PLAN 6b.5).
 ///
 /// # Errors
 ///
@@ -101,9 +103,9 @@ pub fn clear_leftovers(dir: &Path) -> io::Result<()> {
     for name in [
         apsis_core::restore::plan::FILE,
         filter::FILE,
+        recover::NOTE_FILE,
         HOME_FILTER_FILE,
         SAFETY_EXCLUDE_FILE,
-        argv::LOG_FILE,
         restore_state::STATE_FILE,
         "apsis-helper",
     ] {
@@ -129,8 +131,10 @@ const SAFETY_EXCLUDE_FILE: &str = "safety.exclude";
 
 /// The whole preparation (PLAN 6b.4's order: the refusals, both dry runs and space, the
 /// safety snapshot, the plan). Runs under the write lock as the `restore` job; `cancel` stops
-/// it between steps and inside rsync. On `Ok`, `request.json`, `restore.filter` and the
-/// recovery note are on disk and the plan is ready for `RestartToRestore`.
+/// it between steps and inside rsync. On `Ok`, `request.json`, `restore.filter`,
+/// `restore.note` and the recovery note on the backup disk are written and the plan is ready
+/// for `RestartToRestore`. On `Err` (stopped, refused or failed) the filter and the note it
+/// wrote are removed again ([`or_remove_working_files`]).
 ///
 /// # Errors
 ///
@@ -138,6 +142,37 @@ const SAFETY_EXCLUDE_FILE: &str = "safety.exclude";
 /// rsync or a file write reported.
 pub fn prepare(request: &Request, state: &Arc<State>, cancel: Arc<Cancel>) -> Result<Plan> {
     let dir = Path::new(file::DIR);
+    or_remove_working_files(dir, prepare_in(dir, request, state, cancel))
+}
+
+/// A preparation's end: one that didn't get to "ready" leaves no filter and no note in
+/// `dir` (PLAN 6b.5; check 8 found a stopped one's filter in the place of the last
+/// restore's). A file that can't be removed is logged, and the preparation's own error
+/// stays the answer.
+///
+/// The files are this preparation's own, never another plan's: [`prepare`] runs only as the
+/// `restore` job, under the lock of [`State::begin`], which answers `Busy` while a plan is
+/// ready, and a plan becomes ready only from under that lock. So no ready plan's files are
+/// in `dir` when a preparation starts or ends.
+fn or_remove_working_files<T>(dir: &Path, prepared: Result<T>) -> Result<T> {
+    if prepared.is_err() {
+        for name in apsis_core::restore::plan::WORKING_FILES {
+            match fs::remove_file(dir.join(name)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => log(&format!("{name} wasn't removed: {error}")),
+            }
+        }
+    }
+    prepared
+}
+
+fn prepare_in(
+    dir: &Path,
+    request: &Request,
+    state: &Arc<State>,
+    cancel: Arc<Cancel>,
+) -> Result<Plan> {
     let refused = |refusal: Refusal| Error::RestoreRefused(refusal.to_wire());
     let stopped = || {
         if cancel.is_stopping() {
@@ -268,7 +303,7 @@ pub fn prepare(request: &Request, state: &Arc<State>, cancel: Arc<Cancel>) -> Re
     };
     stopped()?;
 
-    // The recovery note on the backup disk, then the plan.
+    // The recovery note, beside the filter and on the backup disk, then the plan.
     let esp_uuid = mount_uuid(&DirectRunner, "/boot/efi")?;
     let note = recover::text(
         &live.root_uuid,
@@ -277,6 +312,7 @@ pub fn prepare(request: &Request, state: &Arc<State>, cancel: Arc<Cancel>) -> Re
         &request.snapshot,
         dialog.old_format,
     );
+    recover::save(dir, &note).map_err(file_error)?;
     fs::write(repo.join(TIMESHIFT_DIR).join(recover::FILE), note)?;
     let prepared_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -424,6 +460,74 @@ sent 1,228,900 bytes  received 50 bytes\n";
         );
     }
 
+    /// A preparation that's stopped, refused or failed takes its filter and note with it;
+    /// one that's ready keeps them. Whatever the last restore left stays either way.
+    #[test]
+    fn a_preparation_that_doesnt_get_ready_removes_its_filter_and_note() {
+        let dir = std::env::temp_dir().join(format!("apsis-prepare-ends-{}", std::process::id()));
+        let fill = || {
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            for name in [
+                "restore.filter",
+                "restore.note",
+                "last-restore.filter",
+                "last-restore.note",
+                "rsync-log",
+                "result.json",
+            ] {
+                fs::write(dir.join(name), "x").unwrap();
+            }
+        };
+        let left = || {
+            let mut left: Vec<String> = fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            left.sort();
+            left
+        };
+        const LAST: [&str; 4] = [
+            "last-restore.filter",
+            "last-restore.note",
+            "result.json",
+            "rsync-log",
+        ];
+        for error in [
+            Error::Stopped,
+            Error::RestoreRefused("pop-upgrade-pending".to_owned()),
+            Error::Helper("statvfs of / failed".to_owned()),
+        ] {
+            fill();
+            let word = error.to_string();
+            let ended = or_remove_working_files::<()>(&dir, Err(error));
+            assert_eq!(
+                ended.unwrap_err().to_string(),
+                word,
+                "the error is passed on"
+            );
+            assert_eq!(left(), LAST, "{word}");
+        }
+        // Nothing to remove (the preparation stopped before the filter): no error of its own.
+        assert!(or_remove_working_files::<()>(&dir, Err(Error::Stopped)).is_err());
+        assert_eq!(left(), LAST);
+        // Ready: both stay.
+        fill();
+        or_remove_working_files(&dir, Ok(())).unwrap();
+        assert_eq!(
+            left(),
+            [
+                "last-restore.filter",
+                "last-restore.note",
+                "restore.filter",
+                "restore.note",
+                "result.json",
+                "rsync-log",
+            ]
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn the_safety_snapshots_comment_names_the_date() {
         assert_eq!(
@@ -490,8 +594,10 @@ sent 1,228,900 bytes  received 50 bytes\n";
         assert_eq!(capped.root, GIB);
     }
 
-    /// A preparation starts from a clean state folder: a plan, filter, log, state or ESP
-    /// backup left by an earlier one goes; the last result stays for `RestoreResult`.
+    /// A preparation starts from a clean state folder: a plan, its filter and note, a
+    /// state or an ESP backup left by an earlier one goes. What the last restore left stays:
+    /// its result for `RestoreResult`, its log, and the pair its arm kept (Pull 1: the log
+    /// is cleared at the arm, no longer here).
     #[test]
     fn leftovers_of_an_earlier_preparation_are_cleared() {
         let dir = std::env::temp_dir().join(format!("apsis-prepare-{}", std::process::id()));
@@ -500,6 +606,9 @@ sent 1,228,900 bytes  received 50 bytes\n";
         for name in [
             "request.json",
             "restore.filter",
+            "restore.note",
+            "last-restore.filter",
+            "last-restore.note",
             "rsync-log",
             "restore-home.filter",
             "safety.exclude",
@@ -511,11 +620,20 @@ sent 1,228,900 bytes  received 50 bytes\n";
             fs::write(dir.join(name), "x").unwrap();
         }
         clear_leftovers(&dir).unwrap();
-        let left: Vec<String> = fs::read_dir(&dir)
+        let mut left: Vec<String> = fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(left, ["result.json"]);
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "last-restore.filter",
+                "last-restore.note",
+                "result.json",
+                "rsync-log"
+            ]
+        );
         // A missing folder is made, root-only.
         fs::remove_dir_all(&dir).unwrap();
         clear_leftovers(&dir).unwrap();

@@ -10,9 +10,22 @@ use std::path::Path;
 use serde_json::{Map, Value, json};
 
 use super::file::{self, FileError};
-use super::filter::{Home, is_kernel_version};
+use super::filter::{self, Home, is_kernel_version};
+use super::recover;
 
 pub const FILE: &str = "request.json";
+
+/// The preparation's working files beside the plan (PLAN 6b.5): the filter and the recovery
+/// note. They're removed where the plan is, and never with the arm's files alone: the arm
+/// copies them, and the apply reads the filter in every attempt.
+pub const WORKING_FILES: [&str; 2] = [filter::FILE, recover::NOTE_FILE];
+
+/// What an arm keeps, each working file and its copy's name: the filter and the note of
+/// the last restore that was armed.
+pub const KEPT: [(&str, &str); 2] = [
+    (filter::FILE, filter::LAST_FILE),
+    (recover::NOTE_FILE, recover::LAST_NOTE_FILE),
+];
 
 /// How long a plan may wait on the ready prompt (PLAN 6b.5): 30 minutes.
 pub const MAX_AGE_SECS: i64 = 30 * 60;

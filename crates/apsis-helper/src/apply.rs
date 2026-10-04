@@ -605,6 +605,8 @@ mod tests {
         let exe = root.join("usr/libexec/apsis-helper");
         write(exe.clone(), "#!/bin/sh\n");
         fs::create_dir_all(&paths.state_dir).unwrap();
+        fs::write(paths.state_dir.join("restore.filter"), "+ /***\n").unwrap();
+        fs::write(paths.state_dir.join("restore.note"), "note\n").unwrap();
         arm::arm(&paths, &exe).unwrap();
         let mut runner = RealRunner::under(&root, &temp("mount"), FakeTools::default());
         assert!(runner.is_armed());

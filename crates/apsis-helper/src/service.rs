@@ -260,11 +260,12 @@ impl Helper {
     /// "Restart now" (PLAN 6b.5, 6b.9): re-checks the ready plan for `snapshot` (its age,
     /// the space on each destination, the ESP's space and boot files, both update-link names,
     /// a Pop!_OS upgrade), arms the next boot (unit, wants link, drop-in, helper copy,
-    /// `state.json`, sync, then `/system-update` last), starts the ten-minute disarm timer
-    /// and asks logind to reboot. No password for the uid that prepared the plan; polkit
-    /// `restore` for anyone else. The plan's job ends `done` right before the reboot. Any
-    /// refusal or failure removes the plan (the job ends `stopped`) and is the method's error:
-    /// `InvalidInput` with [`plan::TOO_OLD`] or [`plan::GONE`], `Failed` with
+    /// `state.json`, sync, then `/system-update` last; before any of it the plan's filter and
+    /// note are kept as `last-restore.*` and rsync's log is cleared), starts the ten-minute
+    /// disarm timer and asks logind to reboot. No password for the uid that prepared the
+    /// plan; polkit `restore` for anyone else. The plan's job ends `done` right before the
+    /// reboot. Any refusal or failure removes the plan (the job ends `stopped`) and is the
+    /// method's error: `InvalidInput` with [`plan::TOO_OLD`] or [`plan::GONE`], `Failed` with
     /// `restore refused: <word>`, or the failure's text.
     async fn restart_to_restore(
         &self,
@@ -302,13 +303,22 @@ impl Helper {
             let armed = blocking(move || {
                 let outcome = check_and_arm(&snapshot, &mount);
                 if outcome.is_err() {
-                    // Nothing may stay armed after a refusal; leftovers go too.
+                    // Nothing may stay armed after a refusal: a link, or what an arm that
+                    // was cut short wrote, goes here. The plan's own end, and its line in
+                    // the journal, is `remove_plan`'s below (PLAN 6b.5).
                     match arm::disarm(&arm::Paths::system()) {
-                        Ok(removed) if !removed.is_empty() => {
-                            log(&format!("plan removed: {}", removed.join(", ")));
+                        Ok(removed) => {
+                            let of_the_arm: Vec<&str> = removed
+                                .into_iter()
+                                .filter(|name| {
+                                    *name != plan::FILE && !plan::WORKING_FILES.contains(name)
+                                })
+                                .collect();
+                            if !of_the_arm.is_empty() {
+                                log(&format!("arm undone: {}", of_the_arm.join(", ")));
+                            }
                         }
-                        Ok(_) => {}
-                        Err(error) => log(&format!("couldn't remove the plan: {error}")),
+                        Err(error) => log(&format!("couldn't undo the arm: {error}")),
                     }
                 }
                 outcome
@@ -331,7 +341,9 @@ impl Helper {
                     Ok(())
                 }
                 Err(error) => {
-                    ready.end(JobState::Stopped).wait().await;
+                    // One path removes a plan, with one wording (check 4): the files that
+                    // are left go, the journal says why, and the job ends `stopped`.
+                    remove_plan(ready, &describe_error(&error)).await;
                     Err(error)
                 }
             }

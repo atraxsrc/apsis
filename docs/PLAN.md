@@ -646,16 +646,16 @@ Until it is built, the text above is what the code does.
   or a disarm, next to `request.json` in the apply's `clean_up` and `give_up`, in
   `disarm()` and in `clean_at_start()`. Never through `remove_arm_files`:
   `clean_leftovers` calls that right before the arm and would delete the files the arm is
-  about to copy. A `Retry` and a `LinkStuck` end remove nothing.
+  about to copy. A `Retry` and a `LinkStuck` end remove nothing. **Built (step 7a).**
 - **The arm keeps a pair**, before anything else of the arm is written: `restore.filter`
   is copied to `last-restore.filter` and `restore.note` to `last-restore.note`, all in the
   state folder, each copy under a temporary name and renamed. If either copy fails the arm
   is refused. Then `rsync-log` is cleared: at the arm, no longer at the preparation. "Last
   restore" means "last arm": a disarmed arm has replaced the pair too. All of these files
-  are under `/var/lib/apsis/***` (6b.2's protect list).
+  are under `/var/lib/apsis/***` (6b.2's protect list). **Built (step 7a).**
 - **A refused "Restart now" removes the plan through `remove_plan`**, so the journal says
   `plan removed (refused ...)` and `refused:`, not `plan removed: request.json` and
-  `failed:` (check 4).
+  `failed:` (check 4). **Built (step 7a).**
 - **The helper takes its job lock around the arm** (6b.9), so a package script can't land
   inside one.
 - **`disarm()` syncs after it removes the link**, for the timer and for the package script.
