@@ -657,7 +657,12 @@ Until it is built, the text above is what the code does.
   `plan removed (refused ...)` and `refused:`, not `plan removed: request.json` and
   `failed:` (check 4). **Built (step 7a).**
 - **The helper takes its job lock around the arm** (6b.9), so a package script can't land
-  inside one.
+  inside one. **Built (row 5)**: "Restart now" takes the plan where it is
+  (`State::take_ready`: the plan is marked in its slot and the job lock on disk is taken, in
+  one step) and holds both through the re-checks, the arm, the link and the timer, or
+  through the undo and the plan's removal after a refusal. The plan leaves its slot, and the
+  lock is released, at its end: `done` right before logind's `Reboot`, `stopped` after the
+  removal.
 - **`disarm()` syncs after it removes the link**, for the timer and for the package script.
   A power cut seconds after a disarm must not bring the link back. **Built (step 7b).**
 - **A second preparation while a restore is armed is refused before it touches anything**
@@ -692,7 +697,7 @@ Until it is built, the text above is what the code does.
   `Failed`); the window's line is "Not deleted: a restart to restore is waiting." with the
   tooltip "Restart the computer, or wait for it to time out. Nothing was deleted." The
   seconds between "Restart now" taking the plan and the link being made are not covered
-  (below, step 11). **Built (row 12).**
+  (below, step 11: since then a delete in those seconds is `Busy`). **Built (row 12).**
 - **Knowingly left** (owner): in the seconds between "Restart now" and the reboot, a
   package operation on Apsis cancels the arm, and only apt's output says so.
 - **Knowingly left** (owner, 2026-10-04; the armed-gap audit's row 1): `Create` is not
@@ -704,7 +709,13 @@ Until it is built, the text above is what the code does.
   seconds no plan is ready and no link exists, so a second `Restore` is let in and its
   first step clears the plan that is being armed. The arm then fails at keeping the pair
   and the plan is dropped with an error: nothing ends up armed without a plan. The job
-  lock around the arm (above, 6b.9) closes it.
+  lock around the arm (above, 6b.9) closes it. **Closed (step 11, row 5)**: in those
+  seconds the plan is still in its slot, so a second `Restore`, a `Delete` or `DeleteMany`,
+  a `Create` and a `WriteConfig` are `Busy` (the window's "busy" line; owner: kept as
+  `Busy`), lists and `CheckRestore` go on, and `Job()` shows the restore at 100%. A second
+  "Restart now" and a cancel in those seconds are `Busy` too. `CancelRestore` and the
+  starter-gone path hold the plan and the lock the same way while the plan's files go
+  (owner, "Q8").
 
 ### 6b.6 The apply, and the boot files
 
@@ -1448,7 +1459,15 @@ Until it is built, the table and the list above are what the code does.
 - **The job lock on disk.** The helper holds a `flock` on a file under `/run` for the
   duration of every job (`State::begin` to the job's end), and around the arm. The kernel
   drops the lock with the process, so a killed helper leaves nothing stale; the file's
-  existence means nothing. A ready plan holds no lock.
+  existence means nothing. A ready plan holds no lock. **Built (fix 1, row 5)**:
+  `/run/apsis/job.lock`, root's, 0600, opened `O_NOFOLLOW | O_CLOEXEC` (a symlink there
+  refuses the job as `Busy` with a journal line; no child inherits it), taken with
+  `LOCK_EX | LOCK_NB` after the `running` flag and before anything is announced, so a write
+  refused by a package script was never a job. After the lock is taken the open file must
+  still be the one at the path, else it is opened once more. Released at the job's end
+  before the end is announced, and when a plan becomes ready; unlocked explicitly, not only
+  closed. Reads, `--disarm` and `--apply-restore` take none. A ready plan is taken to its
+  end with the lock (6b.5, row 5).
 - **The `prerm`** (`remove`, `upgrade`, `deconfigure`, and the new package's
   `failed-upgrade`), in this order: it takes the lock without waiting and **refuses with
   one line** if a job holds it, so a refused operation changes nothing; it **disarms** an
@@ -1456,6 +1475,28 @@ Until it is built, the table and the list above are what the code does.
   state folder, and failing with the exact manual command if the link can't be removed;
   then it stops the helper, still holding the lock. **`postrm remove`** also removes
   Apsis's link and the unit files; the state folder and the config stay purge-only.
+  **Built (fix 1, 1b)**, with the owner's rulings of 2026-10-04:
+  - the refusal is `apsis: an Apsis job is running; try again when it has finished`, on
+    stderr, exit 75 (`flock -n -E 75`; any other failure to take the lock is exit 1 with
+    its own line);
+  - after `apsis-helper --disarm` **the link decides, not the exit status** (the open
+    point, option (e)): still Apsis's link, exit 1 with `rm /system-update` and `systemctl
+    stop apsis-disarm.timer` to run by hand, and neither the timer nor the helper is
+    stopped; gone, the script goes on, saying `apsis: the restore that was waiting for a
+    restart is cancelled` after a clean disarm, or a warning that the removal may not be on
+    disk after a non-zero exit. The helper is run only when the link is Apsis's, so a
+    0.4.x helper (no `--disarm`) is never called that way;
+  - `--disarm`'s own lines say `disarm:` and name no caller;
+  - `postrm` on `remove` and `purge` stops `apsis-disarm.timer` before the unit files go,
+    removes Apsis's link (same check), the unit, its wants link and the drop-in, and the two
+    folders when empty, then reloads systemd and the bus (the reload used to come before
+    purge's removals);
+  - the scripts name each path once, as a variable at their top. The helper's tests compare
+    those with the helper's constants and run copies of the scripts against a temp folder,
+    with a fake `systemctl`, `busctl` and helper; the harness refuses root, a path outside
+    its folder, and a command that isn't its fake.
+  **Knowingly left** (owner, 2026-10-04): a job begun after the `prerm` has exited, during
+  an upgrade's unpack, runs the old binary to its end.
 - **`RestoreResult() -> (s state, s snapshot, s message, x when, s home, s
   safety_snapshot)`**: the tooltip's two lines come from `result.json`, not from fixed
   strings. `Helper3` is unshipped, so the signature changes without a new interface.
@@ -2478,11 +2519,22 @@ Checks:
    - **the refused "Restart now"** (`/pop-upgrade` present at the prompt; the regression
      test for fixes 3 and 4): afterwards `restore.filter` is gone and `last-restore.filter`
      and `last-restore.note` are unchanged;
-   - **what dpkg really does after fix 1's refusal** (a reinstall during a create),
-     including the new package's `prerm failed-upgrade`; the create finishes;
-   - **`command -v flock`** on apsis-test;
+   - **`flock -n -E 75 /run/apsis/job.lock true; echo $?` while a create runs**: 75
+     (`-E` needs util-linux 2.29 or later: this shows the tool, the flag and the lock at
+     once);
+   - **what dpkg really does after fix 1's refusal**: `apt install --reinstall` of the 0.5.0
+     .deb during a create, apt's output word for word (the script's line, dpkg's lines, the
+     new package's `prerm failed-upgrade` attempt); `dpkg -s apsis` still `install ok
+     installed` at the same version; the create ends `done`; no stop in the journal;
+   - **`apt remove apsis` during a delete**: refused, the package still installed, the
+     delete ends `done`;
+   - **a reinstall at the "Ready to restore" prompt** goes on; then "Restart now" gives
+     "The preparation is gone.";
    - the armed branch of the `prerm`, with a hand-made link (Claude's proposal): the
-     script's line, the link gone; a link to another place is left alone;
+     script's line, the link gone, `systemctl list-timers` without `apsis-disarm`; a link
+     to another place is left alone;
+   - **the helper killed (`kill -9`) during a create, then a reinstall**: goes on at once
+     (no stale lock); no rsync left afterwards (`pgrep rsync`); the staging folder is a row;
    - fix 2: the helper stopped by hand in the middle of a delete of a throwaway snapshot
      (Claude's proposal): a row appears and Delete removes it;
    - the close: the three base snapshots and the free bytes of before, `/opt` and the

@@ -40,7 +40,15 @@ The helper:
   length-limited, a config is checked like the applet checks it), since the applet isn't
   trusted;
 - asks polkit for every call, with the caller's unique bus name as the subject (not a PID);
-- runs one operation at a time;
+- runs one operation at a time, and holds a lock on `/run/apsis/job.lock` meanwhile (an
+  exclusive `flock`; the file is root's, 0600, opened `O_NOFOLLOW` and `O_CLOEXEC`, so a
+  symlink at its name is refused and no program the helper starts inherits it). The kernel
+  drops the lock with the process; the file's being there means nothing. The file must be
+  root's and 0600 because `flock` works on a read-only descriptor: a lock file others could
+  open would let any local user hold the lock and block every job and every package
+  operation until a restart. So the `prerm` sets `umask 077` before it makes the file, and
+  the helper refuses a file that isn't root's and sets any other mode to 0600 before it
+  asks for the lock;
 - runs `rsync`, `mount`, `umount`, `lsblk` and `findmnt` with a fixed argv (no shell), a fixed
   `PATH`, a cleared environment and stdin null; a snapshot's rsync runs at idle I/O priority
   and nice 19;
@@ -80,6 +88,24 @@ mode 0644, owned by root, with the previous file kept as `config.toml.bak`. A wr
 if the file changed since the applet read it, or if a newly chosen device isn't connected and a
 plain, unencrypted Linux filesystem. Timeshift's `/etc/timeshift/timeshift.json` is only read,
 once, to import its settings while there is no `config.toml`.
+
+**The .deb's maintainer scripts** run as root, from dpkg. Before a remove, an upgrade or a
+deconfigure, the `prerm` takes the job lock without waiting and, while a job holds it, fails
+with one line (exit 75), so a package operation never stops a snapshot, a delete or a
+restore's preparation part-way; dpkg then leaves the package as it was. It keeps the lock
+until it exits, so no job begins before the helper is stopped. The helper takes the same
+lock from "Restart now" until the next start is armed, and while a cancelled plan's files are
+removed. If a restore is armed, the `prerm` runs `apsis-helper --disarm`, only when
+`/system-update` is Apsis's own link (it points at `/var/lib/apsis/restore`), and looks at
+the link again afterwards, whatever the helper's exit status: still Apsis's, the script
+fails and prints the two commands to run by hand; gone, it goes on. Another tool's link is
+never touched and the helper isn't run for it. `postrm`, on remove and purge, stops the
+disarm timer and removes Apsis's link (the same check), the restore unit, its wants link and
+the drop-in; only purge removes `/etc/apsis` and `/var/lib/apsis`. Each script names its
+paths once, and the tests run copies of the scripts against a temp folder, with a fake
+`systemctl`, `busctl` and helper. Knowingly not covered: the upgrade from 0.4.2 runs
+0.4.2's `prerm`, which doesn't wait; a job begun after the `prerm` has exited, while an
+upgrade unpacks, runs the old binary to its end.
 
 **Stopping a snapshot** sends `SIGTERM` to the rsync process group the helper started (only
 that group, and only while its leader is known not to be reaped, so a reused pid is never

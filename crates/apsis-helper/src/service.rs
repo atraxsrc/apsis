@@ -277,7 +277,10 @@ impl Helper {
     /// plan; polkit `restore` for anyone else. The plan's job ends `done` right before the
     /// reboot. Any refusal or failure removes the plan (the job ends `stopped`) and is the
     /// method's error: `InvalidInput` with [`plan::TOO_OLD`] or [`plan::GONE`], `Failed` with
-    /// `restore refused: <word>`, or the failure's text.
+    /// `restore refused: <word>`, or the failure's text. The plan is taken where it is
+    /// ([`State::take_ready`]) and held, with the job lock on disk, until it ends: `Busy`,
+    /// with the plan left as it was, while another call is ending it or a package script
+    /// holds that lock.
     async fn restart_to_restore(
         &self,
         #[zbus(header)] header: Header<'_>,
@@ -305,10 +308,12 @@ impl Helper {
             if uid != info.starter {
                 authorize(connection, &caller, ACTION_RESTORE, true).await?;
             }
-            // From here the plan is this call's: whatever happens, it ends.
+            // From here the plan is this call's: whatever happens, it ends. Until it does
+            // it stays in its slot, marked, with the job lock on disk: no write and no
+            // package script gets in between here and the link (row 5).
             let ready = self
                 .state
-                .take_ready()
+                .take_ready()?
                 .ok_or_else(|| Error::InvalidInput(plan::GONE.to_owned()))?;
             let mount = Arc::clone(&self.mount);
             let armed = blocking(move || {
@@ -372,7 +377,9 @@ impl Helper {
     /// "Cancel restore" at the ready prompt (PLAN 6b.5, 6b.9): removes the plan (nothing is
     /// armed yet; a finished safety snapshot stays) and the job ends `stopped`. No password
     /// for the uid that prepared the plan; polkit `restore` for anyone else. With no plan:
-    /// `InvalidInput` with [`plan::GONE`].
+    /// `InvalidInput` with [`plan::GONE`]. The plan is taken as "Restart now" takes it, so
+    /// its files go with every write still refused and the job lock on disk held; `Busy` in
+    /// the same two cases.
     async fn cancel_restore(
         &self,
         #[zbus(header)] header: Header<'_>,
@@ -392,7 +399,7 @@ impl Helper {
             }
             let ready = self
                 .state
-                .take_ready()
+                .take_ready()?
                 .ok_or_else(|| Error::InvalidInput(plan::GONE.to_owned()))?;
             remove_plan(ready, "cancelled").await;
             Ok(())
@@ -1032,13 +1039,25 @@ async fn reboot(connection: &Connection) -> apsis_core::Result<()> {
 
 /// Ends a ready plan that isn't going to be restarted with (PLAN 6b.5, 6b.9): its files in
 /// the state folder go (the last `result.json` stays), the journal says `why`, and the job
-/// ends `stopped`, announced before this returns.
+/// ends `stopped`, announced before this returns. `ready` holds the plan in its slot and
+/// the job lock on disk until then, so no write and no package script gets in while the
+/// files go.
 async fn remove_plan(ready: crate::state::Ready, why: &str) {
-    let info = ready.info();
-    let removed = blocking(|| {
-        prepare::clear_leftovers(Path::new(apsis_core::restore::file::DIR)).map_err(Error::Io)
+    remove_plan_with(ready, why, || {
+        prepare::clear_leftovers(Path::new(apsis_core::restore::file::DIR))
     })
     .await;
+}
+
+/// [`remove_plan`], with the removal of the files as `remove` (the tests look around from
+/// inside it).
+async fn remove_plan_with(
+    ready: crate::state::Ready,
+    why: &str,
+    remove: impl FnOnce() -> std::io::Result<()> + Send + 'static,
+) {
+    let info = ready.info();
+    let removed = blocking(|| remove().map_err(Error::Io)).await;
     match removed {
         Ok(()) => log(&format!(
             "restore {:?} for {}: plan removed ({why})",
@@ -1072,8 +1091,13 @@ pub async fn watch_starters(connection: Connection, state: Arc<State>) {
         if !left || args.name().as_str() == BUS_NAME {
             continue;
         }
-        if let Some(ready) = state.starter_left(args.name().as_str()) {
-            remove_plan(ready, "its window left the bus").await;
+        match state.starter_left(args.name().as_str()) {
+            Ok(Some(ready)) => remove_plan(ready, "its window left the bus").await,
+            Ok(None) => {}
+            Err(error) => log(&format!(
+                "the plan's window left the bus, but the plan stays: {}",
+                describe_error(&error)
+            )),
         }
     }
 }
@@ -1295,7 +1319,7 @@ mod tests {
     fn interface_matches_the_shared_names() {
         assert_eq!(Helper::name().as_str(), INTERFACE);
         let mut xml = String::new();
-        Helper::new(State::new().0).introspect_to_writer(&mut xml, 0);
+        Helper::new(Arc::clone(&crate::state::tests::state().0)).introspect_to_writer(&mut xml, 0);
         for method in [
             METHOD_LIST,
             METHOD_CREATE,
@@ -1456,7 +1480,7 @@ mod tests {
         let (root, paths, exe) = lab_with_snapshots("delete-armed");
         arm::arm(&paths, &exe).unwrap();
         let before = tree(&root);
-        let (state, mut changes) = State::new();
+        let (state, mut changes) = crate::state::tests::state();
         let helper = Helper::new(Arc::clone(&state));
         for kind in [JobKind::Delete, JobKind::DeleteMany] {
             let mut asked = false;
@@ -1489,7 +1513,7 @@ mod tests {
     #[tokio::test]
     async fn a_restore_armed_while_the_password_was_asked_for_refuses_the_delete_too() {
         let (root, paths, exe) = lab_with_snapshots("delete-armed-late");
-        let (state, mut changes) = State::new();
+        let (state, mut changes) = crate::state::tests::state();
         let helper = Helper::new(Arc::clone(&state));
         let refused = helper
             .begin_delete(&paths, JobKind::DeleteMany, async {
@@ -1515,7 +1539,7 @@ mod tests {
         for name in ["system-update", "etc/system-update"] {
             let (root, paths, _) = lab_with_snapshots("delete-foreign");
             std::os::unix::fs::symlink("/var/lib/other-tool", root.join(name)).unwrap();
-            let (state, mut changes) = State::new();
+            let (state, mut changes) = crate::state::tests::state();
             let helper = Helper::new(Arc::clone(&state));
             let mut asked = false;
             let running = helper
@@ -1537,7 +1561,7 @@ mod tests {
         let (root, paths, exe) = lab_with_snapshots("delete-no-link");
         arm::arm(&paths, &exe).unwrap();
         std::fs::remove_file(&paths.link).unwrap();
-        let (state, _changes) = State::new();
+        let (state, _changes) = crate::state::tests::state();
         let helper = Helper::new(Arc::clone(&state));
         let running = helper
             .begin_delete(&paths, JobKind::DeleteMany, async { Ok(()) })
@@ -1571,7 +1595,7 @@ mod tests {
         let (root, paths, exe) = lab("restore-armed");
         arm::arm(&paths, &exe).unwrap();
         let before = tree(&root);
-        let (state, mut changes) = State::new();
+        let (state, mut changes) = crate::state::tests::state();
         let helper = Helper::new(Arc::clone(&state));
         let mut asked = false;
         let refused = helper
@@ -1609,7 +1633,7 @@ mod tests {
     #[tokio::test]
     async fn a_restore_armed_while_the_password_was_asked_for_refuses_the_restore_too() {
         let (root, paths, exe) = lab("restore-armed-late");
-        let (state, mut changes) = State::new();
+        let (state, mut changes) = crate::state::tests::state();
         let helper = Helper::new(Arc::clone(&state));
         let refused = helper
             .begin_unless_armed(&paths, JobKind::Restore, restore_armed, async {
@@ -1639,7 +1663,7 @@ mod tests {
             let (root, paths, _) = lab("restore-foreign");
             std::os::unix::fs::symlink("/var/lib/other-tool", root.join(name)).unwrap();
             let before = tree(&root);
-            let (state, mut changes) = State::new();
+            let (state, mut changes) = crate::state::tests::state();
             let helper = Helper::new(Arc::clone(&state));
             let mut asked = false;
             let begun = helper
@@ -1671,7 +1695,7 @@ mod tests {
         let (root, paths, exe) = lab("restore-no-link");
         arm::arm(&paths, &exe).unwrap();
         std::fs::remove_file(&paths.link).unwrap();
-        let (state, _changes) = State::new();
+        let (state, _changes) = crate::state::tests::state();
         let helper = Helper::new(Arc::clone(&state));
         let (uid, running) = helper
             .begin_unless_armed(&paths, JobKind::Restore, restore_armed, async { Ok(7_u32) })
@@ -1696,6 +1720,42 @@ mod tests {
         assert!(matches!(denied, Err(Error::NotAuthorized)));
         assert!(!state.is_running());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Q8 (owner, 2026-10-04): `CancelRestore`, the starter-gone path and a refused
+    /// "Restart now" all remove the plan's files through [`remove_plan`]. While the files
+    /// go, the plan is still in its slot (every write is `Busy`) and the file lock is held
+    /// (a package script is refused); both are free once it ends `stopped`.
+    #[tokio::test]
+    async fn a_plans_files_go_while_the_plan_and_the_file_lock_are_held() {
+        use crate::state::tests::flock_exit;
+        let (state, mut changes) = crate::state::tests::state();
+        let lock = state.lock();
+        let running = state.begin(JobKind::Restore).await.unwrap();
+        state.named("2026-09-25_11-28-00");
+        running.ready(1000, ":1.42");
+        while changes.try_recv().is_ok() {}
+        let ready = state.take_ready().unwrap().expect("the plan");
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let look = {
+            let (seen, state, lock) = (Arc::clone(&seen), Arc::clone(&state), lock.clone());
+            move || {
+                *seen.lock().unwrap() = Some((flock_exit(&lock), state.is_ready()));
+                Ok(())
+            }
+        };
+        remove_plan_with(ready, "cancelled", look).await;
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some((75, true)),
+            "while the files go: the file lock's exit, the plan in its slot"
+        );
+        assert_eq!(flock_exit(&lock), 0, "free once the plan ended");
+        assert!(!state.is_ready());
+        let ended = changes.try_recv().expect("the end is announced").job;
+        assert_eq!((ended.0.as_str(), ended.1.as_str()), ("restore", "stopped"));
+        let running = state.begin(JobKind::Create).await.expect("writes again");
+        running.end(JobState::Done);
     }
 
     #[test]

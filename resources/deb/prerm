@@ -1,14 +1,69 @@
 #!/bin/sh
-# Stop apsis-helper if it is running, so the old binary isn't left running after a remove or
-# while an upgrade replaces it. The bus starts the new one on the next call.
+# Before a remove or an upgrade, and when dpkg deconfigures this package for another one
+# (`failed-upgrade` is the new package's turn after the old prerm failed). In this order:
+#
+# 1. Refuse while an Apsis job runs. The helper holds a lock on $LOCK from a job's start to
+#    its end: a snapshot, a delete, a restore's preparation, a settings save, the arming of a
+#    restore. The lock is taken here without waiting. If a job holds it, the script fails
+#    with one line and dpkg leaves the package as it is. Taken, it's held until this script
+#    exits, so no job can begin before the helper is stopped.
+# 2. Disarm a restore that waits for a restart. Only when $LINK is Apsis's own link (it
+#    points at $STATE): the helper removes the link first, then what the arm wrote. Whatever
+#    the helper's exit status, the link decides: still Apsis's, the script fails with the
+#    commands to run by hand; gone, it goes on. Another tool's link is left alone and the
+#    helper isn't run.
+# 3. Stop apsis-helper if it is running, so the old binary isn't left running after a remove
+#    or while an upgrade replaces it. The bus starts the new one on the next call.
+#
+# The paths are named once, here: the tests run a copy with only these lines changed.
 set -e
 
+LOCK=/run/apsis/job.lock
+LINK=/system-update
+STATE=/var/lib/apsis/restore
+HELPER=/usr/libexec/apsis-helper
+SYSTEMD=/run/systemd/system
+
 case "$1" in
-    remove|upgrade|deconfigure)
-        if [ -d /run/systemd/system ] && systemctl is-active --quiet apsis-helper.service; then
-            systemctl stop apsis-helper.service || true
-        fi
-        ;;
+    remove|upgrade|deconfigure|failed-upgrade) ;;
+    *) exit 0 ;;
 esac
 
+mkdir -p "${LOCK%/*}"
+# The lock file is root's alone: flock works on a read-only descriptor, so a file others
+# could open would let any user hold the lock. The folder is made before, with the usual
+# mode: the backup disk's mount point is in it.
+umask 077
+exec 9>>"$LOCK"
+rc=0; flock -n -E 75 9 || rc=$?
+case "$rc" in
+    0) ;;
+    75) echo "apsis: an Apsis job is running; try again when it has finished" >&2
+        exit 75 ;;
+    *) echo "apsis: couldn't take the job lock $LOCK" >&2
+       exit 1 ;;
+esac
+
+if [ "$(readlink "$LINK" 2>/dev/null)" = "$STATE" ]; then
+    rc=0; "$HELPER" --disarm || rc=$?
+    if [ "$(readlink "$LINK" 2>/dev/null)" = "$STATE" ]; then
+        echo "apsis: a restore is armed and couldn't be disarmed; as root, run:" >&2
+        echo "  rm $LINK" >&2
+        echo "  systemctl stop apsis-disarm.timer" >&2
+        exit 1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        echo "apsis: the restore that was waiting for a restart is cancelled"
+    else
+        echo "apsis: the restore is disarmed, but writing that to disk may have failed;" >&2
+        echo "  check that $LINK is gone after the next restart" >&2
+    fi
+    systemctl stop apsis-disarm.timer >/dev/null 2>&1 || true
+fi
+
+if [ -d "$SYSTEMD" ] && systemctl is-active --quiet apsis-helper.service; then
+    systemctl stop apsis-helper.service || true
+fi
+
+# Descriptor 9 closes when the script exits: the lock was held through the stop.
 exit 0

@@ -92,6 +92,8 @@ link that puts systemd into offline\-update mode) and restarts;
 Esc or closing the window removes the plan (a finished safety snapshot stays).
 A plan left at the prompt for more than 30 minutes is refused as too old.
 If the computer hasn't restarted ten minutes after Restart now, a timer disarms it.
+Removing, reinstalling or upgrading the Apsis package in those minutes disarms it too, and
+apt's output says so.
 .PP
 At the next start the restore runs with the desktop stopped (plymouth shows its progress):
 rsync puts the system files back (the live
@@ -249,6 +251,15 @@ is such a row too; only Delete removes it.
 On the backup disk: the recovery steps with this machine's disk UUIDs and the snapshots' names
 filled in, written while a restore is prepared.
 .TP
+.I /run/apsis/job.lock
+The job lock: the helper holds a lock on it (flock) while a snapshot, a delete, a restore's
+preparation or a settings save runs, and from Restart now until the next start is armed.
+The package's scripts take it too, so removing, reinstalling or upgrading the Apsis package
+is refused while a job runs: apt stops with "apsis: an Apsis job is running; try again when
+it has finished", the package stays as it was and the job goes on.
+At the Ready to restore prompt the package operation goes on and the preparation is gone.
+The file is made again after each restart; its being there means nothing.
+.TP
 .I /var/lib/apsis/restore/
 The restore's state folder (root only): the plan
 .RI ( request.json ),
@@ -274,7 +285,8 @@ Removed on purge.
 .I /etc/systemd/system/pop\-upgrade\-init.service.d/50\-apsis.conf
 .TQ
 .I /system\-update
-Written when a restore is armed and removed when it ends (the drop\-in keeps Pop!_OS's release
+Written when a restore is armed and removed when it ends, when it's disarmed, and when the
+package is removed (the drop\-in keeps Pop!_OS's release
 upgrade from running in the restore's start; the link is what makes the next start an
 offline update).
 A restore that won't end: boot the recovery and remove
@@ -286,7 +298,7 @@ The privileged helper.
 .B apsis\-helper \-\-apply\-restore
 is what the armed unit runs at the next start, and
 .B apsis\-helper \-\-disarm
-what the ten\-minute timer runs; neither is for hand use.
+what the ten\-minute timer and the package's removal script run; neither is for hand use.
 .TP
 .I /usr/share/dbus-1/system-services/io.github.atraxsrc.Apsis.Helper.service
 .TQ
@@ -305,6 +317,10 @@ a delete, a settings save, a restore's preparation) at a time; lists share a rea
 and run at the same time as each other, and a write waits for them (up to 15 seconds) before it
 mounts read\-write.
 While a restore plan waits at its prompt, every write is refused as busy and lists go on.
+A write also holds the job lock
+.RI ( /run/apsis/job.lock ),
+which the package's removal script takes without waiting: a package operation is refused
+while a job runs, and a job is refused as busy while a package operation holds the lock.
 It mounts the backup disk (by UUID, nosuid, nodev) for the length of the call, read\-only
 except for a create or a delete.
 A delete only removes a folder named like a snapshot under

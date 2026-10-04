@@ -2,11 +2,17 @@
 # Tell systemd and the system bus about apsis-helper's unit, D-Bus activation file and bus
 # policy. Nothing is enabled or started: the bus starts the helper on demand. Neither may be
 # running (a chroot, a container, an image build), so a failed reload doesn't fail the install.
+# The abort cases (dpkg's calls after a prerm refused) do nothing and succeed, so the package
+# stays as it was.
+#
+# The path is named once, here: the tests run a copy with only this line changed.
 set -e
+
+SYSTEMD=/run/systemd/system
 
 case "$1" in
     configure)
-        if [ -d /run/systemd/system ]; then
+        if [ -d "$SYSTEMD" ]; then
             systemctl daemon-reload || true
         fi
         busctl call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus \

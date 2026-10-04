@@ -46,9 +46,27 @@ with systemd-boot only.
   purge removes the restore's state folder and anything an unfinished restore left.
 - While a restore plan waits at its prompt, creating, deleting and saving the settings are
   refused as busy in every window, and lists go on.
+- Removing the package (`apt remove`) now also removes what an armed restore wrote (Apsis's
+  own `/system-update` link, the restore unit, its wants link and the drop-in) and stops the
+  disarm timer; the config and `/var/lib/apsis` still go only on purge.
 
 ### Fixed
 
+- Upgrading, reinstalling or removing the package no longer stops a running job part-way
+  (a reinstall during a delete had left a half-removed snapshot). The helper holds a lock on
+  `/run/apsis/job.lock` while a job runs, and the package's `prerm` refuses while it's held:
+  apt stops with `apsis: an Apsis job is running; try again when it has finished`, the
+  package stays as it was and the job goes on. This takes effect once 0.5.0 is the installed
+  version: the upgrade from 0.4.x still runs the old script.
+- A package operation while a restore waits for its restart cancels the restore first
+  (`apsis: the restore that was waiting for a restart is cancelled`). Before, a remove left
+  the restore armed with nothing left to disarm it: the next restart, on any later day,
+  would have restored. If the restore can't be cancelled, apt stops and prints the two
+  commands to run by hand.
+- In the seconds between "Restart now" and the next start being armed, a second restore, a
+  delete, a snapshot or a settings save is now refused as busy; before, it could get in
+  between and take the plan's files or a snapshot away. The same holds while a cancelled
+  plan's files are removed.
 - A delete cut off part-way (power loss, or the helper stopped during a reinstall) no longer
   leaves a half-removed snapshot that Apsis could only warn about: a delete first moves the
   folder into `timeshift/apsis-staging/`, so what's left is a dimmed row that **Delete**

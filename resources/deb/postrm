@@ -1,19 +1,45 @@
 #!/bin/sh
-# The unit, activation file and bus policy are gone: let systemd and the system bus forget
-# them. As in postinst, neither may be running, which isn't an error.
+# After a remove or a purge. An upgrade's postrm does nothing.
 #
-# On purge, Apsis's config goes too: /etc/apsis/ (config.toml and its .bak), written by the
-# helper. So does the restore's state folder (/var/lib/apsis: a plan, the last result, an
-# ESP backup, a helper copy), a leftover restore unit with its wants link, a leftover drop-in
-# for pop-upgrade-init (and its folder when that's empty), the disarm timer if one runs, and
-# /system-update only when it's Apsis's own link (another tool's is left exactly where it
-# is). None of these is a packaged file: the helper writes them while a restore is armed.
-# Snapshots on the backup disk are never touched.
+# On remove and on purge, what a restore armed and nothing took away again goes. None of it
+# is a packaged file: the helper writes it while a restore is armed. The disarm timer is
+# stopped; then $LINK goes, only when it's Apsis's own link (it points at $STATE; another
+# tool's is left exactly where it is); then the restore unit with its wants link and the
+# drop-in for pop-upgrade-init, and their two folders when that leaves them empty. The prerm
+# has disarmed already: this is for what it couldn't see, since the bus can start the helper
+# again between the two scripts.
+#
+# Then systemd and the system bus are told to forget the unit, the activation file and the
+# bus policy. As in postinst, neither may be running, which isn't an error.
+#
+# On purge, Apsis's config goes too: $ETC (config.toml and its .bak), written by the helper.
+# So does $LIB with the restore's state folder (a plan, the last result, an ESP backup, a
+# helper copy). Snapshots on the backup disk are never touched.
+#
+# The paths are named once, here: the tests run a copy with only these lines changed.
 set -e
+
+LINK=/system-update
+STATE=/var/lib/apsis/restore
+SYSTEMD=/run/systemd/system
+UNIT=/etc/systemd/system/apsis-restore.service
+WANTS=/etc/systemd/system/system-update.target.wants/apsis-restore.service
+DROPIN=/etc/systemd/system/pop-upgrade-init.service.d/50-apsis.conf
+ETC=/etc/apsis
+LIB=/var/lib/apsis
 
 case "$1" in
     remove|purge)
-        if [ -d /run/systemd/system ]; then
+        if [ -d "$SYSTEMD" ]; then
+            systemctl stop apsis-disarm.timer >/dev/null 2>&1 || true
+        fi
+        if [ "$(readlink "$LINK" 2>/dev/null)" = "$STATE" ]; then
+            rm -f "$LINK"
+        fi
+        rm -f "$WANTS" "$UNIT" "$DROPIN"
+        rmdir "${WANTS%/*}" 2>/dev/null || true
+        rmdir "${DROPIN%/*}" 2>/dev/null || true
+        if [ -d "$SYSTEMD" ]; then
             systemctl daemon-reload || true
         fi
         busctl call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus \
@@ -23,18 +49,7 @@ esac
 
 case "$1" in
     purge)
-        rm -rf /etc/apsis
-        if [ -d /run/systemd/system ]; then
-            systemctl stop apsis-disarm.timer >/dev/null 2>&1 || true
-        fi
-        if [ "$(readlink /system-update 2>/dev/null)" = /var/lib/apsis/restore ]; then
-            rm -f /system-update
-        fi
-        rm -f /etc/systemd/system/system-update.target.wants/apsis-restore.service
-        rm -f /etc/systemd/system/apsis-restore.service
-        rm -f /etc/systemd/system/pop-upgrade-init.service.d/50-apsis.conf
-        rmdir /etc/systemd/system/pop-upgrade-init.service.d 2>/dev/null || true
-        rm -rf /var/lib/apsis
+        rm -rf "$ETC" "$LIB"
         ;;
 esac
 

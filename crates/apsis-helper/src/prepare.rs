@@ -622,7 +622,7 @@ sent 1,228,900 bytes  received 50 bytes\n";
         let (root, paths, exe) = lab("armed-not-ready");
         arm::arm(&paths, &exe).unwrap();
         let before = tree(&root);
-        let (state, _changes) = State::new();
+        let (state, _changes) = crate::state::tests::state();
         assert!(!state.is_ready() && !state.is_running());
         let running = state
             .begin(apsis_core::job::JobKind::Restore)

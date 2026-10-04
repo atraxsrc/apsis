@@ -13,6 +13,8 @@
 mod apply;
 mod arm;
 mod check;
+#[cfg(test)]
+mod maintainer_scripts;
 mod native;
 mod polkit;
 mod prepare;
@@ -42,8 +44,8 @@ async fn main() -> ExitCode {
         return apply::apply_restore();
     }
     if args.iter().any(|a| a == "--disarm") {
-        // The disarm timer's service (PLAN 6b.5): no D-Bus.
-        return match arm::disarm_from_timer() {
+        // The disarm timer's service (PLAN 6b.5) and the package's prerm (6b.9): no D-Bus.
+        return match arm::disarm_system() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("apsis-helper: disarm: {error}");
@@ -72,7 +74,7 @@ async fn serve() -> zbus::Result<()> {
         Ok(_) => {}
         Err(error) => eprintln!("apsis-helper: couldn't remove leftovers at start: {error}"),
     }
-    let (state, changes) = State::new();
+    let (state, changes) = State::new(state::JOB_LOCK, 0);
     // Only root may own the name (the bus policy says so), so this fails for anyone else.
     let connection = zbus::connection::Builder::system()?
         .serve_at(OBJECT_PATH, Helper::new(Arc::clone(&state)))?
@@ -99,7 +101,6 @@ mod resource_tests {
     const BUS_POLICY: &str =
         include_str!("../../../resources/helper/io.github.atraxsrc.Apsis.Helper.conf");
     const POLKIT: &str = include_str!("../../../resources/helper/io.github.atraxsrc.Apsis.policy");
-    const POSTRM: &str = include_str!("../../../resources/deb/postrm");
 
     fn has_line(file: &str, line: &str) {
         assert!(file.lines().any(|l| l == line), "missing {line:?}");
@@ -144,41 +145,6 @@ mod resource_tests {
             .and_then(|(_, rest)| rest.split_once("</action>"))
             .unwrap_or_else(|| panic!("no action {id}"))
             .0
-    }
-
-    /// `postrm purge` (PLAN 6b.13 step 3 item 10): the restore's state folder, a leftover
-    /// unit with its wants link, a leftover drop-in with its folder when empty, and
-    /// `/system-update` only when it's Apsis's link. Snapshots are never touched.
-    #[test]
-    fn purge_removes_the_restores_leftovers_and_only_apsis_link() {
-        use apsis_core::restore::unit::{DROP_IN_PATH, UNIT_PATH, UNIT_WANTS_LINK};
-        let purge = POSTRM
-            .split_once("purge)")
-            .map(|(_, rest)| rest)
-            .expect("a purge case");
-        for path in [
-            "/var/lib/apsis",
-            UNIT_PATH,
-            UNIT_WANTS_LINK,
-            DROP_IN_PATH,
-            "/etc/systemd/system/pop-upgrade-init.service.d",
-        ] {
-            assert!(purge.contains(path), "purge doesn't name {path}:\n{purge}");
-        }
-        assert!(
-            purge.contains("rmdir"),
-            "the drop-in's folder goes only when empty"
-        );
-        assert!(
-            purge.contains("readlink /system-update"),
-            "the link only when Apsis's"
-        );
-        assert!(
-            purge.contains("= /var/lib/apsis/restore"),
-            "compared with the state folder"
-        );
-        assert!(!POSTRM.contains("timeshift"), "snapshots are never touched");
-        assert!(POSTRM.contains("daemon-reload"));
     }
 
     #[test]

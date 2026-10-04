@@ -5,7 +5,8 @@
 //! the helper copy and `state.json`, `sync`, then `/system-update` last; a disarm removes
 //! the link first. Leftovers without the link arm nothing and are cleaned.
 //! The disarm timer: a transient systemd timer in the current boot that runs
-//! `apsis-helper --disarm` after ten minutes without a restart.
+//! `apsis-helper --disarm` after ten minutes without a restart. The package's `prerm` runs
+//! it too, before a remove or an upgrade.
 
 use std::fs;
 use std::io;
@@ -283,19 +284,24 @@ pub fn stop_disarm_timer_argv() -> [&'static str; 3] {
     ["systemctl", "stop", "apsis-disarm.timer"]
 }
 
-/// `apsis-helper --disarm`, run by the timer: disarms if the arm is Apsis's. No D-Bus.
-pub fn disarm_from_timer() -> io::Result<()> {
+/// `apsis-helper --disarm`, run by the disarm timer and by the package's `prerm`: disarms if
+/// the arm is Apsis's. No D-Bus, and no job lock: the `prerm` holds it while this runs, and
+/// only the arm's files are touched, never the backup disk.
+pub fn disarm_system() -> io::Result<()> {
     let paths = Paths::system();
     let removed = disarm(&paths)?;
-    if removed.is_empty() {
-        eprintln!("apsis-helper: disarm timer: nothing armed");
-    } else {
-        eprintln!(
-            "apsis-helper: disarm timer: no restart in 10 minutes; removed {}",
-            removed.join(", ")
-        );
-    }
+    eprintln!("{}", disarmed_line(&removed));
     Ok(())
+}
+
+/// `--disarm`'s line on stderr, with what it removed. It names no caller: in the journal
+/// the unit says who ran it, on apt's output the `prerm`'s own line follows.
+fn disarmed_line(removed: &[&str]) -> String {
+    if removed.is_empty() {
+        "apsis-helper: disarm: nothing armed".to_owned()
+    } else {
+        format!("apsis-helper: disarm: removed {}", removed.join(", "))
+    }
 }
 
 fn write_file(path: &Path, text: &str) -> io::Result<()> {
@@ -368,6 +374,18 @@ mod tests {
         fs::create_dir_all(exe.parent().unwrap()).unwrap();
         fs::write(&exe, "#!/bin/sh\n").unwrap();
         (root, paths, exe)
+    }
+
+    /// Q3 (owner, 2026-10-04): `--disarm` is run by the disarm timer and by the package's
+    /// `prerm`, so its line names neither. In the journal the unit says who ran it; on
+    /// apt's output the `prerm`'s own line follows.
+    #[test]
+    fn the_disarm_line_names_no_caller() {
+        assert_eq!(disarmed_line(&[]), "apsis-helper: disarm: nothing armed");
+        assert_eq!(
+            disarmed_line(&["/system-update", "the unit", "request.json"]),
+            "apsis-helper: disarm: removed /system-update, the unit, request.json"
+        );
     }
 
     #[test]

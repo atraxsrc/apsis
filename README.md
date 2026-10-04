@@ -114,6 +114,17 @@ saved (a note at the top says what changed: a home folder set to "everything" be
 files. Click Save. File restore is gone in 0.4: anything already in `~/Apsis-restored/`, and
 any `*.apsis-before-*` file next to an original, is yours and can be deleted by hand.
 
+**Upgrading, reinstalling or removing while Apsis is busy.** From 0.5.0 the package waits
+its turn. While a snapshot, a delete, a restore's preparation or a settings save runs, apt
+stops with `apsis: an Apsis job is running; try again when it has finished`: the package
+stays as it was and the job goes on. Run the same command again once the job has finished.
+At the "Ready to restore" prompt the package operation goes on, and the window then says the
+preparation is gone. After "Restart now", while the restore waits for its restart, the
+package operation cancels the restore and says `apsis: the restore that was waiting for a
+restart is cancelled`; the safety snapshot stays, and the restore can be started again
+afterwards. (The installed version's script decides, so the upgrade from 0.4.x doesn't wait
+yet.)
+
 ## Use
 
 1. **Add the applet to the panel:** *COSMIC Settings → Desktop → Panel → Configure panel
@@ -345,6 +356,8 @@ in the snapshot too.
 | can't hold snapshots: it's encrypted or a container | encrypted backup disks aren't supported yet; pick a plain one |
 | No backup disk chosen | Settings → Location |
 | Apsis needs apsis-helper | reinstall the .deb, or `sudo just install` |
+| apt stops with "apsis: an Apsis job is running; try again when it has finished" | a snapshot, a delete, a restore's preparation or a settings save is running: let it finish (or stop it), then run apt again. The package is as it was |
+| apt stops with "apsis: a restore is armed and couldn't be disarmed" | a restore waits for its restart and couldn't be cancelled; run the two commands apt printed, then apt again |
 | the applet doesn't show after installing | log out and back in, or re-add it in *Configure panel applets* |
 | Can't restore this snapshot | the dialog says why and what to do; see "Known limitations of restore" |
 | Not deleted: a restart to restore is waiting | "Restart now" was clicked and the restore waits for the restart; restart the computer, or wait ten minutes for it to time out, then delete |
@@ -366,7 +379,8 @@ sudo just uninstall        # installed from source, run in the source folder
 
 Your snapshots stay on the backup disk. `apt purge` also removes `/var/lib/apsis`, the
 restore's state folder, including the kept recovery pair (`last-restore.filter` and
-`last-restore.note`).
+`last-restore.note`). `apt remove` is refused while a job runs, and cancels a restore that
+waits for its restart (see "Upgrading, reinstalling or removing while Apsis is busy").
 
 ## Development
 

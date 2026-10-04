@@ -178,8 +178,8 @@ files in `resources/helper/` against them.
 | `Job() -> (sssxdx)` | `(kind, state, snapshot, started, percent, eta_seconds)`, idle `("", "", "", 0, -1, -1)`; kinds `create`, `delete`, `delete-many`, `configure`, `restore` (never `list`; a ready restore plan is a running `restore` at 100%); polkit `list`, not interactive |
 | `CheckRestore(s snapshot) -> (bsbbbs)` | (0.5.0) `(ok, refusal, has_home, has_root, old_format, apsis_note)` for the Restore dialog: the first refusal of PLAN 6b.7 as a stable word (`restore::refusal::Refusal::to_wire`, `""` when ok), whether the snapshot holds `/home` and `/root`, the old format, and which Apsis it holds (`current`, `not-installed`, `no-restore:<v>`, `old-settings:<v>`). `snapshot` must be in the fresh list. polkit `list`, not interactive. A read like `List`: shares the read-only mount, never a job, `Busy` while a write runs or waits |
 | `Restore(s snapshot, b restore_home, b safety_snapshot)` | (0.5.0) prepares a full-system restore (PLAN 6b.4): the 6b.7 checks again, the restore's dry run (and a second one for a separate `/home` being restored), the space checks, the safety snapshot (with `/home` when home is restored), `request.json` and `restore.filter` in `/var/lib/apsis/restore/`, the recovery note on the backup disk. polkit `restore`, `auth_admin` every time. Returns once started; a `restore` job, stoppable with `Stop(snapshot)` until ready; `Finished("restore", true, "")` means the plan is ready and the helper refuses writes until `RestartToRestore` or `CancelRestore`. A refusal is `Finished(.., false, "restore refused: <word>")` |
-| `RestartToRestore(s snapshot)` | (0.5.0) "Restart now" for the ready plan (PLAN 6b.5): re-checks its age (30 min), the space on each destination, the ESP's boot files and space, both update-link names and a Pop!_OS upgrade; arms the next boot (unit, wants link, drop-in, helper copy, `state.json`, sync, `/system-update` last), starts the ten-minute disarm timer (`systemd-run`, `Conflicts=shutdown.target`, runs `apsis-helper --disarm`), ends the job `done` and asks logind `Reboot(false)`. No password for the uid that prepared the plan, else polkit `restore`. Any refusal or failure removes the plan: `InvalidInput` ("the preparation is too old" / "the preparation is gone"), `Failed` with `restore refused: <word>`, or the text |
-| `CancelRestore()` | (0.5.0) "Cancel restore" at the ready prompt (PLAN 6b.5): removes the plan's files (the last `result.json` stays; a finished safety snapshot stays), the job ends `stopped`. No password for the uid that prepared the plan, else polkit `restore`. The plan also goes when the connection that prepared it leaves the bus, and a plan found at the helper's start with no `/system-update` link is a leftover and goes. No plan: `InvalidInput` ("the preparation is gone") |
+| `RestartToRestore(s snapshot)` | (0.5.0) "Restart now" for the ready plan (PLAN 6b.5): re-checks its age (30 min), the space on each destination, the ESP's boot files and space, both update-link names and a Pop!_OS upgrade; arms the next boot (unit, wants link, drop-in, helper copy, `state.json`, sync, `/system-update` last), starts the ten-minute disarm timer (`systemd-run`, `Conflicts=shutdown.target`, runs `apsis-helper --disarm`), ends the job `done` and asks logind `Reboot(false)`. No password for the uid that prepared the plan, else polkit `restore`. Any refusal or failure removes the plan: `InvalidInput` ("the preparation is too old" / "the preparation is gone"), `Failed` with `restore refused: <word>`, or the text. The plan is taken where it is: it stays in its slot, marked, with the job lock on disk held, until the link is made (or the plan's files are gone), so in those seconds every write is still `Busy` and a package script is refused. `Busy`, with the plan left as it was, while another call is ending the plan or a package script holds the job lock |
+| `CancelRestore()` | (0.5.0) "Cancel restore" at the ready prompt (PLAN 6b.5): removes the plan's files (the last `result.json` stays; a finished safety snapshot stays), the job ends `stopped`. No password for the uid that prepared the plan, else polkit `restore`. The plan also goes when the connection that prepared it leaves the bus, and a plan found at the helper's start with no `/system-update` link is a leftover and goes. No plan: `InvalidInput` ("the preparation is gone"). The files go with the plan still in its slot and the job lock on disk held, as for `RestartToRestore`; `Busy` in the same two cases |
 | `RestoreResult() -> (sssxss)` | (0.5.0) `(state, snapshot, message, when, home, safety_snapshot)`: `ready` while a plan waits at the prompt, else the last `result.json`'s outcome (`done`, `problems`, `boot-kept`, `boot-broken`, `not-started`, `failed`), its snapshot, message and time (`""` and `0` for none), its `home` (`keep` or `restore`) and its `safety_snapshot` (`""` for none), else `""`. polkit `list`, not interactive; a read of one file, never a job |
 | `ReadConfig() -> (s(sbbas)sas)` | `(config.toml text or empty, the config in effect, lsblk JSON, notes)`; notes only while converted or imported; polkit `list`, not interactive |
 | `WriteConfig(s expected, (sbbas) config) -> s` | writes `/etc/apsis/config.toml` if it still reads `expected` (empty: none yet); polkit `configure`, interactive; returns once done |
@@ -202,9 +202,11 @@ Each call, in order:
 3. polkit `CheckAuthorization` with subject `system-bus-name` = the caller's unique bus name (not
    a PID, so a reused PID can't inherit an answer); `AllowUserInteraction` for everything but
    `list`. No answer from polkit counts as a no.
-4. A write takes the one write lock; a second write gets `Busy`, never waits in a queue. Readers
-   already in are waited for, up to 15 s (a list is a second or two), then the write is refused
-   `Busy`. Every use of the backup mount point goes through the lock or the readers' share.
+4. A write takes the one write lock; a second write gets `Busy`, never waits in a queue. Then
+   it takes the job lock on disk, without waiting (below): held by a package script, the write
+   is `Busy` and nothing is announced. Readers already in are waited for, up to 15 s (a list
+   is a second or two), then the write is refused `Busy`. Every use of the backup mount point
+   goes through the lock or the readers' share.
 5. Tools run with a fixed argv, found on a fixed `PATH`, with a cleared environment
    (`HOME=/root`, `USER`/`LOGNAME=root`, `LC_ALL=C.UTF-8`) and stdin null.
 6. The backup device from the config is mounted at `/run/apsis/backup` by UUID:
@@ -214,7 +216,7 @@ Each call, in order:
    filesystem are refused.
 7. Create and delete return as soon as they start. The job (kind, snapshot name, progress,
    state) is kept beside the lock for `Job` and announced with `JobChanged`. When it ends, the
-   lock is released **first**, then the end is announced, then `Finished` is sent to the
+   lock is released **first** (the one on disk with it), then the end is announced, then `Finished` is sent to the
    caller: the refresh either one sets off is never refused by the job it refreshes for (the
    rule the restore builds on). `Finished` waits until the end is on the bus (the announcing
    task says so; 2 s at most), so the caller, a listener too, sees its job end before it
@@ -226,6 +228,37 @@ Each call, in order:
 Long operations don't depend on any D-Bus call timeout: the only long wait inside a method
 call is the password dialog, and zbus sets no call timeout by default. The applet waits for
 `Finished`, or for the helper to leave the bus without sending one, which it reports as an error.
+
+**The job lock on disk** (0.5.0; PLAN 6b.9; `state.rs`, `resources/deb/prerm`).
+`/run/apsis/job.lock`, made by the helper (root, 0600; `/run` is tmpfs, so a restart clears
+it; nobody removes it and its being there means nothing). The helper holds an exclusive
+`flock` on it, taken without waiting, for the length of every write (`State::begin` to the
+job's end) and while a ready plan is being ended (`State::take_ready` to `Ready::end`: from
+"Restart now" to the link, and while a cancelled plan's or a gone window's plan's files are
+removed). Reads take none, and a plan waiting at the prompt holds none. The file is opened
+`O_NOFOLLOW` (a symlink at its name refuses the job, `Busy`, with a line in the journal) and
+`O_CLOEXEC` (no child inherits it, so the lock dies with the helper); after the lock is
+taken the open file must still be the one at the path, else it's opened once more. It's
+unlocked explicitly at the end, not only closed.
+
+The .deb's `prerm` (`remove`, `upgrade`, `deconfigure`, and the new package's
+`failed-upgrade`) takes the same lock with `flock -n -E 75` and keeps it until it exits:
+1. held by a job: one line, `apsis: an Apsis job is running; try again when it has
+   finished`, exit 75, nothing else done. dpkg then runs `postinst abort-*`, which does
+   nothing and succeeds, so the package stays installed and configured;
+2. `/system-update` is Apsis's link: `apsis-helper --disarm` (no lock of its own), then the
+   link is read again and decides, whatever the exit status. Still Apsis's: exit 1 with the
+   two commands to run by hand, the timer and the helper left running. Gone: `apsis: the
+   restore that was waiting for a restart is cancelled` (or, after a non-zero exit, a
+   warning that the removal may not be on disk yet), and the disarm timer is stopped;
+3. the helper is stopped, with the lock still held.
+
+`postrm` on `remove` and `purge` stops the disarm timer, removes Apsis's link (the same
+check), the unit, its wants link and the drop-in, and their two folders when empty, then
+reloads systemd and the bus; `purge` also removes `/etc/apsis` and `/var/lib/apsis`. The
+scripts name each path once, as a variable at the top; the helper's tests
+(`maintainer_scripts.rs`) compare those with the helper's constants and run copies of the
+scripts against a temp folder.
 
 The helper exits after 60 s with no call open and nothing running. It never exits while an
 operation runs or a call (including one waiting for the password dialog) is open, and it waits
@@ -254,7 +287,8 @@ until each `Finished` is sent. The next call starts it again.
 - `/usr/share/polkit-1/actions/io.github.atraxsrc.Apsis.policy` - the six actions
 
 Made at run time: `/etc/apsis/config.toml` (and `.bak`), by the helper; the .deb's postrm
-removes `/etc/apsis/` on purge.
+removes `/etc/apsis/` on purge. And `/run/apsis/` (tmpfs): the backup disk's mount point
+`backup/` and the job lock `job.lock`.
 
 **The restore's files** (0.5.0; PLAN 6b.5, 6b.6, 6b.9), all made by the helper, none packaged:
 
@@ -267,7 +301,8 @@ removes `/etc/apsis/` on purge.
   after login; kept until the next apply or purge), and while armed `apsis-helper` (the copy
   the unit runs). The texts are versioned (`version: 1`) and refused whole when invalid
   (`apsis_core::restore::{plan, state, file}`).
-- Written on arm, removed when the restore ends or is disarmed, and by `postrm purge`:
+- Written on arm, removed when the restore ends or is disarmed (by the timer, or by the
+  .deb's `prerm`), and by `postrm` on remove and purge:
   `/etc/systemd/system/apsis-restore.service`, its link in
   `system-update.target.wants/`, `/etc/systemd/system/pop-upgrade-init.service.d/50-apsis.conf`
   (keeps Pop!_OS's release upgrade from running in the restore's boot), and last
@@ -277,7 +312,7 @@ removes `/etc/apsis/` on purge.
   UUIDs filled in), written while preparing; the safety snapshot is an ordinary snapshot.
 - Transient, this boot only: `apsis-disarm.timer` and `.service` (`systemd-run`,
   `Conflicts=shutdown.target`), which disarm ten minutes after "Restart now" if no restart
-  followed.
+  followed. `postrm` stops the timer on remove and purge.
 
 The activation file and unit come from `resources/helper/*.in` with `@libexecdir@` filled in.
 Afterwards `just install` runs `systemctl daemon-reload` and the bus's `ReloadConfig` (dbus-broker
