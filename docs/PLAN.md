@@ -1657,24 +1657,29 @@ to 9"). Until it is built, the steps above are what the README and the note say.
 - **The first sentence above is wrong for these steps themselves**: the restore never
   touches the recovery partition or the `Pop_OS-oldkern` entry, but the by-hand lines
   rebuild both initrds and rewrite the previous pair on the ESP. The README and the note
-  say that; `update-initramfs -u -k all` stays, as drilled.
+  say that; `update-initramfs -u -k all` stays, as drilled. **Built (step 8) for the note;
+  the README and this section's first sentence in step 9.**
 - **The note carries two complete, labelled commands**, "restore the same snapshot again"
   and "go back to the safety snapshot", each with its own flags (a safety snapshot is
   always the new format). With no safety snapshot it says so in one line. It has one
-  caveat line about the kernel limit. Nobody has to edit a line.
+  caveat line about the kernel limit. Nobody has to edit a line. **Built (step 8).**
 - **Both commands and the README name `last-restore.filter`** (6b.5), not
   `restore.filter`. Without that file rsync exits 11 before it copies or deletes anything,
-  and the README says so.
+  and the README says so. **Built (step 8) for the note; the README in step 9.**
 - **The note is written atomically** on the backup disk, and the arm keeps its text as
   `last-restore.note` in the state folder, readable after the first mount line. The note
   on the backup disk is written at every preparation, so it carries one line saying which
-  to trust: the pair in the state folder, which is the last arm's.
+  to trust: the pair in the state folder, which is the last arm's. **Built (step 8).**
 - **The README also gains** what check 8 had to supply: the UUIDs from `lsblk -f`; what to
   do if the backup disk is mounted already; that the recovery opens an installer window
   whose install choices are a reinstall; that a failing line means stop; the two compare
   lines that show the ESP's current pair is what `/boot` links to; that no ESP backup is
   made by hand; that `update-initramfs` takes about two minutes; the panel's restart with
   nothing unmounted; and that `result.json` still names the earlier restore afterwards.
+- **Knowingly left** (owner, 2026-10-04): after restore 1 runs, a restore 2 that is armed
+  and then disarmed replaces the kept pair and `RECOVER.txt`. The note then names restore
+  2's snapshot and its safety snapshot. Restore 1's safety snapshot stays on the disk as a
+  list row with its comment, but the note no longer names it.
 
 ### 6b.12 Tests
 

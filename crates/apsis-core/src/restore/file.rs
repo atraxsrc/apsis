@@ -62,8 +62,24 @@ impl FileError {
 /// renamed over it, then the folder flushed so the rename survives a power cut. A reader sees
 /// the old file or the new one, never a part.
 pub(super) fn save(dir: &Path, name: &str, text: &str) -> Result<(), FileError> {
+    save_with(dir, name, text, MODE, write_all)
+}
+
+/// Mode for a file anyone may read: the recovery note on the backup disk.
+pub(super) const READABLE: u32 = 0o644;
+
+/// [`save`] with the file's `mode` and the call that writes the bytes into the temporary
+/// file (a test gives one that fails midway). Whatever fails, the temporary file is removed
+/// and `dir/name` is as it was.
+pub(super) fn save_with(
+    dir: &Path,
+    name: &str,
+    text: &str,
+    mode: u32,
+    write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
+) -> Result<(), FileError> {
     let temp = temporary(dir, name);
-    let written = stage(&temp, text.as_bytes()).and_then(|()| {
+    let written = stage(&temp, text.as_bytes(), mode, write).and_then(|()| {
         fs::rename(&temp, dir.join(name))?;
         File::open(dir)?.sync_all()
     });
@@ -73,22 +89,32 @@ pub(super) fn save(dir: &Path, name: &str, text: &str) -> Result<(), FileError> 
     Ok(written?)
 }
 
+/// The real write of [`save_with`].
+pub(super) fn write_all(file: &mut File, bytes: &[u8]) -> io::Result<()> {
+    file.write_all(bytes)
+}
+
 /// The temporary name `dir/name` is written under.
 fn temporary(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{name}.apsis-tmp"))
 }
 
-/// Writes `bytes` to the new file `temp`, for its owner only, and flushes it. One left over
-/// from a crash goes first: it's never ours to keep.
-fn stage(temp: &Path, bytes: &[u8]) -> io::Result<()> {
+/// Writes `bytes` to the new file `temp` with `mode` (through `write`) and flushes it. One
+/// left over from a crash goes first: it's never ours to keep.
+fn stage(
+    temp: &Path,
+    bytes: &[u8],
+    mode: u32,
+    write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
+) -> io::Result<()> {
     match fs::remove_file(temp) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
         _ => {}
     }
     let mut file = create_new(temp)?;
     // `mode` is masked by the umask on create; set it exactly.
-    file.set_permissions(fs::Permissions::from_mode(MODE))?;
-    file.write_all(bytes)?;
+    file.set_permissions(fs::Permissions::from_mode(mode))?;
+    write(&mut file, bytes)?;
     file.sync_all()
 }
 
@@ -117,7 +143,7 @@ pub fn copy_all(dir: &Path, pairs: &[(&str, &str)]) -> Result<(), FileError> {
         }
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
-        Ok(stage(&temporary(dir, to), &bytes)?)
+        Ok(stage(&temporary(dir, to), &bytes, MODE, write_all)?)
     });
     let copied = staged.and_then(|()| {
         for (_, to) in pairs {

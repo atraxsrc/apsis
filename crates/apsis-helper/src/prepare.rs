@@ -343,7 +343,9 @@ fn prepare_in(
     };
     stopped()?;
 
-    // The recovery note, beside the filter and on the backup disk, then the plan.
+    // The recovery note, beside the filter and on the backup disk, then the plan. A note
+    // that can't be written fails the preparation; the earlier note on the backup disk
+    // stays whole.
     let esp_uuid = mount_uuid(&DirectRunner, "/boot/efi")?;
     let note = recover::text(
         &live.root_uuid,
@@ -351,9 +353,9 @@ fn prepare_in(
         &backup_uuid,
         &request.snapshot,
         dialog.old_format,
+        safety_snapshot.as_deref(),
     );
-    recover::save(dir, &note).map_err(file_error)?;
-    fs::write(repo.join(TIMESHIFT_DIR).join(recover::FILE), note)?;
+    recover::write(dir, &repo.join(TIMESHIFT_DIR), &note).map_err(file_error)?;
     let prepared_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
