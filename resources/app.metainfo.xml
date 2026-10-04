@@ -79,6 +79,19 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.5.0" date="2026-10-04">
+      <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.5.0</url>
+      <description>
+        <p>Restoring the whole system to a snapshot, at the next start. Experimental; Pop!_OS 24.04 with systemd-boot only.</p>
+        <ul>
+          <li>Restore checks that the snapshot fits this computer, takes a safety snapshot first (on by default) and asks once more at "Ready to restore"</li>
+          <li>The restore runs at the next start with the desktop stopped, and keeps the old boot files if the refresh or the check fails</li>
+          <li>A recovery note with this machine's UUIDs is written on the backup disk</li>
+          <li>Upgrading, reinstalling or removing the package is refused while a job runs (not when upgrading from 0.4.x: the old package's script doesn't wait)</li>
+          <li>A delete cut off part-way leaves a dimmed row that Delete removes</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.4.2" date="2026-10-01">
       <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.4.2</url>
       <description>

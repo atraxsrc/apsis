@@ -1,3 +1,17 @@
+apsis (0.5.0-1) noble; urgency=medium
+
+  * New upstream release, see CHANGELOG.md: restoring the whole system to a
+    snapshot, at the next start (experimental; Pop!_OS 24.04 with
+    systemd-boot only), with a safety snapshot first (on by default) and a
+    recovery note on the backup disk. The helper's D-Bus interface is now
+    Helper3, with a sixth polkit action for the restore. Upgrading,
+    reinstalling or removing the package is refused while a job runs (not
+    when upgrading from 0.4.x, whose old script doesn't wait), and cancels a
+    restore that waits for its restart. A delete cut off part-way leaves a
+    dimmed row that Delete removes.
+
+ -- atraxsrc <92285717+atraxsrc@users.noreply.github.com>  Sun, 04 Oct 2026 18:04:31 +1100
+
 apsis (0.4.2-1) noble; urgency=medium
 
   * New upstream release, see CHANGELOG.md: deleting several snapshots is one
