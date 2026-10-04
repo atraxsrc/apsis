@@ -1169,6 +1169,22 @@ fn a_file_that_cant_be_read_exits_23_and_ends_with_problems() {
     let tail = copied(&output).tail;
     assert!(tail.contains("Permission denied (13)"), "{tail}");
     assert!(tail.contains("(code 23)"), "{tail}");
+    // What the journal gets, one line each (item 9): the file rsync couldn't read, by name
+    // and with the reason, then rsync's closing line. No empty line among them.
+    let copied = copied(&output);
+    let lines: Vec<&str> = copied.error_lines().collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines[0].starts_with("rsync: [sender] send_files failed to open ")
+            && lines[0].contains("usr/bin/tool")
+            && lines[0].ends_with(": Permission denied (13)"),
+        "{lines:?}"
+    );
+    assert!(
+        lines[1].starts_with("rsync error: some files/attrs were not transferred")
+            && lines[1].contains("(code 23)"),
+        "{lines:?}"
+    );
     // The file stays as it was; everything else is restored.
     assert_eq!(read(&lab.live, "usr/bin/tool"), "tool 2.0, updated since\n");
     assert_eq!(read(&lab.live, "etc/hostname"), "snapshot\n");

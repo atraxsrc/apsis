@@ -4,7 +4,7 @@
 //! refresh, the check after it, and putting them back when the check fails.
 //!
 //! kernelstub boots the kernel and initrd from copies on the ESP. After the copy, the boot
-//! refresh (`update-initramfs`, `kernelstub`) rewrites them for the restored kernel. Before
+//! refresh (kernelstub alone; no initrd is rebuilt) rewrites them for the restored kernel. Before
 //! that the files of [`SET`] are copied to `esp-backup/` in the state folder, on `/` and
 //! protected from the restore. If the refreshed ESP doesn't check out, they're put back, and the ESP
 //! boots the kernel it booted before, whose `/boot` files and modules the filter's rule 10

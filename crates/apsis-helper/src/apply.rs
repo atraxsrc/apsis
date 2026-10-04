@@ -807,6 +807,8 @@ mod tests {
             "only the end: {}",
             copied.tail
         );
+        // What core says line by line after a plain 23: these twenty.
+        assert_eq!(copied.error_lines().count(), STDERR_TAIL_LINES);
         let calls = runner.tools.calls();
         let argv = &calls[0];
         assert_eq!(argv[0], "rsync");

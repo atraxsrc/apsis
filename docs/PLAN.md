@@ -1478,7 +1478,7 @@ the same:
   lines of rsync's standard error to the journal, one line each (`Runner::say`, which in
   the real runner is the journal only), and the window gets a line of its own for
   `problems`. Shown by a unit test and the real-rsync test only: as root on apsis-test a
-  plain 23 needs a real I/O error.
+  plain 23 needs a real I/O error. **Built (item 9).**
 - the snapshot's folder is missing altogether: nothing is copied or deleted, and there's no
   such line. rsync can't tell this from the first case, so **the apply checks the snapshot
   itself right before every copy** (`apply::check_snapshot`, pure): its `localhost/` is a

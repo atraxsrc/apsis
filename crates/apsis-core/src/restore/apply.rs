@@ -128,6 +128,13 @@ impl Copied {
         }
     }
 
+    /// rsync's last error lines, without the empty ones: what the journal gets, one line
+    /// each, after a plain exit 23 (check 6, 2026-10-03). The helper has cut them to its
+    /// last 20.
+    pub fn error_lines(&self) -> impl Iterator<Item = &str> {
+        self.tail.lines().filter(|line| !line.trim().is_empty())
+    }
+
     /// The copy's last lines, and that the system may be mixed if deletions were skipped.
     fn why(&self) -> String {
         if self.deletions_skipped {
@@ -172,11 +179,13 @@ pub trait Runner {
     /// As [`esp::back_up`]. The apply then leaves the boot files alone.
     fn back_up_esp(&mut self, plan: &Plan) -> Result<Manifest, EspError>;
 
-    /// Step 5: `update-initramfs -u -k all`, then `kernelstub --verbose`.
+    /// Step 5: kernelstub alone (`kernelstub --verbose --preserve-live-mode`), told the
+    /// kernel and initrd that the restored `/boot/vmlinuz` and `/boot/initrd.img` link to.
+    /// No initrd is rebuilt: the snapshot's are used as they are.
     ///
     /// # Errors
     ///
-    /// The command that didn't exit 0, and its last lines.
+    /// That kernelstub didn't exit 0, and its last lines.
     fn refresh_boot(&mut self) -> Result<(), String>;
 
     /// Step 6, "boot files failed": [`esp::put_back`].
@@ -205,8 +214,9 @@ pub trait Runner {
     /// (`systemd.offline-updates(7)`).
     fn remove_link(&mut self) -> Result<(), String>;
 
-    /// Removes the rest of the arm: the unit, its wants link and the helper copy. Only
-    /// called once Apsis's link is gone, or when the link was never Apsis's.
+    /// Removes the rest of the arm: the unit, its wants link, the drop-in (and its folder
+    /// once that's empty), the helper copy and `state.json`. Only called once Apsis's link
+    /// is gone, or when the link was never Apsis's.
     ///
     /// # Errors
     ///
@@ -216,7 +226,8 @@ pub trait Runner {
     /// The clock, in Unix seconds, for the result's time. Never compared with anything.
     fn now(&mut self) -> i64;
 
-    /// One line for the journal, the console and the boot screen.
+    /// One line for the journal. Nothing of it reaches the boot screen: the real runner
+    /// writes there itself, its start line and the copy's progress (check 1, 2026-10-02).
     fn say(&mut self, line: &str);
 
     /// Restarts the computer. Called once, last, by [`apply`] alone: with the link gone
@@ -441,7 +452,14 @@ fn run(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
             CopyEnd::Ended { problems: false } => Ok(false),
             CopyEnd::Ended { problems: true } => {
                 match check_snapshot(&plan, &runner.find_snapshot(&plan)) {
-                    Ok(()) => Ok(true),
+                    Ok(()) => {
+                        // Which files, in rsync's own words: the result names the log
+                        // only. Here alone: a copy that broke has them in its message.
+                        for line in copied.error_lines() {
+                            runner.say(&format!("rsync stderr: {line}"));
+                        }
+                        Ok(true)
+                    }
                     Err(reason) => Err(format!(
                         "{}; after the copy, {reason}: the disk went away during the copy, \
                          so the system may be a mix of the snapshot and what was there before",
@@ -1004,6 +1022,8 @@ mod tests {
         disk_leaves_in_copy: bool,
         /// The exit codes of the copies to come; exit 0 when it's empty.
         exits: VecDeque<Option<i32>>,
+        /// rsync's last error lines in every copy; `None`: one line naming the exit code.
+        tail: Option<String>,
         refresh: Refresh,
         fail_esp_backup: bool,
         break_put_back: bool,
@@ -1037,6 +1057,7 @@ mod tests {
                 deletions_skipped: false,
                 disk_leaves_in_copy: false,
                 exits: VecDeque::new(),
+                tail: None,
                 refresh: Refresh::Works,
                 fail_esp_backup: false,
                 break_put_back: false,
@@ -1128,7 +1149,10 @@ mod tests {
                 }
                 Copied {
                     exit,
-                    tail: format!("rsync error: code {exit:?}"),
+                    tail: fake
+                        .tail
+                        .clone()
+                        .unwrap_or_else(|| format!("rsync error: code {exit:?}")),
                     deletions_skipped: fake.deletions_skipped && exit == Some(23),
                 }
             })
@@ -2085,6 +2109,137 @@ mod tests {
         fake.exits = [Some(23)].into();
         assert_eq!(boot(&mut fake), End::Finished(Outcome::Problems));
         assert_eq!(fake.count_of("find_snapshot"), 2);
+    }
+
+    /// rsync's own lines among what was said, without their `rsync stderr: ` in front.
+    fn rsync_lines<'a>(fake: &'a Fake<'_>) -> Vec<&'a str> {
+        fake.said
+            .iter()
+            .filter_map(|line| line.strip_prefix("rsync stderr: "))
+            .collect()
+    }
+
+    /// Twenty lines as rsync writes them for files it couldn't write, its summary last.
+    fn twenty_errors() -> Vec<String> {
+        (1..=19)
+            .map(|n| {
+                format!(
+                    "rsync: [receiver] mkstemp \"/usr/lib/.file{n}.Xy12Ab\" failed: Read-only \
+                     file system (30)"
+                )
+            })
+            .chain(std::iter::once(
+                "rsync error: some files/attrs were not transferred (see previous errors) \
+                 (code 23) at main.c(1338) [sender=3.2.7]"
+                    .to_owned(),
+            ))
+            .collect()
+    }
+
+    /// Item 9 (check 6, 2026-10-03): a plain 23 with the snapshot still there says rsync's
+    /// last error lines, one line each and in order, after the copy's end and before the
+    /// boot files. The result's message stays the one that names the log.
+    #[test]
+    fn a_plain_exit_23_says_rsyncs_last_errors_one_line_each() {
+        let lab = armed("apply-23-tail");
+        let mut fake = Fake::new(&lab);
+        let errors = twenty_errors();
+        fake.tail = Some(errors.join("\n"));
+        fake.exits = [Some(23)].into();
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::Problems));
+        assert_eq!(rsync_lines(&fake), errors);
+        let at = |start: &str| {
+            fake.said
+                .iter()
+                .position(|line| line.starts_with(start))
+                .unwrap_or_else(|| panic!("{start}: {:?}", fake.said))
+        };
+        let first = at("rsync stderr: ");
+        assert_eq!(fake.said[first - 1], "the copy ended: rsync exited 23");
+        assert_eq!(first + errors.len(), at("refreshing the boot files"));
+        assert_eq!(
+            report(&lab).message,
+            "some files couldn't be written or deleted; see /var/lib/apsis/restore/rsync-log"
+        );
+        // Empty lines aren't said.
+        let lab = armed("apply-23-tail-gaps");
+        let mut fake = Fake::new(&lab);
+        fake.tail = Some("one\n\n   \ntwo\n".to_owned());
+        fake.exits = [Some(23)].into();
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::Problems));
+        assert_eq!(rsync_lines(&fake), ["one", "two"]);
+    }
+
+    /// Only there: nothing of rsync's is said line by line after exit 0 or 24 (whatever it
+    /// wrote to its standard error), after any other exit or none (the copy broke, and the
+    /// lines are in that message), after a 23 with the deletions skipped, or after a 23
+    /// with the snapshot gone.
+    #[test]
+    fn rsyncs_errors_are_said_line_by_line_for_a_plain_23_only() {
+        for (name, exit, skipped, leaves, end) in [
+            ("0", Some(0), false, false, End::Finished(Outcome::Done)),
+            ("24", Some(24), false, false, End::Finished(Outcome::Done)),
+            ("1", Some(1), false, false, End::Retry { attempt: 2 }),
+            ("11", Some(11), false, false, End::Retry { attempt: 2 }),
+            ("30", Some(30), false, false, End::Retry { attempt: 2 }),
+            ("none", None, false, false, End::Retry { attempt: 2 }),
+            (
+                "23-skipped",
+                Some(23),
+                true,
+                false,
+                End::Retry { attempt: 2 },
+            ),
+            ("23-gone", Some(23), false, true, End::Retry { attempt: 2 }),
+        ] {
+            let lab = armed(&format!("apply-tail-not-{name}"));
+            let mut fake = Fake::new(&lab);
+            fake.tail = Some(twenty_errors().join("\n"));
+            fake.deletions_skipped = skipped;
+            fake.disk_leaves_in_copy = leaves;
+            fake.exits = [exit].into();
+            assert_eq!(boot(&mut fake), end, "{name}");
+            assert_eq!(rsync_lines(&fake), [""; 0], "{name}: {:?}", fake.said);
+        }
+    }
+
+    /// The lines are said after the copy is on disk and before the step is saved. A power
+    /// cut right after the last of them finds the state still at the copy: the next boot
+    /// copies again, as after any cut there, and says that copy's lines.
+    #[test]
+    fn a_power_cut_after_rsyncs_lines_copies_again_and_says_them_again() {
+        let setup = |fake: &mut Fake<'_>| {
+            fake.tail = Some("one\ntwo".to_owned());
+            fake.exits = [Some(23), Some(23)].into();
+        };
+        // The look at the snapshot after the copy is the second one; the two lines follow.
+        let probe = armed("apply-23-tail-cut-probe");
+        let mut fake = Fake::new(&probe);
+        setup(&mut fake);
+        boot(&mut fake);
+        let looked = fake
+            .calls
+            .iter()
+            .enumerate()
+            .filter(|(_, call)| **call == "find_snapshot")
+            .nth(1)
+            .unwrap()
+            .0;
+        assert_eq!(fake.calls[looked + 1..=looked + 2], ["say", "say"]);
+
+        let lab = armed("apply-23-tail-cut");
+        let mut fake = Fake::new(&lab);
+        setup(&mut fake);
+        assert_eq!(boot_cut(&mut fake, Cut::After(looked + 2)), None);
+        assert_eq!(rsync_lines(&fake), ["one", "two"]);
+        assert_eq!(
+            State::load(&lab.state).unwrap(),
+            state(1, Step::Copy, false)
+        );
+        assert_eq!(fake.count_of("back_up_esp"), 0);
+        assert_eq!(boot(&mut fake), End::Finished(Outcome::Problems));
+        assert_eq!(fake.count_of("copy"), 2);
+        assert_eq!(rsync_lines(&fake), ["one", "two", "one", "two"]);
     }
 
     /// The next attempt can end well: the disk was back.
