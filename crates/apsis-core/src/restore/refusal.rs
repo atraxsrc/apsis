@@ -43,6 +43,13 @@ pub enum Refusal {
     /// `/system-update` or `/etc/system-update` exists already: another update is pending
     /// and waits for a restart ([`check_arming`]).
     PendingUpdate,
+    /// `/system-update` is Apsis's own link: a restore is armed and waits for the restart.
+    /// The dialog's [`check`] says so, read-only, and the helper's preparation refuses with
+    /// it before it touches anything, so the armed plan's files stay as they are (the
+    /// armed-state gap, 2026-10-04). Another tool's link at either name is
+    /// [`Refusal::PendingUpdate`] in both places. Never at apply, where the link is the
+    /// restore's own.
+    RestoreArmed,
     /// A Pop!_OS release upgrade is in progress or half done: one of [`POP_UPGRADE_NAMES`]
     /// exists ([`check_pending`]). Checked in the dialog, when preparing and before arming,
     /// not at apply (PLAN 6b.6, "pop-upgrade-init").
@@ -91,6 +98,7 @@ impl Refusal {
             Self::Unreadable(why) => format!("unreadable:{}", why.word()),
             Self::KernelIncomplete => "kernel-incomplete".to_owned(),
             Self::PendingUpdate => "pending-update".to_owned(),
+            Self::RestoreArmed => "restore-armed".to_owned(),
             Self::PopUpgradePending => "pop-upgrade-pending".to_owned(),
             Self::CrypttabDiffers => "crypttab-differs".to_owned(),
             Self::BackupSpace { needs, free } => format!("backup-space:{needs}:{free}"),
@@ -123,6 +131,7 @@ impl Refusal {
             ("unreadable", why) => Unreadable::from_word(why).map(Self::Unreadable),
             ("kernel-incomplete", "") => Some(Self::KernelIncomplete),
             ("pending-update", "") => Some(Self::PendingUpdate),
+            ("restore-armed", "") => Some(Self::RestoreArmed),
             ("pop-upgrade-pending", "") => Some(Self::PopUpgradePending),
             ("crypttab-differs", "") => Some(Self::CrypttabDiffers),
             ("backup-space", _) => space(|needs, free| Self::BackupSpace { needs, free }),
@@ -188,6 +197,10 @@ pub struct System<'a> {
     pub esp_folders: &'a [String],
     /// `/system-update` or `/etc/system-update` exists (not followed).
     pub pending_update: bool,
+    /// `/system-update` is Apsis's own link (it points at the state folder): a restore is
+    /// armed and waits for the restart. Never set at apply, where the link is the restore's
+    /// own.
+    pub restore_armed: bool,
 }
 
 /// The snapshot, as found in its folder on the backup disk.
@@ -280,6 +293,9 @@ pub fn check(system: &System<'_>, snapshot: &Snapshot<'_>) -> Result<(), Refusal
     let hook_has_flag = snapshot.hook.is_some_and(|hook| hook.contains(HOOK_FLAG));
     if !(kernel_is_whole(snapshot) && hook_has_flag && snapshot.has_kernelstub) {
         return Err(Refusal::KernelIncomplete);
+    }
+    if system.restore_armed {
+        return Err(Refusal::RestoreArmed);
     }
     if system.pending_update {
         return Err(Refusal::PendingUpdate);
@@ -451,6 +467,7 @@ mod tests {
             Refusal::Unreadable(Unreadable::NoExcludeList),
             Refusal::KernelIncomplete,
             Refusal::PendingUpdate,
+            Refusal::RestoreArmed,
             Refusal::PopUpgradePending,
             Refusal::CrypttabDiffers,
             Refusal::BackupSpace {
@@ -480,6 +497,7 @@ mod tests {
             assert_eq!(Refusal::from_wire(&word), Some(refusal), "{word}");
         }
         assert_eq!(Refusal::NotUefi.to_wire(), "not-uefi");
+        assert_eq!(Refusal::RestoreArmed.to_wire(), "restore-armed");
         assert_eq!(
             Refusal::SystemSpace { needs: 5, free: 0 }.to_wire(),
             "system-space:5:0"
@@ -605,6 +623,7 @@ mod tests {
                 root_uuid: &self.root_uuid,
                 esp_folders: &self.esp_folders,
                 pending_update: false,
+                restore_armed: false,
             };
             (self.system)(&mut system);
             let mut snapshot = Snapshot {
@@ -997,6 +1016,29 @@ mod tests {
             ..Case::good()
         };
         assert_eq!(case.check(), Err(Refusal::PendingUpdate));
+    }
+
+    /// Apsis's own link is told apart from another tool's update: a restore that's armed
+    /// is refused as such, also when `/etc/system-update` is taken as well. It keeps the
+    /// pending update's place in the order.
+    #[test]
+    fn an_armed_restore_is_refused_as_such() {
+        let armed = Case {
+            system: |s| {
+                s.pending_update = true;
+                s.restore_armed = true;
+            },
+            ..Case::good()
+        };
+        assert_eq!(armed.check(), Err(Refusal::RestoreArmed));
+        let unreadable = Case {
+            snapshot: |s| s.has_localhost = false,
+            ..armed
+        };
+        assert_eq!(
+            unreadable.check(),
+            Err(Refusal::Unreadable(Unreadable::NoLocalhost))
+        );
     }
 
     /// Arming makes `/system-update`. Anything already at that name, or at

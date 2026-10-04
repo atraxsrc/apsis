@@ -14,11 +14,12 @@ use std::sync::{Arc, Mutex};
 use apsis_core::native::{Cancel, QuietRunner, TIMESHIFT_DIR};
 use apsis_core::restore::filter::{self, Home};
 use apsis_core::restore::plan::{Plan, SeparateHome};
-use apsis_core::restore::refusal::Refusal;
+use apsis_core::restore::refusal::{self, Refusal};
 use apsis_core::restore::{argv, esp, file, recover, space, state as restore_state};
 use apsis_core::usage::fstype_at;
 use apsis_core::{Backend, DiskUsage, Error, Result, Runner, parse_snapshot_name};
 
+use crate::arm;
 use crate::check::{self, Live, SnapshotFiles};
 use crate::native::{self, FINDMNT_ROOT_UUID, MOUNT_POINT};
 use crate::runner::{DirectRunner, SAFE_PATH};
@@ -134,15 +135,18 @@ const SAFETY_EXCLUDE_FILE: &str = "safety.exclude";
 /// it between steps and inside rsync. On `Ok`, `request.json`, `restore.filter`,
 /// `restore.note` and the recovery note on the backup disk are written and the plan is ready
 /// for `RestartToRestore`. On `Err` (stopped, refused or failed) the filter and the note it
-/// wrote are removed again ([`or_remove_working_files`]).
+/// wrote are removed again ([`or_remove_working_files`]). While an update waits for a
+/// restart, a restore that's armed among them, it's refused before anything is touched
+/// ([`guarded`]).
 ///
 /// # Errors
 ///
 /// [`Error::RestoreRefused`] with the refusal's word; [`Error::Stopped`]; what the mount,
 /// rsync or a file write reported.
 pub fn prepare(request: &Request, state: &Arc<State>, cancel: Arc<Cancel>) -> Result<Plan> {
-    let dir = Path::new(file::DIR);
-    or_remove_working_files(dir, prepare_in(dir, request, state, cancel))
+    guarded(&arm::Paths::system(), |dir| {
+        prepare_in(dir, request, state, cancel)
+    })
 }
 
 /// A preparation's end: one that didn't get to "ready" leaves no filter and no note in
@@ -153,7 +157,8 @@ pub fn prepare(request: &Request, state: &Arc<State>, cancel: Arc<Cancel>) -> Re
 /// The files are this preparation's own, never another plan's: [`prepare`] runs only as the
 /// `restore` job, under the lock of [`State::begin`], which answers `Busy` while a plan is
 /// ready, and a plan becomes ready only from under that lock. So no ready plan's files are
-/// in `dir` when a preparation starts or ends.
+/// in `dir` when a preparation starts or ends. An armed plan's are: [`guarded`] refuses
+/// before this is reached while a link is in place.
 fn or_remove_working_files<T>(dir: &Path, prepared: Result<T>) -> Result<T> {
     if prepared.is_err() {
         for name in apsis_core::restore::plan::WORKING_FILES {
@@ -165,6 +170,41 @@ fn or_remove_working_files<T>(dir: &Path, prepared: Result<T>) -> Result<T> {
         }
     }
     prepared
+}
+
+/// A preparation, held off while an update waits for a restart: `preparation` runs on the
+/// state folder only if nothing is at `/system-update` or `/etc/system-update`, and what it
+/// leaves behind when it fails is removed ([`or_remove_working_files`]).
+///
+/// The refusal comes first, before anything is written or removed. A restore that's armed
+/// is no longer "ready" in the helper (its job ended at "armed; restarting"), so
+/// [`State::begin`] lets a second `Restore` through, and a preparation's first step clears
+/// the state folder: the armed plan, its filter, `state.json` and the helper copy would go,
+/// and the next start would find the link with nothing behind it (found 2026-10-04). And
+/// the removal after a failed preparation would take the armed plan's filter and note.
+///
+/// `Restore` looks at Apsis's own link itself, before the password and before the lock, so
+/// that refusal is no job (the service's `begin_unless_armed`). This is the line behind it,
+/// under the lock: for an arm made after those looks, and for another tool's update.
+///
+/// # Errors
+///
+/// [`Error::RestoreRefused`]: [`Refusal::RestoreArmed`] if the link is Apsis's own, else
+/// [`Refusal::PendingUpdate`], as the dialog says it. Else `preparation`'s.
+pub(crate) fn guarded<T>(
+    paths: &arm::Paths,
+    preparation: impl FnOnce(&Path) -> Result<T>,
+) -> Result<T> {
+    let waiting = if arm::is_armed(paths) {
+        Err(Refusal::RestoreArmed)
+    } else {
+        refusal::check_arming(
+            arm::link_state(&paths.link),
+            arm::link_state(&paths.etc_link),
+        )
+    };
+    waiting.map_err(|refusal| Error::RestoreRefused(refusal.to_wire()))?;
+    or_remove_working_files(&paths.state_dir, preparation(&paths.state_dir))
 }
 
 fn prepare_in(
@@ -405,7 +445,7 @@ fn log(line: &str) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::fs;
 
     use apsis_core::DiskUsage;
@@ -458,6 +498,180 @@ sent 1,228,900 bytes  received 50 bytes\n";
             dry_run(&none, &argv, &cancel).unwrap(),
             Err(Refusal::SizeUnknown)
         );
+    }
+
+    /// A root with a prepared plan in its state folder and a helper binary, and its paths.
+    pub(crate) fn lab(name: &str) -> (std::path::PathBuf, arm::Paths, std::path::PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("apsis-prepare-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let paths = arm::Paths::under(&root);
+        fs::create_dir_all(&paths.state_dir).unwrap();
+        for (name, text) in [
+            (
+                "request.json",
+                "{ \"snapshot\": \"2026-09-25_11-28-00\" }\n",
+            ),
+            ("restore.filter", "P /system-update\n- /home/***\n+ /***\n"),
+            (
+                "restore.note",
+                "Apsis restore: if the computer doesn't start afterwards\n",
+            ),
+            ("result.json", "{}\n"),
+        ] {
+            fs::write(paths.state_dir.join(name), text).unwrap();
+        }
+        let exe = root.join("usr/libexec/apsis-helper");
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::write(&exe, "#!/bin/sh\n").unwrap();
+        fs::create_dir_all(root.join("etc")).unwrap();
+        (root, paths, exe)
+    }
+
+    /// Everything under `root`: each path with a file's bytes, a link's target, or "a folder".
+    pub(crate) fn tree(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, String> {
+        let mut found = std::collections::BTreeMap::new();
+        let mut folders = vec![root.to_owned()];
+        while let Some(folder) = folders.pop() {
+            for entry in fs::read_dir(&folder).unwrap() {
+                let path = entry.unwrap().path();
+                let kind = fs::symlink_metadata(&path).unwrap().file_type();
+                let what = if kind.is_symlink() {
+                    format!("link to {}", fs::read_link(&path).unwrap().display())
+                } else if kind.is_dir() {
+                    folders.push(path.clone());
+                    "a folder".to_owned()
+                } else {
+                    format!("file: {:?}", fs::read(&path).unwrap())
+                };
+                found.insert(path, what);
+            }
+        }
+        found
+    }
+
+    /// What a preparation did first before the armed-gap fix, and how it then ended while
+    /// a link was there: the state folder cleared, then the dialog's refusal.
+    fn as_before_the_fix(dir: &Path) -> Result<()> {
+        clear_leftovers(dir)?;
+        Err(Error::RestoreRefused(Refusal::PendingUpdate.to_wire()))
+    }
+
+    fn refusal_of<T: std::fmt::Debug>(result: Result<T>) -> String {
+        match result {
+            Err(Error::RestoreRefused(word)) => word,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// The armed-state gap (found 2026-10-04): while Apsis's `/system-update` is in place,
+    /// a second preparation is refused before it touches anything. Every file of the armed
+    /// plan and of the arm is there afterwards, byte for byte, the log too, and nothing new
+    /// is written. The refusal comes before the wrapper that removes a failed preparation's
+    /// working files, which would be the armed plan's.
+    #[test]
+    fn a_preparation_while_a_restore_is_armed_is_refused_and_touches_nothing() {
+        let (root, paths, exe) = lab("armed");
+        arm::arm(&paths, &exe).unwrap();
+        fs::write(
+            paths.state_dir.join("rsync-log"),
+            "the armed restore's log\n",
+        )
+        .unwrap();
+        assert!(arm::is_armed(&paths));
+        let before = tree(&root);
+        for file in [
+            paths.state_dir.join("request.json"),
+            paths.state_dir.join("restore.filter"),
+            paths.state_dir.join("restore.note"),
+            paths.state_dir.join("state.json"),
+            paths.state_dir.join("rsync-log"),
+            paths.helper_copy.clone(),
+            paths.unit.clone(),
+            paths.wants_link.clone(),
+            paths.drop_in.clone(),
+            paths.link.clone(),
+        ] {
+            assert!(before.contains_key(&file), "{}", file.display());
+        }
+        assert_eq!(
+            refusal_of(guarded(&paths, as_before_the_fix)),
+            "restore-armed"
+        );
+        assert_eq!(tree(&root), before);
+        // Whatever the preparation would have answered, it isn't asked.
+        let mut asked = false;
+        let refused = guarded(&paths, |_| {
+            asked = true;
+            Ok(())
+        });
+        assert_eq!(refusal_of(refused), "restore-armed");
+        assert!(!asked);
+        assert_eq!(tree(&root), before);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The real path to it: after "armed; restarting" the plan is no longer "ready" in the
+    /// helper, so [`State::begin`] doesn't answer `Busy` and a second `Restore` gets as far
+    /// as the preparation. It's refused there, with the lock held and nothing touched.
+    /// (`Restore` now refuses before the lock, in the service; this is the line behind it.)
+    #[tokio::test]
+    async fn an_armed_plan_is_not_ready_so_the_preparation_itself_refuses() {
+        let (root, paths, exe) = lab("armed-not-ready");
+        arm::arm(&paths, &exe).unwrap();
+        let before = tree(&root);
+        let (state, _changes) = State::new();
+        assert!(!state.is_ready() && !state.is_running());
+        let running = state
+            .begin(apsis_core::job::JobKind::Restore)
+            .await
+            .expect("no plan is ready, so the lock is given");
+        assert_eq!(
+            refusal_of(guarded(&paths, as_before_the_fix)),
+            "restore-armed"
+        );
+        assert_eq!(tree(&root), before);
+        drop(running);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Another tool's update at either name refuses too, before anything is touched, with
+    /// the refusal the dialog gives for it. With no link the preparation runs as before,
+    /// leftovers of an arm without its link included.
+    #[test]
+    fn another_update_refuses_untouched_and_no_link_prepares_as_before() {
+        for (name, target) in [
+            ("system-update", "/var/lib/other-tool"),
+            ("etc/system-update", "/var/lib/other-tool"),
+        ] {
+            let (root, paths, _) = lab("foreign");
+            std::os::unix::fs::symlink(target, root.join(name)).unwrap();
+            let before = tree(&root);
+            assert_eq!(
+                refusal_of(guarded(&paths, as_before_the_fix)),
+                "pending-update",
+                "{name}"
+            );
+            assert_eq!(tree(&root), before, "{name}");
+            fs::remove_dir_all(&root).unwrap();
+        }
+        // No link: the preparation is asked, and its answer is the answer.
+        let (root, paths, exe) = lab("no-link");
+        arm::arm(&paths, &exe).unwrap();
+        fs::remove_file(&paths.link).unwrap();
+        let mut asked = None;
+        let prepared = guarded(&paths, |dir| {
+            asked = Some(dir.to_owned());
+            Ok("ready")
+        });
+        assert_eq!(prepared.unwrap(), "ready");
+        assert_eq!(asked.as_deref(), Some(paths.state_dir.as_path()));
+        assert!(paths.state_dir.join("restore.filter").exists());
+        // And one that fails takes its working files with it, as before.
+        assert!(guarded(&paths, |_| Err::<(), _>(Error::Stopped)).is_err());
+        assert!(!paths.state_dir.join("restore.filter").exists());
+        assert!(!paths.state_dir.join("restore.note").exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     /// A preparation that's stopped, refused or failed takes its filter and note with it;

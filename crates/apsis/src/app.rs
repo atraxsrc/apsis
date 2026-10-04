@@ -587,6 +587,10 @@ fn refusal_lines(refusal: &Refusal) -> (String, String) {
             fl!("refused-pending-update"),
             fl!("refused-pending-update-do"),
         ),
+        Refusal::RestoreArmed => (
+            fl!("refused-restore-armed"),
+            fl!("refused-restore-armed-do"),
+        ),
         Refusal::PopUpgradePending => (fl!("refused-pop-upgrade"), fl!("refused-pop-upgrade-do")),
         Refusal::CrypttabDiffers => (fl!("refused-crypttab"), fl!("refused-crypttab-do")),
         Refusal::BackupSpace { needs, free } => (
@@ -2244,7 +2248,7 @@ impl AppModel {
 
     /// What this window's finished `operation` still has coming from the helper: the end
     /// announcement of its job, unless that already arrived (then `job` is `None`) or no job
-    /// began (refused before the lock: no helper, polkit, busy).
+    /// began (refused before the lock: no helper, polkit, busy, a restore armed).
     fn expect_own_end(
         &mut self,
         operation: &Operation,
@@ -2269,6 +2273,11 @@ impl AppModel {
             }
             None => match result {
                 Err(CliError::NoHelper | CliError::NotAuthorized | CliError::Busy) => None,
+                // A restore refused as armed is refused before the lock. (The helper's guard
+                // under the lock gives the same refusal with a job, in the seconds while
+                // another window's arm is being made; if `Finished` beats that job's every
+                // announcement, its end is taken for another window's: a list, no line.)
+                Err(CliError::RestoreRefused(Refusal::RestoreArmed)) => None,
                 // `Finished` beat even the job's first announcement: by kind, briefly.
                 _ => Some(OwnEnd {
                     kind,

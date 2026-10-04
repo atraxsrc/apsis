@@ -1753,6 +1753,62 @@ mod restore {
         );
     }
 
+    /// A `Restore` refused because a restore is armed (B1, 2026-10-04) is refused in the
+    /// helper before the job began: the dialog opens with the two lines, nothing is listed,
+    /// and no job end is waited for (none comes), so another window's restore job is shown
+    /// as that at once.
+    #[test]
+    fn a_restore_refused_as_armed_opens_the_dialog_and_waits_for_no_end() {
+        let mut app = with_dialog();
+        send(&mut app, Message::DialogConfirm);
+        assert_eq!(app.running, Some(restore_op()));
+        send(
+            &mut app,
+            Message::Finished(
+                restore_op(),
+                Err(CliError::RestoreRefused(Refusal::RestoreArmed)),
+            ),
+        );
+        assert_eq!(
+            app.dialog,
+            Some(Dialog::Refused {
+                snapshot: NEWEST.to_owned(),
+                refusal: Refusal::RestoreArmed,
+                dropped: false,
+            })
+        );
+        assert_eq!(
+            app.dialog.as_ref().unwrap().refusal_lines(),
+            [
+                "A restart to restore is already waiting.",
+                "Restart the computer, or wait for it to time out."
+            ]
+        );
+        assert!(app.status.is_none() && app.ready.is_none());
+        assert!(app.running.is_none() && !app.loading, "nothing to list");
+        assert!(app.own_end.is_none(), "no job began");
+        // A restore job announced right after is another window's: shown, and listed after.
+        send(
+            &mut app,
+            Message::Job(JobEvent::Changed(job(
+                JobKind::Restore,
+                JobState::Running,
+                THIRD,
+            ))),
+        );
+        assert!(app.job.is_some(), "not taken for this window's own");
+        send(
+            &mut app,
+            Message::Job(JobEvent::Changed(job(
+                JobKind::Restore,
+                JobState::Stopped,
+                THIRD,
+            ))),
+        );
+        assert!(app.job.is_none() && app.loading);
+        assert!(app.status.is_none());
+    }
+
     #[test]
     fn the_ready_prompt_has_two_answers_and_esc_cancels() {
         let mut app = ready();
@@ -1847,6 +1903,7 @@ mod restore {
             Refusal::Unreadable(apsis_core::restore::refusal::Unreadable::NoInfo),
             Refusal::KernelIncomplete,
             Refusal::PendingUpdate,
+            Refusal::RestoreArmed,
             Refusal::PopUpgradePending,
             Refusal::CrypttabDiffers,
             Refusal::BackupSpace {
@@ -1871,6 +1928,21 @@ mod restore {
                 "{lines:?}"
             );
         }
+        // A restore that's armed already (the armed-gap fix, 2026-10-04): plain words, no
+        // path and no file name.
+        let armed = Dialog::Refused {
+            snapshot: NEWEST.to_owned(),
+            refusal: Refusal::RestoreArmed,
+            dropped: false,
+        }
+        .refusal_lines();
+        assert_eq!(
+            armed,
+            [
+                "A restart to restore is already waiting.",
+                "Restart the computer, or wait for it to time out."
+            ]
+        );
         let space = Dialog::Refused {
             snapshot: NEWEST.to_owned(),
             refusal: Refusal::SystemSpace {

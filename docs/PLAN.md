@@ -660,8 +660,35 @@ Until it is built, the text above is what the code does.
   inside one.
 - **`disarm()` syncs after it removes the link**, for the timer and for the package script.
   A power cut seconds after a disarm must not bring the link back. **Built (step 7b).**
+- **A second preparation while a restore is armed is refused before it touches anything**
+  (the armed-state gap, found 2026-10-04; owner: fixed in 0.5.0). An armed plan is no longer
+  "ready" in the helper, so a second `Restore` got as far as the preparation, whose first
+  step clears the state folder: the armed plan, its filter, `state.json` and the helper copy
+  went, and only then did the dialog's check refuse because of the link. A restart that
+  stalled would have found the link with nothing behind it. Now the preparation looks at
+  `/system-update` and `/etc/system-update` first: Apsis's own link is
+  `Refusal::RestoreArmed` ("A restart to restore is already waiting." / "Restart the
+  computer, or wait for it to time out."), anything else at either name is the existing
+  `PendingUpdate`. Nothing is written or removed, the log included. The dialog's check
+  (`CheckRestore`, `refusal::check`) makes the same split, read-only, in the pending
+  update's place in 6b.7's order, so a click on Restore while armed gets the same words
+  before any password. `Restore` itself refuses the same way before the password and the
+  job lock (owner, 2026-10-04, "B1"): after the name check it reads the link, and once more
+  after the password (the dialog can stay open while another window arms), both before the
+  job begins. Refused there, it is the method's error (`restore refused: restore-armed`),
+  no job is announced, and no other window shows anything; the calling window opens the
+  "Can't restore this snapshot" dialog and waits for no job end. The preparation's own look
+  stays as the third line, under the lock (a refusal there is a job that ends `failed`).
+  At apply the link is the restore's own and is never refused as armed.
+  **Built (armed-gap fix).**
 - **Knowingly left** (owner): in the seconds between "Restart now" and the reboot, a
   package operation on Apsis cancels the arm, and only apt's output says so.
+- **Knowingly left until step 11** (owner, 2026-10-04): "Restart now" takes the plan out of
+  "ready" before its checks and the arm, which take seconds (a mount, sizes). In those
+  seconds no plan is ready and no link exists, so a second `Restore` is let in and its
+  first step clears the plan that is being armed. The arm then fails at keeping the pair
+  and the plan is dropped with an error: nothing ends up armed without a plan. The job
+  lock around the arm (above, 6b.9) closes it.
 
 ### 6b.6 The apply, and the boot files
 
@@ -1023,6 +1050,7 @@ line on what to do, and Close (wording in 6b.8's string table). The lines below 
 | snapshot isn't rsync, has no `localhost/` or `exclude.list` | "This snapshot can't be restored: <reason>." |
 | snapshot's `/boot/vmlinuz` has no `/usr/lib/modules/<version>/` in the snapshot, or the snapshot has no `kernelstub`, or its `etc/initramfs/post-update.d/zz-kernelstub` is missing or doesn't contain `--preserve-live-mode` (6b.6 step 5; helper slice, 2026-10-01). `update-initramfs` is no longer required: the apply doesn't run it | "This snapshot's kernel files are incomplete, so it can't be restored safely." |
 | **another update is pending**: `/system-update` or `/etc/system-update` already exists, as anything and pointing anywhere (a link, a dangling link, a file, a folder; systemd's generator reads both names). In `refusal::check`, and again as the last check before arming makes the link (`refusal::check_arming`, pure; owner, 2026-10-01). The same `PendingUpdate` refusal | "A system update is waiting for a restart. Restart first, then restore." |
+| **a restore is armed**: `/system-update` is Apsis's own link, it points at the state folder (`Refusal::RestoreArmed`, `restore-armed`; the armed-gap fix, 2026-10-04). Told apart from the row above, whose words would be false for it, and checked in its place in the order: in `refusal::check` for the dialog, by `Restore` before the password and again before the job lock, and by the preparation before it touches anything (6b.5). Armed and another tool's `/etc/system-update` at once is this row. **Never at apply**, where the link is the restore's own | "A restart to restore is already waiting. Restart the computer, or wait for it to time out." |
 | **a Pop!_OS release upgrade is in progress or half done** (helper slice, 2026-10-01; 6b.6 "pop-upgrade-init"): `/pop-upgrade`, `/pop_preparing_release_upgrade` or `/upgrade-attempted` exists (`Refusal::PopUpgradePending`). Three names, `lstat`, anything at the name counts. `refusal::check_pending`, pure, in the dialog, when preparing and with `check_arming`; **not at apply**. fwupd's and PackageKit's files are **not** refused (owner, 2026-10-01; 6b.6) | wording in the UI slice (gist: "A Pop!_OS upgrade is in progress." / "Finish or cancel it first, then restore.") |
 | **the disk setup changed**: the snapshot's `etc/crypttab` differs from the live one, compared with comments and blank lines dropped and each line's fields joined by one space, in order (`refusal::crypttab_differs`, pure; helper slice, 2026-10-01; 6b.6 step 5). The snapshot's initrd carries the crypttab entries the snapshot's system needed at boot, and the apply doesn't rebuild it (0.5.x does). A snapshot with no `etc/crypttab` compares as empty. On apsis-test the embedded crypttab is empty (cryptswap with a random key isn't carried), so this matters once an encrypted root is accepted | wording in the UI slice (gist: "The encrypted disks are set up differently from when this snapshot was made." / "Restore needs a snapshot made with the current disk setup.") |
 | not enough space (6b.4) | the space line |
@@ -1284,6 +1312,7 @@ dashes, no rsync or paths on screen (the helper's own words only in tooltips).
 | refusal | `This snapshot's kernel files are incomplete.` / `Pick another snapshot.` |
 | refusal | `This snapshot can't be read: {reason}.` / `Pick another snapshot.` |
 | refusal | `A system update is waiting for a restart.` / `Restart first, then restore.` |
+| refusal | `A restart to restore is already waiting.` / `Restart the computer, or wait for it to time out.` |
 | refusal | `Not enough space on the backup disk for a safety snapshot (needs {n}, {free} free).` / `Delete old snapshots, or turn off the safety snapshot.` |
 | refusal | `Not enough space on the system disk to restore (needs {n}, {free} free).` / `Free some space, then try again.` |
 | button | `Close` |

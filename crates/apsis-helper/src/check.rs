@@ -15,6 +15,7 @@ use apsis_core::settings::{Device, parse_lsblk};
 use apsis_core::{Result, Runner};
 use rustix::fs::{Mode, OFlags};
 
+use crate::arm;
 use crate::native::FINDMNT_ROOT_UUID;
 use crate::settings::lsblk;
 
@@ -34,6 +35,8 @@ pub struct Live {
     /// `etc/system-update` alone exists (not followed): what counts at apply, where
     /// `system-update` is Apsis's own link.
     pub etc_system_update: bool,
+    /// `system-update` is Apsis's own link ([`arm::is_armed`]): a restore is armed.
+    pub restore_armed: bool,
     pub pop_upgrade_found: Vec<&'static str>,
     /// `etc/crypttab`, empty if there's none.
     pub crypttab: String,
@@ -76,6 +79,7 @@ impl Live {
             esp_folders: names_in(&root.join("boot/efi/EFI")),
             pending_update: exists("system-update") || exists("etc/system-update"),
             etc_system_update: exists("etc/system-update"),
+            restore_armed: arm::is_armed(&arm::Paths::under(root)),
             pop_upgrade_found: pop_upgrade_found(root),
             crypttab: read_nofollow(&root.join("etc/crypttab")).unwrap_or_default(),
             boot_files,
@@ -84,10 +88,12 @@ impl Live {
 
     /// The same view in the offline boot: `/system-update` is Apsis's own link there (the
     /// apply's step 1 checked it), so only `/etc/system-update` is another update's
-    /// (check 1, 2026-10-02; `refusal::check_pending`'s note).
+    /// (check 1, 2026-10-02; `refusal::check_pending`'s note), and the restore that runs
+    /// isn't refused as armed.
     pub(crate) fn as_system_at_apply(&self) -> refusal::System<'_> {
         refusal::System {
             pending_update: self.etc_system_update,
+            restore_armed: false,
             ..self.as_system()
         }
     }
@@ -102,6 +108,7 @@ impl Live {
             root_uuid: &self.root_uuid,
             esp_folders: &self.esp_folders,
             pending_update: self.pending_update,
+            restore_armed: self.restore_armed,
         }
     }
 }
@@ -265,6 +272,7 @@ mod tests {
     use apsis_core::{RunOutput, Runner};
 
     use super::*;
+    use crate::prepare::tests::{lab, tree};
 
     const LSBLK: &str = include_str!("../../apsis-core/tests/fixtures/lsblk.json");
     /// `nvme0n1p2` in the lsblk fixture: a plain ext4 partition.
@@ -497,6 +505,48 @@ mod tests {
             Some(Refusal::Unreadable(Unreadable::NoInfo))
         );
         fs::remove_dir_all(&root).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The dialog's check while a link is in place (the armed-gap fix, 2026-10-04): Apsis's
+    /// own link is `restore-armed`, another tool's at either name is `pending-update`, the
+    /// same split as the preparation's. A read: nothing under the root changes.
+    #[test]
+    fn an_armed_restore_is_told_apart_from_another_update_and_nothing_is_touched() {
+        let dir = temp("snapshot-armed");
+        snapshot(&dir);
+        let files = SnapshotFiles::read(&dir);
+        let (root, paths, exe) = lab("check-armed");
+        live(&root);
+        arm::arm(&paths, &exe).unwrap();
+        let before = tree(&root);
+        let armed = Live::read(&root, &FakeSystem, MOUNTINFO).unwrap();
+        assert!(armed.restore_armed && armed.pending_update);
+        assert_eq!(dialog(&armed, &files).refusal, Some(Refusal::RestoreArmed));
+        // The offline boot's own check doesn't refuse its own link.
+        assert!(!armed.as_system_at_apply().restore_armed);
+        assert!(!armed.as_system_at_apply().pending_update);
+        assert_eq!(tree(&root), before);
+        // Armed, and another update at the other name: still the armed restore's words.
+        write(root.join("etc/system-update"), "");
+        let both = Live::read(&root, &FakeSystem, MOUNTINFO).unwrap();
+        assert_eq!(dialog(&both, &files).refusal, Some(Refusal::RestoreArmed));
+        fs::remove_dir_all(&root).unwrap();
+        for name in ["system-update", "etc/system-update"] {
+            let (root, _, _) = lab("check-foreign");
+            live(&root);
+            symlink("/var/lib/other-tool", root.join(name)).unwrap();
+            let before = tree(&root);
+            let other = Live::read(&root, &FakeSystem, MOUNTINFO).unwrap();
+            assert!(!other.restore_armed && other.pending_update, "{name}");
+            assert_eq!(
+                dialog(&other, &files).refusal,
+                Some(Refusal::PendingUpdate),
+                "{name}"
+            );
+            assert_eq!(tree(&root), before, "{name}");
+            fs::remove_dir_all(&root).unwrap();
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 }

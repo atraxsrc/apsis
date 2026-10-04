@@ -189,7 +189,9 @@ impl Helper {
     /// safety snapshot (with `/home` when `restore_home`), the plan files, the recovery note.
     /// A `restore` job; stoppable with `Stop(snapshot)` until ready. While the plan is ready,
     /// every write is `Busy` and reads go through; `RestartToRestore` or `CancelRestore` ends
-    /// it, as does the starter's connection leaving the bus.
+    /// it, as does the starter's connection leaving the bus. While a restore is armed it's
+    /// refused as `restore refused: restore-armed`, the method's error, before the password
+    /// and with no job ([`Helper::begin_unless_armed`]).
     async fn restore(
         &self,
         #[zbus(header)] header: Header<'_>,
@@ -219,10 +221,19 @@ impl Helper {
             if parse_snapshot_name(&snapshot).is_none() {
                 return Err(Error::InvalidSnapshotName(snapshot.clone()));
             }
-            self.refuse_if_running()?;
-            authorize(connection, &caller, ACTION_RESTORE, true).await?;
-            let uid = unix_user(connection, &caller).await?;
-            let running = self.state.begin(JobKind::Restore).await?;
+            // Refused while a restore is armed, before the password and again before the
+            // lock (B1); the preparation's own guard is the third line, under the lock.
+            let (uid, running) = self
+                .begin_unless_armed(
+                    &arm::Paths::system(),
+                    JobKind::Restore,
+                    restore_armed,
+                    async {
+                        authorize(connection, &caller, ACTION_RESTORE, true).await?;
+                        unix_user(connection, &caller).await
+                    },
+                )
+                .await?;
             // Named at once: `Stop(snapshot)` finds it, and `Job()` says what's restored.
             self.state.named(&snapshot);
             self.state.stoppable(Arc::clone(&cancel), uid);
@@ -737,6 +748,35 @@ impl Helper {
         Ok(())
     }
 
+    /// A write's way to the lock (`kind`) when it must not run while a restore is armed
+    /// (Apsis's own `/system-update`, [`arm::is_armed`]), with polkit's answer as
+    /// `authorized` (asked only when it's awaited here; what it gives is handed back).
+    ///
+    /// The link is looked at before the password, so nobody types one for a call that can't
+    /// run, and again after it, because the dialog can stay open while another window arms.
+    /// Both come before the lock: no job begins, so nothing is announced and no other
+    /// window shows anything (a refusal under the lock is a job that ends `failed`, which
+    /// every window sees). `armed` is the caller's refusal. Another tool's link isn't
+    /// Apsis's arm and refuses nothing here.
+    ///
+    /// # Errors
+    ///
+    /// `armed`'s; [`Error::Busy`] before the password or from the lock; what `authorized`
+    /// gave.
+    async fn begin_unless_armed<T>(
+        &self,
+        paths: &arm::Paths,
+        kind: JobKind,
+        armed: fn() -> Error,
+        authorized: impl Future<Output = apsis_core::Result<T>>,
+    ) -> apsis_core::Result<(T, Running)> {
+        refuse_while_armed(paths, armed).await?;
+        self.refuse_if_running()?;
+        let answer = authorized.await?;
+        refuse_while_armed(paths, armed).await?;
+        Ok((answer, self.state.begin(kind).await?))
+    }
+
     /// Logs whether the operation could start. If it did, runs `work` in the background
     /// holding the lock, then releases the lock, announces how it ended (`JobChanged`; or, for
     /// [`Ending::Ready`], that the plan is ready), logs it and tells `caller` with `Finished`:
@@ -903,6 +943,25 @@ fn check_and_arm(snapshot: &str, mount: &Arc<SharedMount<DirectRunner>>) -> apsi
         )));
     }
     Ok(())
+}
+
+/// Refuses with `armed`'s error while Apsis's own `/system-update` is in place: a restore is
+/// armed and waits for the restart. A read of the link, nothing else.
+async fn refuse_while_armed(paths: &arm::Paths, armed: fn() -> Error) -> apsis_core::Result<()> {
+    let paths = paths.clone();
+    blocking(move || {
+        if arm::is_armed(&paths) {
+            return Err(armed());
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// What a `Restore` is refused with while a restore is armed: the refusal the window's
+/// dialog knows, as the preparation's own guard gives it ([`prepare::guarded`]).
+fn restore_armed() -> Error {
+    Error::RestoreRefused(Refusal::RestoreArmed.to_wire())
 }
 
 /// The filesystem UUID of what's mounted at `point` (`findmnt`).
@@ -1197,6 +1256,7 @@ mod tests {
     use zbus::object_server::Interface;
 
     use super::*;
+    use crate::prepare::tests::{lab, tree};
 
     #[test]
     fn interface_matches_the_shared_names() {
@@ -1336,6 +1396,143 @@ mod tests {
         ));
         assert!(matches!(removed_or(io(), None, &by_uuid), Error::Native(_)));
         std::fs::remove_dir_all(&by_uuid).unwrap();
+    }
+
+    /// B1 (owner, 2026-10-04): while Apsis's own link is in place, `Restore` is refused
+    /// before the password is asked for and before the write lock, as the refusal the
+    /// dialog knows (`restore-armed`). No job begins, so nothing is announced and no other
+    /// window shows anything; the armed plan's files and the arm are the same afterwards,
+    /// byte for byte.
+    #[tokio::test]
+    async fn a_restore_while_a_restore_is_armed_is_refused_before_anything_happens() {
+        let (root, paths, exe) = lab("restore-armed");
+        arm::arm(&paths, &exe).unwrap();
+        let before = tree(&root);
+        let (state, mut changes) = State::new();
+        let helper = Helper::new(Arc::clone(&state));
+        let mut asked = false;
+        let refused = helper
+            .begin_unless_armed(&paths, JobKind::Restore, restore_armed, async {
+                asked = true;
+                Ok(1000_u32)
+            })
+            .await;
+        let Err(error) = refused else {
+            panic!("the restore was let in")
+        };
+        assert!(matches!(&error, Error::RestoreRefused(word) if word == "restore-armed"));
+        assert!(!asked, "no password is asked for");
+        assert!(!state.is_running(), "the lock isn't taken");
+        assert!(changes.try_recv().is_err(), "no job is announced");
+        assert_eq!(tree(&root), before);
+        // In the journal it's a refusal, and the method's error decodes to the dialog's
+        // refusal.
+        assert_eq!(
+            describe_error(&error),
+            "refused: can't restore this snapshot: restore-armed"
+        );
+        let HelperError::Failed(message) = HelperError::from(error) else {
+            panic!("not Failed")
+        };
+        assert!(matches!(
+            decode_error(&message),
+            Error::RestoreRefused(word) if Refusal::from_wire(&word) == Some(Refusal::RestoreArmed)
+        ));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The password dialog can stay open while another window arms: the link is read again
+    /// after it, still before the lock.
+    #[tokio::test]
+    async fn a_restore_armed_while_the_password_was_asked_for_refuses_the_restore_too() {
+        let (root, paths, exe) = lab("restore-armed-late");
+        let (state, mut changes) = State::new();
+        let helper = Helper::new(Arc::clone(&state));
+        let refused = helper
+            .begin_unless_armed(&paths, JobKind::Restore, restore_armed, async {
+                arm::arm(&paths, &exe).unwrap();
+                Ok(1000_u32)
+            })
+            .await;
+        assert!(matches!(
+            refused,
+            Err(Error::RestoreRefused(word)) if word == "restore-armed"
+        ));
+        let armed = tree(&root);
+        assert!(arm::is_armed(&paths));
+        assert!(!state.is_running(), "the lock isn't taken");
+        assert!(changes.try_recv().is_err(), "no job is announced");
+        assert_eq!(tree(&root), armed);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Another tool's update at either name isn't Apsis's arm: the lock is given as before,
+    /// and the preparation's own guard refuses it under the lock as `pending-update`, as
+    /// today. With no link the restore begins as before, and what refused one before still
+    /// does.
+    #[tokio::test]
+    async fn another_tools_update_or_no_link_lets_the_restore_begin_as_before() {
+        for name in ["system-update", "etc/system-update"] {
+            let (root, paths, _) = lab("restore-foreign");
+            std::os::unix::fs::symlink("/var/lib/other-tool", root.join(name)).unwrap();
+            let before = tree(&root);
+            let (state, mut changes) = State::new();
+            let helper = Helper::new(Arc::clone(&state));
+            let mut asked = false;
+            let begun = helper
+                .begin_unless_armed(&paths, JobKind::Restore, restore_armed, async {
+                    asked = true;
+                    Ok(1000_u32)
+                })
+                .await;
+            let Ok((uid, _running)) = begun else {
+                panic!("{name}: not let in")
+            };
+            assert_eq!(uid, 1000, "{name}");
+            assert!(asked && state.is_running(), "{name}");
+            let announced = changes.try_recv().expect("the job is announced").job;
+            assert_eq!(
+                (announced.0.as_str(), announced.1.as_str()),
+                ("restore", "running"),
+                "{name}"
+            );
+            let guarded = prepare::guarded(&paths, |_| Ok(()));
+            assert!(
+                matches!(&guarded, Err(Error::RestoreRefused(word)) if word == "pending-update"),
+                "{name}: {guarded:?}"
+            );
+            assert_eq!(tree(&root), before, "{name}");
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+        // No link, with what an arm left behind.
+        let (root, paths, exe) = lab("restore-no-link");
+        arm::arm(&paths, &exe).unwrap();
+        std::fs::remove_file(&paths.link).unwrap();
+        let (state, _changes) = State::new();
+        let helper = Helper::new(Arc::clone(&state));
+        let (uid, running) = helper
+            .begin_unless_armed(&paths, JobKind::Restore, restore_armed, async { Ok(7_u32) })
+            .await
+            .unwrap_or_else(|error| panic!("no link: the restore begins, not {error}"));
+        assert_eq!(uid, 7);
+        // Busy and polkit's no, as before: the first before the password, neither a job.
+        let mut asked = false;
+        let busy = helper
+            .begin_unless_armed(&paths, JobKind::Restore, restore_armed, async {
+                asked = true;
+                Ok(())
+            })
+            .await;
+        assert!(matches!(busy, Err(Error::Busy)) && !asked);
+        drop(running);
+        let denied = helper
+            .begin_unless_armed(&paths, JobKind::Restore, restore_armed, async {
+                Err::<(), _>(Error::NotAuthorized)
+            })
+            .await;
+        assert!(matches!(denied, Err(Error::NotAuthorized)));
+        assert!(!state.is_running());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

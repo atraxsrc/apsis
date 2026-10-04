@@ -18,6 +18,8 @@ with systemd-boot only.
   (the space is measured with dry runs, the safety snapshot taken, the plan written), and
   asks once more at "Ready to restore". "Restart now" arms the next start and restarts;
   "Cancel restore", Esc or closing the window drops the plan and keeps the safety snapshot.
+  While a restore waits for its restart, a second one is refused and leaves the first as
+  it is.
 - The restore itself runs at the next start with the desktop stopped (systemd's
   offline-update mode, with plymouth), keeps the live `fstab` and `crypttab`, the boot and
   recovery partitions, other mounts and the kernel the computer started with, refreshes the
