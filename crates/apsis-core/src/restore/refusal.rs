@@ -263,7 +263,7 @@ pub fn check(system: &System<'_>, snapshot: &Snapshot<'_>) -> Result<(), Refusal
         .devices
         .iter()
         .find(|device| !system.root_uuid.is_empty() && device.uuid == system.root_uuid);
-    if root.is_none_or(|device| device.kind != "part") {
+    if root.is_none_or(|device| !is_restorable_root(&device.kind)) {
         return Err(Refusal::RootDevice);
     }
     if ["/boot", "/usr", "/var"]
@@ -301,6 +301,14 @@ pub fn check(system: &System<'_>, snapshot: &Snapshot<'_>) -> Result<(), Refusal
         return Err(Refusal::PendingUpdate);
     }
     Ok(())
+}
+
+/// Whether `/` may be on a device of lsblk's `kind`: a plain partition. A build with the
+/// dev-only `luks-spike` feature (never a release build) also lets dm-crypt and LVM through:
+/// the same installation only, as [`Refusal::OtherInstallation`] and
+/// [`Refusal::CrypttabDiffers`] still hold.
+fn is_restorable_root(kind: &str) -> bool {
+    kind == "part" || (cfg!(feature = "luks-spike") && matches!(kind, "crypt" | "lvm"))
 }
 
 /// What's at `/system-update` or `/etc/system-update`, asked of the name itself (`lstat`).
@@ -727,12 +735,31 @@ mod tests {
         );
     }
 
+    /// dm-crypt and LVM are refused in every build but the dev-only `luks-spike` one, which
+    /// lets exactly those two through.
     #[test]
     fn a_root_on_a_mapped_device_is_refused() {
         for kind in ["crypt", "lvm", "raid1", "disk"] {
             let mut case = Case::good();
             case.devices[2].kind = kind.to_owned();
-            assert_eq!(case.check(), Err(Refusal::RootDevice), "{kind}");
+            let spike_lets_through =
+                cfg!(feature = "luks-spike") && kind != "raid1" && kind != "disk";
+            let expected = if spike_lets_through {
+                Ok(())
+            } else {
+                Err(Refusal::RootDevice)
+            };
+            assert_eq!(case.check(), expected, "{kind}");
+        }
+    }
+
+    /// The gate is a cargo feature that nothing turns on: a plain build refuses.
+    #[cfg(not(feature = "luks-spike"))]
+    #[test]
+    fn without_the_spike_feature_only_a_partition_is_a_restorable_root() {
+        assert!(is_restorable_root("part"));
+        for kind in ["crypt", "lvm", "dm", "raid1", "disk", ""] {
+            assert!(!is_restorable_root(kind), "{kind}");
         }
     }
 
