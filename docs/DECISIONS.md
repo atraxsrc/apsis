@@ -6660,3 +6660,225 @@ laptop and the logs on the main machine are the owner's to clear.
   the new package's `prerm failed-upgrade` attempt), and the leftover row's own text in
   the L4 and D1 screenshots (`Unfinished snapshot or delete · Delete removes it` by the
   code, `apsis.ftl:46`).
+
+## 2026-10-06 - restore on an encrypted system disk: the spike passed on apsis-test, and what 0.6 builds on it
+
+Branch `luks-restore-spike`, not on main, not pushed: the spike's four commits (`18e0d3b`,
+`2b6e161`, `50161bc`, `888ea01`), then `410dcef`, `21c4013` and `3474b3f`. No design change
+to Restore. The results are my two sittings on apsis-test (2026-10-05 and 2026-10-06) as
+the guide's handoff relays them, from my pastes and screenshots; what wasn't checked says
+so. The main machine appears to have the same encrypted layout: nothing was restored or
+installed there. Claude Code only read code and built there.
+
+### Found by reading (2026-10-05)
+
+The refusal on an encrypted or LVM system disk was one comparison: lsblk's `TYPE` of the row
+holding `/` had to be `part` (`refusal::check`). Nothing else in the restore looks at the
+device type. The apply runs in the unlocked system, finds `/` by mount point and filesystem
+UUID, keeps the live fstab and crypttab (the filter's `DISKS`), rebuilds no initrd and leaves
+the ESP to kernelstub. So the same-installation case needed no new mechanism, only proof
+that the boot files kernelstub writes can still unlock the disk.
+
+A same-kernel restore doesn't give that proof: the filter's rule 10 keeps the running
+kernel's files, so the snapshot's initrd is never used. The test that counts is a restore
+back across a kernel update (Run B).
+
+### The spike build
+
+A cargo feature, `luks-spike`, off by default and refused by `just deb`: the comparison also
+accepted `crypt` and `lvm`, and after kernelstub the refreshed ESP was compared with the
+backup taken before the refresh (the same `root=` option, and the initrd still holds
+cryptsetup, lvm and a non-empty `cryptroot/crypttab` if the one before did). A failure is
+the boot refresh's failure, so the boot files are put back (`boot-kept`). The dev .deb was
+`0.5.0+luksspike-1`, sha256 `82f48379bd5b706927df58d5b91b58ab4328e952f98a3d0671f6c2532e4d34f4`,
+built with `--remap-path-prefix`, installed on apsis-test only.
+
+### The layout `pre` found (apsis-test, re-installed with "Encrypt drive", Pop!_OS 24.04)
+
+- `nvme0n1p3` holds `cryptdata` (lsblk `crypt`, `LVM2_member`), which holds `data-root`
+  (`lvm`, ext4) at `/`. `cryptswap` is under `nvme0n1p4`. `/boot/efi` and `/recovery` are
+  plain vfat partitions.
+- The boot entry says `root=UUID=`, not a `/dev/mapper` path, and the ESP folder is named
+  `Pop_OS-<uuid>` as on an unencrypted machine. That settles the 2026-09-25 note that
+  `sys-uuid` from findmnt was "not verified on LVM/LUKS roots": it is the name kernelstub
+  uses there too.
+- `/boot/initrd.img` holds `cryptroot/crypttab` (62 bytes), `usr/sbin/cryptsetup` and
+  `usr/sbin/lvm`, and the image's own crypttab is the `cryptdata` line. That settles the
+  2026-10-01 claim ("an encrypted root's line is carried"), which had no machine then.
+- `lsinitramfs` and `unmkinitramfs` are both there.
+
+### Run A (2026-10-05): the same kernel
+
+Passed on all five counts: `PRE-OK`, `MARKERS`, the unlock prompt at both restarts,
+`VERIFY-OK`, `AGAIN-OK` (one more restart after it). The restore boot took about a minute.
+Outcome `done`, the markers undone, the disk tables' and the boot option's sums the same,
+the ESP's initrd equal to `/boot`'s, no failed units. A safety snapshot was taken. Run A
+kept the running kernel's boot files, so it did not test a switch of kernel.
+
+### Run B (2026-10-06): back across a kernel update
+
+1. A full upgrade on the laptop: 337 upgraded, 8 newly installed; `update-initramfs` made
+   the initrd for `7.1.5-76070105-generic`. After a restart that kernel ran; the snapshot
+   "luks spike" (`2026-10-05_21-30-47`) was of `7.0.11-76070011-generic`.
+2. Restore with the safety snapshot ticked was refused for space (finding 1). With the box
+   unticked it went through to "Ready to restore".
+3. Restart at 07:45 by my clock: unlock prompt, passphrase taken, the Pop logo with the
+   restoring line, a second restart on its own, unlock prompt, passphrase taken, greeter at
+   07:52. My words then: "exact same behaviour as last time".
+4. `verify` ended `VERIFY-OK`. From its log: no `/system-update`; `"outcome": "done"`; the
+   journal's `luks-spike: the initrd before Pieces { cryptsetup: true, lvm: true, crypttab:
+   Some(62) }, after Pieces { cryptsetup: true, lvm: true, crypttab: Some(62) }; root= is the
+   same`; `removed kernel 7.1.5-76070105-generic: not in the snapshot`; `apply-restore ended:
+   Finished(Done)`; the sums the same; the running kernel `7.0.11-76070011-generic`; root
+   `/dev/mapper/data-root` ext4; the ESP's initrd equal to `/boot`'s, with
+   `cryptroot/crypttab` (62 bytes), `usr/sbin/cryptsetup` and `usr/sbin/lvm` in it; no line
+   with FAIL; no failed units.
+
+The pass file on the main machine holds `PRE-OK`, `MARKERS`, `VERIFY-OK`, `AGAIN-OK`,
+`RUN-B-OK`.
+
+**What this proves.** After a kernel update, the restore put the snapshot's kernel back as
+the boot entry, removed the newer kernel, left the ESP's initrd equal to `/boot`'s with all
+three unlock pieces, and the laptop unlocked and reached the greeter from it. The 2026-10-01
+decision stands: kernelstub only, no `update-initramfs` in the apply.
+
+**Not shown, or not tested.**
+
+- Whether the restore copied the 7.0.11 boot image from the backup disk or left the file in
+  place because it already matched. The laptop's `rsync-log` can answer it; nobody read it.
+- The journal's line reads the same on both sides (62 bytes), so it alone doesn't show that
+  the two images differ. The kernel versions show the switch.
+- The comparison never failed (outcome `done` in both runs), so the put-back (`boot-kept`)
+  has not run on real hardware on this layout.
+- The runbook's rescue lines (`cryptsetup luksOpen`, `vgchange -ay` before the recovery
+  note's steps) were never needed, so they are untried.
+- Home wasn't in the snapshot (the fresh install's default settings exclude it; the dialog
+  said "Home folders aren't in this snapshot, so they stay as they are."), so a restore
+  that includes home was not tested on this layout.
+- One laptop, the default "Encrypt drive" layout, the same installation. Nothing else.
+- No extra restart after Run B. The guide read the key lines of the verify log, not all of
+  it. The window after the Run B restore (status line, rows) was not recorded.
+
+**Findings from Run B.**
+
+1. The space refusal: "Can't restore this snapshot", "Not enough space on the backup disk
+   for a safety snapshot (needs 7.3G, 1.9G free)." and "Delete old snapshots, or turn off
+   the safety snapshot.", Close only; the window showed 1.9G free of 28G. Unticking the box
+   worked as the line says. The heading is the same as for a refusal that can't be got
+   around. Secondary, wording.
+2. The restore boot took about 7 minutes (restart 07:45 by my clock, the apply's end
+   07:52:08 in the journal), against about a minute in Run A: it had a 337-package
+   upgrade to undo.
+3. The backup disk is small and was nearly full, so Run B has no safety snapshot.
+4. Seen again in Run A: a create's progress running backwards (99 percent with 3 s left,
+   then 77 percent with 4m 34s left). Already on the after-0.5.0 list.
+
+### What I decided
+
+- 2026-10-05: the recovery note's unlock and LVM steps are a 0.6 item.
+- 2026-10-06: the spike becomes the 0.6 feature, in this order: the real rule, the recovery
+  note, the dialog's wording, this entry, then a recovery drill and a gate. The feature
+  comes first; the secondary findings above wait.
+- 2026-10-06: I let the rule through only for the layout that was run: a partition, then
+  dm-crypt, then LVM. LUKS without LVM and LVM without LUKS stay refused until a machine has
+  shown them to work.
+- 2026-10-06: I kept the comparison after kernelstub where the spike had it. A refusal
+  before arming (listing the snapshot's initrd while preparing, so nothing is touched) is a
+  later item of its own.
+- 2026-10-06: the work stays on `luks-restore-spike`, one item at a time, and each commit
+  waits for my yes.
+
+### AI help at a glance
+
+- I ran every command of the runbook, did both sittings at the laptop, and made the
+  decisions above. Nothing is committed or pushed without my yes.
+- Claude Code, on the main machine, read the restore code and wrote the spike build, the
+  runbook and its script, then the rule, the recovery note, the wording and this entry. It
+  ran the builds, the tests, gitleaks and the commits there. It ran nothing on apsis-test
+  and did not read the run logs.
+- A second Claude chat (the guide) reviewed the runbook, gave me each step with its expected
+  output, checked my pasted results line by line and wrote the handoff this entry draws on.
+  It read a few files in the repo and ran nothing on either machine.
+
+### Built after the spike
+
+- **The rule** (`410dcef`). `/` may be on a plain partition, or on an `lvm` volume with
+  exactly one parent that is a `crypt` mapping with FSTYPE `LVM2_member`, itself with
+  exactly one parent that is a `part` with FSTYPE `crypto_LUKS`, which the live crypttab
+  opens under the mapping's name by `UUID=` or `/dev/disk/by-uuid/` of that partition
+  (`refusal::encrypted_root`). lsblk's rows are walked by `PKNAME` (`Device::parents`).
+  Everything else is `root-device` as before: no new word on the wire. The cargo feature,
+  its marker and `just deb-luks-spike` are gone.
+- **The comparison** (`410dcef`), in `apsis-helper/src/unlock.rs`: runs at the end of the
+  boot refresh unless the root is on a plain partition, so a plain install runs no
+  `lsinitramfs` and behaves as 0.5.0 did. Its journal line now starts `unlock check:`.
+- **The recovery note** (`21c4013`). On the encrypted layout, before the root's mount line:
+  `sudo cryptsetup luksOpen /dev/disk/by-uuid/<the LUKS partition's> <name>` and `sudo
+  vgchange -ay`, where `<name>` is the mapping's name in the live crypttab.
+  `update-initramfs` in the chroot looks the root's mapping up in `/etc/crypttab` by name,
+  so a disk opened under another name would get an initrd that can't unlock it; the note
+  says so, and says what to do when the live system already opened the disk under another
+  name. A name or UUID that isn't a plain word is refused as `root-device`. The plain note
+  is byte for byte what it was. The note and the README say these lines are untried in a
+  recovery.
+- **The wording** (`3474b3f`): "Restore doesn't support the way this system disk is set up
+  yet." / "It works on a plain partition and on Pop!_OS's standard encrypted install.
+  Snapshots still work: their files are on the backup disk, under timeshift/snapshots."
+  The second line is this refusal's own.
+
+Unverified in what was built: the lsblk fixture for the encrypted layout is written by hand
+from the layout above, not copied from the laptop's `lsblk --json`; the form of the root's
+line in the live `/etc/crypttab` is taken to be `cryptdata UUID=... none luks` (the initrd's
+62 bytes fit it, but that is the image's copy). The first Restore dialog on apsis-test with
+a build of this branch settles both: if it opens without the refusal, the rule reads the
+real thing.
+
+### Corrections to assumptions
+
+- Apsis has no snapshot browser and no single-file restore (removed in 0.4.0), so the
+  refusal's text can't point to them.
+- `just deb` doesn't need `just vendor`.
+- The rule first proposed, "every UUID the snapshot's fstab names exists now", doesn't fit:
+  Apsis never restores the snapshot's fstab, so its UUIDs can't break the restored system,
+  and checking them would refuse restores that work. The crypttab half is covered by
+  `crypttab-differs`, the live crypttab check above and `other-installation`.
+
+### Not what Timeshift does, on purpose
+
+Timeshift rewrites the target's fstab and crypttab and reinstalls GRUB because it restores
+onto a mapped target (`Main.vala`: `fix_fstab_file`, `fix_crypttab_file`; read 2026-10-05).
+Apsis restores in place and keeps both files. Timeshift's rewriting is where "restore onto a
+reinstalled disk" would start; that is out of scope for 0.6. So are encrypted backup disks:
+a separate item, after 0.6, that shares nothing with this one (the system disk is unlocked
+by the initrd before Apsis runs; a backup disk would have to be unlocked by Apsis, also in
+the offline boot).
+
+### Open
+
+- The recovery drill on apsis-test: the note's steps typed in Pop's recovery on the
+  encrypted layout, which is where the unlock lines, the name's role in `update-initramfs`
+  and the recovery image's tools get proven. Then a gate.
+- The `rsync-log` question above; the `boot-kept` path on real hardware; a restore with
+  home in the snapshot.
+- A build of this branch is still version `0.5.0-1`, the release's: a .deb for apsis-test
+  needs a version of its own before the drill.
+- apsis-test is now encrypted, so the plain-partition layout that 0.5.0 was gated on has no
+  machine. The plain path's code is unchanged; a 0.6 gate on a plain install needs a second
+  device or another reinstall.
+- A refusal before arming for an initrd that can't unlock; the man page, the metainfo and
+  the CHANGELOG for 0.6; `tools/restore-check.sh` knows nothing of the unlock pieces.
+- Not covered by anything here: a keyboard layout changed since the snapshot (the initrd
+  carries the keymap for the passphrase prompt); a key file, TPM2 or FIDO2 unlock; a second
+  LUKS volume for `/home`.
+- Secondary, from the runs: the space refusal's heading (finding 1); the create progress
+  (finding 4).
+
+### Left on apsis-test
+
+As the handoff has it, with what I added later; Claude Code checked none of it: Pop!_OS 24.04
+with "Encrypt drive", the dev build `0.5.0+luksspike-1` still installed (the return to the
+release build is not done), kernel `7.0.11-76070011-generic` with 7.1.5 removed by the
+restore, so its updates should be pending again. The backup disk should hold the three base
+snapshots only ("baseline1", "6b baseline", "baseline 0.5.0", never touched): I deleted
+"luks spike" and Run A's safety snapshot after Run B, so any later test there starts with a
+fresh snapshot.
