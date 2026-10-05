@@ -6423,3 +6423,240 @@ Why, from a read-only check of the workflow and the local build (2026-10-04):
 This makes "the real 0.5.0 .deb" precise, in the version bump's ruling (this file, check
 9's entry, "The version bump: not before this check", line 5236 on) and in PLAN 6b.13's
 release gate: it is CI's file from the tag, not a locally built one.
+
+## 2026-10-05 - the release gate passed on CI's 0.5.0 .deb (apsis-test)
+
+PLAN 6b.13's release gate, on the .deb the Release workflow built from the tag `v0.5.0`.
+Runbook `notes/release-gate-runbook.md` (untracked), steps G0 to Z. The tag was made at
+2026-10-04 19:40 (+1100, git); the gate ran after it, in two sittings by the handoff's
+times: G0 to D2, then C1 to Z. Times below are the laptop's (UTC+11; the runbook said
+UTC+10).
+
+**Where this entry's facts come from.** The owner ran every command and wrote the result up
+with a second guide (a claude.ai conversation), as for check 8. Claude Code wrote the
+runbook and its script and saw none of the logs; it checked the findings against the code
+(each says so). S1's details and R2's first try come from the guide's own record of the
+owner's logs, given after the handoff. Where something wasn't looked at or wasn't reported,
+it says so.
+
+**Verdict: passed.** No step failed; two first tries missed. L1: an empty `$pw` hung the
+command. R2: the script's own guard printed `no plan is ready: stop`, nothing changed, and
+the log was kept as `gate-r2-first-try.txt`. The pass-word file holds
+all 25 words in the runbook's order: `G0-FILE`, `P1-START`, `P2-ENV`, `P3-DEB`,
+`I1-INSTALLED`, `I2-LOOKED`, `T0-FOUR`, `L1-LOCK-75`, `L2-REFUSED`, `L3-REFUSED`,
+`L4-KILLED`, `D1-ROW`, `A1-ARMED-BRANCH`, `A2-ARMED`, `A3-OTHER`, `D2-CHECK13`,
+`C1-PROBED`, `S1-CANCEL`, `R0-BASE`, `R1-REFUSED`, `R2-GONE`, `R3-READY`, `R4-VERIFIED`,
+`R4-SHOWN`, `Z-CLOSED`. None of the findings below blocks the release (the guide's view;
+the owner decides).
+
+**Release state at the handoff.** `main` was fast-forwarded to `a79ac39`, then the release
+commit `6e5a5a5` ("release: 0.5.0": CHANGELOG, README's Status, SECURITY), pushed. The tag
+`v0.5.0` (annotated, like `v0.4.2`) is on `6e5a5a5`; the Release workflow was green; the
+draft release `Apsis 0.5.0` holds `apsis_0.5.0-1_amd64.deb`. **Not published**: publishing
+is the owner's.
+
+**Ruling (owner, 2026-10-04), recorded here because no entry had it:** `restore-6b-core` is
+merged into `main` first (a fast-forward from `10ac37c`), then the release commit is made
+on `main`.
+
+### The file under test
+
+- the .deb `258aac7807fc43972ecf0d9b8269663d328f629402f4d849f90e7c5f7ba184c8`;
+- `/usr/bin/apsis` `6699c133c1f6246443e8a0b9113274a0fb0673425f5b908a5a91d544f5cf03ec`;
+- `/usr/libexec/apsis-helper` `e49007b9262f382938586f302dd0f83de1ebd52bf84b4aa7ebe7954c7c5d15ac`.
+
+The binaries' short hashes after I1, after R4 and after Z are those values. They differ
+from the local build of `0ee8dda` (apsis `559e8037…`, helper `18063d60…`), as the release
+mechanism expects (unpinned stable Rust, the cargo home's path).
+
+### What each step showed (condensed)
+
+- **L1**: `/run/apsis/job.lock` is `600 root root`; `flock -n -E 75` printed 75 during a
+  create. (A first try hung: `$pw`, the pass-word file's variable, was empty.)
+- **L2**: `apt install --reinstall` during a create was refused: `apsis: an Apsis job is
+  running; try again when it has finished`, dpkg's `pre-removal script subprocess returned
+  error exit status 75`, apt exit 100; still `0.5.0-1`, `dpkg --audit` clean; the create
+  ended `done`. **L3**: `apt remove` during a delete, refused the same way (`Processing was
+  halted because there were too many errors.`), still installed. The handoff quotes these
+  lines, not the whole of dpkg's output (open item below).
+- **L4**: the helper killed with `kill -9` during a create, then a reinstall: no `apsis:`
+  line, apt exit 0, no rsync left, no stale lock. The window: the full error view "Remote
+  peer disconnected" with "Try again", the red line "Create failed: the helper stopped
+  before it finished". The leftover row deleted: `Delete this snapshot?` / `unfinished
+  snapshot or delete from 2026-10-04 20:57` / `This can't be undone.`, then `Deleted
+  unfinished snapshot or delete from 2026-10-04 20:57` (5 s).
+- **D1** (fix 2): the helper stopped by hand during a delete: "Delete failed: the helper
+  stopped before it finished" and a dimmed row; Delete removed the row (68 s).
+- **A1**: a hand-made Apsis link, then a reinstall: `apsis-helper: disarm: removed
+  /system-update`, `apsis: the restore that was waiting for a restart is cancelled`, apt
+  exit 0, the link gone, no disarm timer. Another tool's link: no `apsis:` line, link kept.
+- **A2** (armed by Apsis): the dialog "Can't restore this snapshot" / "A restart to restore
+  is already waiting." / "Restart the computer, or wait for it to time out."; by hand
+  `restore refused: restore-armed`; a delete of one row and of two (`Delete 2 snapshots?`):
+  "Not deleted: a restart to restore is waiting." **A3** (another tool's link): "A system
+  update is waiting for a restart." / "Restart first, then restore."; refused
+  `pending-update`; a delete went through (85 s). A2 shows the armed-gap fixes in the real
+  window (`c251e49`, a second preparation refused while armed; `114e2aa`, Delete and
+  DeleteMany refused while armed); A3 shows that another tool's link refuses no delete.
+- **D2** (check 13): `Deleting 1 of 3: …` to `3 of 3: …`, then `Deleted 3 snapshots`; one
+  `delete-many … started` in the journal, no `refused`, no `busy`; both monitors on.
+- **C1**: with the backup disk mounted by the desktop, the create "gate c1" worked, then
+  every list failed (`mount: <backup>: /dev/sda already mounted on <masked>`): the full
+  error view with "Try again", no Refresh icon, the status line still "Snapshot created",
+  Restore did nothing. No `apsis-helper:` in any window text. After Unmount (not Eject) the
+  list came back.
+- **S0**: Settings, then Cancel with nothing changed: Cancel not greyed out.
+- **S1** (from the guide's own record; Claude Code saw no logs): the filter
+  `/var/tmp/apsis-gate-c3/***` added as an unticked row (shown as "-"), Save, then Cancel
+  at once. `Saving the settings…` was not seen (the save was too fast); the status line
+  read "Settings saved" and the window was on the list. After: the config's short hash
+  `b00cf898df037b02`, `filter-count 1`, journal `write config for :1.191: written` (no
+  `started` or `done` line). Settings opened again: the new filter listed, and the footer
+  already read "Settings saved" (finding 5, seen in the window). Removed and saved: the
+  short hash `1e8d387f39671970` again (equal to the first), `filter-count 0`. See "S1:
+  Cancel right after Save" below.
+- **R0**: the dialog "Restore the system?", "Keep my files as they are now", the safety
+  snapshot ticked, the experimental line, no Apsis line; journal `check-restore … ok; home
+  yes, root no, current format, apsis current`.
+- **R1** (fixes 3 and 4): `/pop-upgrade` present at the prompt, "Restart now": "Can't
+  restore this snapshot" / "A Pop!_OS upgrade is in progress." / "Finish or cancel it
+  first, then restore." / "The preparation was dropped. Restore again to measure afresh.",
+  status "Restore stopped"; the working files gone, the kept pair unchanged.
+- **R2**: a reinstall at "Ready to restore": no `apsis:` line, apt exit 0, the helper
+  stopped, the plan's three files still there; "Restart now" did not restart and said "The
+  preparation is gone. Start the restore again."; journal `leftovers removed at start:
+  request.json, restore.filter, restore.note`. (A first try stopped at the script's own
+  guard, `no plan is ready: stop`; nothing changed; the log was kept as
+  `gate-r2-first-try.txt`.)
+- **R3**: the happy path, "gate base" (`2026-10-05_16-29-14`), home kept, safety snapshot
+  `2026-10-05_16-55-45`. At the ready prompt `restore.filter` hashed as at R1 and
+  `restore.note` equalled `RECOVER.txt` on the backup disk. The offline boot showed
+  "Restoring the system. Don't turn off the computer." with the Pop!_ logo (no progress bar
+  in the photographs). `bootctl list` was the same four entries before and after.
+- **R4**, before login: no link, `restore-check.sh` all `ok`, 0 failed units, `dpkg --audit`
+  clean, the running kernel the ESP's, the oldkern entry untouched, `pop-upgrade-init`
+  skipped by its condition, the system marker gone and the home marker kept; the kept pair
+  equal by hash to the ready prompt's (`FILTER-KEPT-BY-HASH`, `NOTE-KEPT-BY-HASH`; the
+  values weren't printed). `RestoreResult` by busctl: `sssxss "done"
+  "2026-10-05_16-29-14" "" 1791180142 "keep" "2026-10-05_16-55-45"` (the number is
+  `result.json`'s `when`). After login: `System restored to 2026-10-05 16:29`, tooltip
+  `Restored from snapshot 2026-10-05_16-29-14. Home folders were kept. Safety snapshot:
+  2026-10-05_16-55-45.`, 7 rows; the panel applet on both monitors: "Last snapshot 12m
+  ago" / "15m ago", "sda 18G / 28G · 67% used · 8.8G free", five rows and "2 older".
+- **Z**: the gate's four snapshots deleted one at a time (each dialog named its row, no
+  password), then `ok, 3 snapshots, 12031221760 of 30120226816 bytes free (statvfs)`.
+
+### Numbers
+
+- Free bytes on the backup disk at P1 and at Z: 12031221760 of 30120226816, no
+  difference. 1745 packages and kernel `7.1.5-76070105-generic` at both.
+- Creates: the first about 7m40s (about 1.8 GB), each later one 2m03s to 2m28s (about 0.2
+  to 0.3 GB each). Deletes: 1m12s for one; D2's three in one job 3m31s.
+- R3, from the helper's journal: the restore started 16:54:59 and was `ready` at 16:57:59
+  (3 min): the plan's dry run 31 s, the safety snapshot's dry run 15 s, its copy 1m37s,
+  then 37 s with nothing logged. Which status line covers which phase is inferred. The
+  safety snapshot took about 253 MB.
+- "Restart now" at 17:00, `armed; restarting` at 17:00:46; `apsis-restore.service` 17:01:29
+  to 17:02:23 (54 s, 27.117 s CPU; the copy attempt 1 of 3, rsync exit 0; the boot files
+  refreshed; `apply-restore ended: Finished(Done)`); the last boot began 17:02:37. Click to
+  greeter: about 2 minutes.
+
+### Deviations from the runbook
+
+- R3's "pick the default entry" would have picked the recovery: `bootctl` marks it
+  `(default)`. The owner picked `Pop_OS-current.conf`, the `(selected)` one.
+- R4's expected rows and Z's deletes left out "gate t5b"; the owner deleted it too, so the
+  count came back to 3. PLAN's line says "the four rows"; there were 7.
+- R3's status lines between the click and `ready` were not captured, except the first and
+  `ready` (the journal gives the timings); R1's click-to-prompt time was not recorded.
+- Z's `systemctl list-units --all "apsis-*"` printed nothing: the list is empty while the
+  helper isn't loaded (`list-unit-files` shows the units).
+
+### S1: Cancel right after Save shown; Cancel during a running save not shown
+
+From the guide's own record of S1 (its write-up of the owner's logs, given after the
+handoff); Claude Code saw no logs. **Shown**: Cancel clicked at once after Save drops the
+edits, leaves the page (the window was on the list, the status line "Settings saved"), and
+the save has written (`filter-count 1`, journal `written`). **Not shown**: Cancel landing
+while the save is still writing: the save ended before the click could be seen (`Saving
+the settings…` never showed). PLAN's gate line ("Settings' Cancel during a running save")
+is shown for its "right after Save" part only.
+
+### Findings, with what the code says. None is fixed or started
+
+1. "Create failed: the helper stopped before it finished" and "Delete failed: …": the
+   prefix is `apsis.ftl:73` and `:79`, the reason is English text in core
+   (`helper/client.rs:453`), and neither is in the README's table or the man page.
+   "Remote peer disconnected" is zbus's error text, shown as it is in the error view.
+2. The "Not deleted: a restart to restore is waiting." tooltip needs a few seconds of
+   hover. The README's table (line 369) has the line; a sentence about the tooltip is the
+   owner's call.
+3. "A restore started elsewhere failed" never showed after a refused by-hand restore: as
+   designed. When a restore job that another caller started ends, the window refreshes the
+   list only if it has no plan ready (`self.ready.is_none()`, `app.rs:2365-2369`);
+   otherwise it does nothing. This branch sets no status line itself (`app.rs:2364`,
+   "that window says how it went"). A2's refusal starts no job; A3's
+   (another tool's link) runs a job that ends `failed`, which is such a job. The ftl key
+   `restore-failed-elsewhere` (`apsis.ftl:217`) has no caller: an unused string.
+4. With the disk mounted by the desktop, after a create that worked: the full mount-error
+   view, the status line still "Snapshot created", no Refresh icon, Restore doing nothing.
+   The failing mount itself is check 9's finding 1 and its README row (README line 361);
+   the rest is new.
+   Not traced in the code.
+5. "Settings saved" stays on the status line when Settings is opened again: seen at S1,
+   and confirmed in the code. `open_settings` (`app.rs:2389-2395`) switches the page, and
+   reloads the settings unless the open settings have unsaved edits (`app.rs:2392`).
+   Neither it nor the read's handler (`on_settings_read`, `app.rs:2421-2428`) touches the
+   status line. The only `self.status = None` in `app.rs` are in `open_restore` and `run`
+   (`app.rs:1528`, `app.rs:2086`), and at S1 the window kept the line.
+6. The helper logs `write config for :1.N: written` (or `unchanged`), one line
+   (`service.rs:729`). The runbook expected `started` and `done`: **the runbook's error**,
+   against the rule that expected journal lines come from the code's strings.
+7. `System restored to <date>` from an old `result.json` before any restore of the gate: as
+   designed (UI.md, "After login"): `RestoreResult` answers from the last restore's
+   `result.json`, check 8's here, until the next restore.
+8. The panel applet clips a long comment at its right edge ("Safety snapshot, before
+   restorin") on both monitors. Not traced.
+9. The systemd-boot menu shows `pop_os-…` in lowercase and no default or selected tags,
+   unlike `bootctl`; `bootctl` marks the recovery `(default)`. Not Apsis's; a runbook line.
+10. kernelstub logged `NVRAM entry #: -1` in the offline boot. Not checked whether that is
+    normal on this machine.
+11. `g.sh verify` printed `-- No entries --`: journalctl's own line when a filter matches
+    nothing. The runbook should have said so.
+12. At 17:00:46, as the restart began: `polkit check of …Apsis.list for :1.109 failed:
+    …NameHasNoOwner` and `list for :1.109: refused: not authorised`. The caller was gone
+    by the check; probably the restart's race, not checked.
+13. Confirmed in the code: only the preparation writes `timeshift/apsis-restore-RECOVER.txt`
+    (`apsis-helper/src/prepare.rs:358`); no delete touches it. After Z the file names
+    "gate base" and its safety snapshot, both deleted. The README says it is written again
+    at every preparation, not that a delete leaves it. The file on the disk was not looked
+    at.
+14. Runbook corrections for the next one (the runbooks are untracked): `list-unit-files`
+    for the units; UTC+11; `stopdel` prints only the lines after the stop; the journal
+    names `:1.N`, not the user; `c1-look` can run before the desktop has mounted the disk;
+    in S1 the "-" is the unticked state, not typed text; the expected rows and Z's list
+    with "gate t5b" and the real counts; R3's boot menu line (9).
+15. Not shown, knowingly (PLAN 6b.13): the window's lines for `problems`, `boot-broken`,
+    `boot-kept` and `failed`.
+16. PLAN's gate line writes `RestoreResult`'s answer as `(sssxss)`; busctl prints `sssxss`
+    without brackets.
+
+### Left on apsis-test
+
+Apsis `0.5.0-1` (CI's .deb), the helper started on demand only. The system files are
+"gate base"'s, the home folder kept, kernel `7.1.5-76070105-generic`, 1745 packages. No
+`/system-update`, no `/pop-upgrade`, no timer, no rsync, nothing armed. The state folder
+holds `result.json`, `last-restore.filter`, `last-restore.note` and `rsync-log`. The backup
+disk holds the three base snapshots ("baseline1", "6b baseline", "baseline 0.5.0") and
+12031221760 bytes free. `/opt`'s three items as at P1. The window's line reads `System
+restored to 2026-10-05 16:29`. The owner stays on `0.5.0-1`. The gate's folder on the
+laptop and the logs on the main machine are the owner's to clear.
+
+### Open items
+
+- `notes/session-2026-10-01.md` is still tracked at `6e5a5a5` (since `c211d0b`). Taking it
+  out is a `git rm` in a commit; the owner's call.
+- From the owner's logs, not in the handoff: L2's and L3's tables in full (dpkg's lines,
+  the new package's `prerm failed-upgrade` attempt), and the leftover row's own text in
+  the L4 and D1 screenshots (`Unfinished snapshot or delete · Delete removes it` by the
+  code, `apsis.ftl:46`).

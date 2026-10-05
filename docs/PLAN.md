@@ -2548,6 +2548,14 @@ Checks:
    `boot-broken` (no hand-placed `result.json`), the plain-23 path, the FAT "not properly
    unmounted" lines (`fsck.fat -n` was not run), a by-hand go-back across a kernel change.
 
+   **Update 2026-10-05: the release gate passed** on CI's .deb from the tag `v0.5.0` (on the
+   release commit `6e5a5a5`), all 25 steps (DECISIONS "the release gate passed"). Settings'
+   Cancel right after Save is shown (the edits dropped, the page left, the save written);
+   Cancel during a running save is not (the save ended before the click could be seen).
+   Two lines above were off: busctl prints the answer as `sssxss`, without brackets, and
+   the restore left 7 rows, not four. The draft release waits for the owner's publish;
+   the gate's findings are for after 0.5.0.
+
 Each slice ends with `cargo test --workspace`, clippy `-D warnings`, `cargo fmt` and a summary.
 
 ### 6b.14 Answers (owner, 2026-09-30) and what's left
