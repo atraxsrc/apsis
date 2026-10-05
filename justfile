@@ -165,11 +165,15 @@ _deb-assets:
 
 # Dev only, for apsis-test and never for a release: the .deb whose helper has the `luks-spike`
 # feature (a restore is let through on an encrypted or LVM system disk). Its version says so.
-# Output: target/debian/apsis_<version>+luksspike-1_amd64.deb
+# In a folder of its own: cargo-deb clears target/debian of older .deb files on every run.
+# Output: target/luks-spike/apsis_<version>+luksspike-1_amd64.deb
+luks-spike-dir := cargo-target-dir / 'luks-spike'
+
 deb-luks-spike *args: _deb-assets
     cargo build --release --workspace --features apsis-helper/luks-spike {{args}}
     grep -qaF '{{luks-spike-marker}}' {{helper-built}}
-    cargo deb -p {{name}} --no-build --deb-version {{version}}+luksspike-1
+    mkdir -p {{luks-spike-dir}}
+    cargo deb -p {{name}} --no-build --deb-version {{version}}+luksspike-1 --output {{luks-spike-dir}}/
 
 # The workspace version, from [workspace.package] in the root Cargo.toml (its first `version`).
 version := `sed -n '0,/^version/s/^version = "\(.*\)"$/\1/p' Cargo.toml`
