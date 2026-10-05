@@ -31,7 +31,8 @@ pub enum Refusal {
     RootFilesystem {
         fstype: String,
     },
-    /// `/` isn't on a plain partition (dm-crypt, LVM), or lsblk doesn't show its device.
+    /// `/` is on a device Restore doesn't know ([`is_restorable_root`]: anything but a plain
+    /// partition or an encrypted Pop!_OS install's layout), or lsblk doesn't show its device.
     RootDevice,
     /// `/boot`, `/usr` or `/var` is a separate mount.
     SplitSystem,
@@ -195,6 +196,8 @@ pub struct System<'a> {
     pub root_uuid: &'a str,
     /// The names in `/boot/efi/EFI`.
     pub esp_folders: &'a [String],
+    /// The text of `/etc/crypttab`, empty if there's none.
+    pub crypttab: &'a str,
     /// `/system-update` or `/etc/system-update` exists (not followed).
     pub pending_update: bool,
     /// `/system-update` is Apsis's own link (it points at the state folder): a restore is
@@ -263,7 +266,7 @@ pub fn check(system: &System<'_>, snapshot: &Snapshot<'_>) -> Result<(), Refusal
         .devices
         .iter()
         .find(|device| !system.root_uuid.is_empty() && device.uuid == system.root_uuid);
-    if root.is_none_or(|device| !is_restorable_root(&device.kind)) {
+    if root.is_none_or(|device| !is_restorable_root(device, system.devices, system.crypttab)) {
         return Err(Refusal::RootDevice);
     }
     if ["/boot", "/usr", "/var"]
@@ -303,12 +306,60 @@ pub fn check(system: &System<'_>, snapshot: &Snapshot<'_>) -> Result<(), Refusal
     Ok(())
 }
 
-/// Whether `/` may be on a device of lsblk's `kind`: a plain partition. A build with the
-/// dev-only `luks-spike` feature (never a release build) also lets dm-crypt and LVM through:
-/// the same installation only, as [`Refusal::OtherInstallation`] and
-/// [`Refusal::CrypttabDiffers`] still hold.
-fn is_restorable_root(kind: &str) -> bool {
-    kind == "part" || (cfg!(feature = "luks-spike") && matches!(kind, "crypt" | "lvm"))
+/// Whether `/` may be on `root`, one of lsblk's `devices`. Two layouts are let through:
+///
+/// - a plain partition;
+/// - what Pop!_OS's installer makes with "Encrypt drive": an LVM volume on one dm-crypt
+///   mapping of one LUKS partition, which the live `crypttab` opens under that name and by
+///   that partition's UUID.
+///
+/// The second is the layout both runs of the LUKS spike restored on (apsis-test, 2026-10-05
+/// and 2026-10-06), and nothing wider: LUKS without LVM, LVM without LUKS, a volume on
+/// several devices, a mapping of a whole disk or of a RAID stay refused until a machine has
+/// shown them to work. The same installation only, as [`Refusal::OtherInstallation`] and
+/// [`Refusal::CrypttabDiffers`] still hold; the apply's boot refresh then checks that the new
+/// boot files can unlock the disk as the old ones did.
+///
+/// A volume group with a second physical volume isn't seen from here as long as the root's
+/// own volume sits on one: lsblk lists a volume under the devices it's on.
+fn is_restorable_root(root: &Device, devices: &[Device], crypttab: &str) -> bool {
+    // The one device holding `device`, if it's of this kind and holds this.
+    let held_by = |device: &Device, kind: &str, holds: &str| {
+        let [parent] = device.parents.as_slice() else {
+            return None;
+        };
+        devices
+            .iter()
+            .find(|d| d.kname == *parent)
+            .filter(|d| d.kind == kind && d.fstype.eq_ignore_ascii_case(holds))
+    };
+    match root.kind.as_str() {
+        "part" => true,
+        "lvm" => held_by(root, "crypt", "LVM2_member")
+            .and_then(|mapping| Some((mapping, held_by(mapping, "part", "crypto_LUKS")?)))
+            .is_some_and(|(mapping, partition)| {
+                crypttab_opens(crypttab, &mapping.name, &partition.uuid)
+            }),
+        _ => false,
+    }
+}
+
+/// Whether `crypttab` has an entry that opens the LUKS device of `uuid` under `name`: the
+/// name first, then the device as `UUID=<uuid>` or `/dev/disk/by-uuid/<uuid>`. An entry that
+/// names it another way (a device path, `PARTUUID=`, `LABEL=`) isn't one: nothing here could
+/// tell whether it's the same device.
+fn crypttab_opens(crypttab: &str, name: &str, uuid: &str) -> bool {
+    !uuid.is_empty()
+        && crypttab_entries(crypttab).iter().any(|entry| {
+            let mut fields = entry.split(' ');
+            fields.next() == Some(name)
+                && fields.next().is_some_and(|source| {
+                    source
+                        .strip_prefix("UUID=")
+                        .or_else(|| source.strip_prefix("/dev/disk/by-uuid/"))
+                        .is_some_and(|found| found.eq_ignore_ascii_case(uuid))
+                })
+        })
 }
 
 /// What's at `/system-update` or `/etc/system-update`, asked of the name itself (`lstat`).
@@ -544,6 +595,57 @@ mod tests {
             label: String::new(),
             size: 0,
             parent_uuid: String::new(),
+            parents: Vec::new(),
+        }
+    }
+
+    /// A device held by `parent`, under the kernel's name `kname`.
+    fn held(kname: &str, parent: &str, device: Device) -> Device {
+        Device {
+            kname: kname.to_owned(),
+            parents: vec![parent.to_owned()],
+            ..device
+        }
+    }
+
+    const LUKS_UUID: &str = "22222222-2222-2222-2222-222222222222";
+    /// The crypttab of an encrypted Pop!_OS install: the root's mapping, and the swap's.
+    const ENCRYPTED_CRYPTTAB: &str = "\
+cryptdata UUID=22222222-2222-2222-2222-222222222222 none luks
+cryptswap UUID=44444444-4444-4444-4444-444444444444 /dev/urandom swap,plain,offset=1024,cipher=aes-xts-plain64,size=512
+";
+
+    /// The devices of an encrypted Pop!_OS install ("Encrypt drive"), as apsis-test's after
+    /// its reinstall (2026-10-05): the root is an LVM volume on a mapping of a partition.
+    fn encrypted_devices() -> Vec<Device> {
+        vec![
+            device("sdX", "disk", "", ""),
+            held("sdX1", "sdX", device("sdX1", "part", "vfat", "AAAA-0001")),
+            held(
+                "sdX3",
+                "sdX",
+                device("sdX3", "part", "crypto_LUKS", LUKS_UUID),
+            ),
+            held(
+                "dm-0",
+                "sdX3",
+                device("cryptdata", "crypt", "LVM2_member", "pv-uuid"),
+            ),
+            held(
+                "dm-1",
+                "dm-0",
+                device("data-root", "lvm", "ext4", ROOT_UUID),
+            ),
+        ]
+    }
+
+    /// [`Case::good`] on the encrypted layout.
+    fn encrypted() -> Case {
+        Case {
+            mountinfo: MOUNTINFO.replace("/dev/sdX3 rw", "/dev/mapper/data-root rw"),
+            devices: encrypted_devices(),
+            crypttab: ENCRYPTED_CRYPTTAB.to_owned(),
+            ..Case::good()
         }
     }
 
@@ -586,6 +688,7 @@ mod tests {
         devices: Vec<Device>,
         root_uuid: String,
         esp_folders: Vec<String>,
+        crypttab: String,
         info: Option<Info>,
         kernelstub_config: Option<String>,
         boot_files: Vec<String>,
@@ -601,6 +704,7 @@ mod tests {
                 devices: devices(),
                 root_uuid: ROOT_UUID.to_owned(),
                 esp_folders: vec!["BOOT".to_owned(), format!("Pop_OS-{ROOT_UUID}")],
+                crypttab: String::new(),
                 info: Some(info(ROOT_UUID, "rsync")),
                 kernelstub_config: Some(kernelstub(r#"["quiet", "splash"]"#)),
                 boot_files: vec![
@@ -630,6 +734,7 @@ mod tests {
                 devices: &self.devices,
                 root_uuid: &self.root_uuid,
                 esp_folders: &self.esp_folders,
+                crypttab: &self.crypttab,
                 pending_update: false,
                 restore_armed: false,
             };
@@ -735,32 +840,131 @@ mod tests {
         );
     }
 
-    /// dm-crypt and LVM are refused in every build but the dev-only `luks-spike` one, which
-    /// lets exactly those two through.
+    /// A root on a mapped device of any kind, with nothing known about what holds it.
     #[test]
     fn a_root_on_a_mapped_device_is_refused() {
-        for kind in ["crypt", "lvm", "raid1", "disk"] {
+        for kind in ["crypt", "lvm", "dm", "raid1", "disk", ""] {
             let mut case = Case::good();
             case.devices[2].kind = kind.to_owned();
-            let spike_lets_through =
-                cfg!(feature = "luks-spike") && kind != "raid1" && kind != "disk";
-            let expected = if spike_lets_through {
-                Ok(())
-            } else {
-                Err(Refusal::RootDevice)
-            };
-            assert_eq!(case.check(), expected, "{kind}");
+            assert_eq!(case.check(), Err(Refusal::RootDevice), "{kind}");
         }
     }
 
-    /// The gate is a cargo feature that nothing turns on: a plain build refuses.
-    #[cfg(not(feature = "luks-spike"))]
+    /// The layout the LUKS spike restored on: an LVM volume on a mapping of a LUKS partition
+    /// that the live crypttab opens.
     #[test]
-    fn without_the_spike_feature_only_a_partition_is_a_restorable_root() {
-        assert!(is_restorable_root("part"));
-        for kind in ["crypt", "lvm", "dm", "raid1", "disk", ""] {
-            assert!(!is_restorable_root(kind), "{kind}");
+    fn an_encrypted_pop_os_machine_restores_its_own_snapshot() {
+        assert_eq!(encrypted().check(), Ok(()));
+        // The entry's other spellings of the same device, and a comment beside it.
+        for crypttab in [
+            format!("# the disk\ncryptdata\tUUID={LUKS_UUID}  none  luks,discard\n"),
+            format!("cryptdata UUID={} none luks\n", LUKS_UUID.to_uppercase()),
+            format!("cryptdata /dev/disk/by-uuid/{LUKS_UUID} none luks\n"),
+        ] {
+            let case = Case {
+                crypttab: crypttab.clone(),
+                ..encrypted()
+            };
+            assert_eq!(case.check(), Ok(()), "{crypttab}");
         }
+    }
+
+    /// The same machine from lsblk's own JSON, through [`parse_lsblk`]. The file is written
+    /// by hand from what the spike's log shows of apsis-test, with placeholders.
+    #[test]
+    fn the_encrypted_layout_is_read_from_lsblks_json() {
+        let devices =
+            crate::settings::parse_lsblk(include_str!("../../tests/fixtures/lsblk-encrypted.json"))
+                .unwrap();
+        let root = devices.iter().find(|d| d.uuid == ROOT_UUID).unwrap();
+        assert_eq!(
+            (root.kind.as_str(), root.parents.as_slice()),
+            ("lvm", &["dm-0".to_owned()][..])
+        );
+        let case = Case {
+            devices,
+            ..encrypted()
+        };
+        assert_eq!(case.check(), Ok(()));
+    }
+
+    /// Every other stack under the root is refused: none has been restored on.
+    #[test]
+    fn a_layout_other_than_the_encrypted_installs_is_refused() {
+        let refused = |what: &str, change: fn(&mut Vec<Device>)| {
+            let mut case = encrypted();
+            change(&mut case.devices);
+            assert_eq!(case.check(), Err(Refusal::RootDevice), "{what}");
+        };
+        refused("LUKS without LVM", |devices| {
+            devices.pop();
+            devices[3].fstype = "ext4".to_owned();
+            devices[3].uuid = ROOT_UUID.to_owned();
+        });
+        refused("LVM without LUKS", |devices| {
+            devices[4].parents = vec!["sdX3".to_owned()];
+            devices[2].fstype = "LVM2_member".to_owned();
+            devices.remove(3);
+        });
+        refused("a volume on two mappings", |devices| {
+            devices[4].parents.push("dm-7".to_owned());
+        });
+        refused("a volume lsblk gives no parent for", |devices| {
+            devices[4].parents.clear();
+        });
+        refused("a mapping of a whole disk", |devices| {
+            devices[3].parents = vec!["sdX".to_owned()];
+            devices[0].fstype = "crypto_LUKS".to_owned();
+            devices[0].uuid = LUKS_UUID.to_owned();
+        });
+        refused("a mapping of a RAID", |devices| {
+            devices[2].kind = "raid1".to_owned();
+        });
+        refused("a mapping of a mapping", |devices| {
+            devices[2].kind = "crypt".to_owned();
+        });
+        refused("a volume on a volume", |devices| {
+            devices[3].kind = "lvm".to_owned();
+        });
+        refused("a mapping that isn't a physical volume", |devices| {
+            devices[3].fstype = "ext4".to_owned();
+        });
+        refused("a partition that isn't LUKS", |devices| {
+            devices[2].fstype = "ext4".to_owned();
+        });
+        refused("a mapping whose partition lsblk doesn't list", |devices| {
+            devices.remove(2);
+        });
+    }
+
+    /// The live crypttab must open the root's mapping under its name, by the UUID of the
+    /// partition it's on.
+    #[test]
+    fn an_encrypted_root_the_crypttab_doesnt_open_is_refused() {
+        for crypttab in [
+            String::new(),
+            "# cryptdata UUID=22222222-2222-2222-2222-222222222222 none luks\n".to_owned(),
+            format!("other UUID={LUKS_UUID} none luks\n"),
+            "cryptdata UUID=99999999-9999-9999-9999-999999999999 none luks\n".to_owned(),
+            "cryptdata /dev/sdX3 none luks\n".to_owned(),
+            "cryptdata PARTUUID=22222222-2222-2222-2222-222222222222 none luks\n".to_owned(),
+            "cryptdata\n".to_owned(),
+            // The swap's entry alone.
+            ENCRYPTED_CRYPTTAB.lines().nth(1).unwrap().to_owned(),
+        ] {
+            let case = Case {
+                crypttab: crypttab.clone(),
+                ..encrypted()
+            };
+            assert_eq!(case.check(), Err(Refusal::RootDevice), "{crypttab:?}");
+        }
+        // A LUKS partition lsblk gives no UUID for can't be matched with an entry.
+        let mut case = encrypted();
+        case.devices[2].uuid.clear();
+        case.crypttab = "cryptdata UUID= none luks\n".to_owned();
+        assert_eq!(case.check(), Err(Refusal::RootDevice));
+        // A plain partition needs nothing of the crypttab.
+        assert!(Case::good().crypttab.is_empty());
     }
 
     #[test]

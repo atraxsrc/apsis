@@ -19,9 +19,3 @@ zbus.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }
-
-[features]
-# Dev only (the LUKS restore spike): `restore::refusal::check` lets `/` on dm-crypt or LVM
-# through. Off by default and never in a release build: nothing in the workspace turns it on,
-# and `just deb` refuses a helper built with it (see `just deb-luks-spike`).
-luks-spike = []

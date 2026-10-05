@@ -42,6 +42,36 @@ fn lsblk_devices_and_parents() {
     assert!(!find("AAAA-0001").is_linux());
     assert_eq!(find(BTRFS_UUID).size, 256_059_465_728);
     assert!(parse_lsblk("{}").is_err());
+    // The holders by the kernel's names: none for a disk, one for a partition or a mapping.
+    assert_eq!(unlocked.parents, ["sdc1"]);
+    assert_eq!(backup.parents, ["sdb"]);
+    assert!(
+        devices
+            .iter()
+            .find(|d| d.name == "sdb")
+            .unwrap()
+            .parents
+            .is_empty()
+    );
+}
+
+/// An LVM volume on two disks is listed once per disk: one device, both parents.
+#[test]
+fn a_volume_on_two_devices_has_both_parents() {
+    let row = |pkname: &str| {
+        format!(
+            r#"{{"name":"vg-root", "kname":"dm-2", "pkname":"{pkname}", "type":"lvm", "fstype":"ext4", "uuid":"11111111-1111-1111-1111-111111111111", "size":1, "label":null}}"#
+        )
+    };
+    let json = format!(
+        r#"{{"blockdevices": [{}, {}, {}]}}"#,
+        row("dm-0"),
+        row("dm-1"),
+        row("dm-0")
+    );
+    let devices = parse_lsblk(&json).unwrap();
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].parents, ["dm-0", "dm-1"]);
 }
 
 #[test]

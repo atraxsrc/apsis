@@ -19,8 +19,3 @@ zbus.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-
-[features]
-# Dev only (the LUKS restore spike), see apsis-core's feature of the same name and
-# `src/luks_spike.rs`. Built only by `just deb-luks-spike`.
-luks-spike = ["apsis-core/luks-spike"]

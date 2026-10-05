@@ -147,33 +147,13 @@ uninstall:
 # Output: target/debian/apsis_<version>-1_amd64.deb
 deb-assets-dir := 'target' / 'deb-assets'
 
-# What a helper built with the dev-only `luks-spike` feature carries (MARKER in
-# crates/apsis-helper/src/luks_spike.rs): `deb` refuses to package a helper that has it.
-luks-spike-marker := 'luks-spike build (dev only)'
-helper-built := cargo-target-dir / 'release' / helper
-
-deb *args: _deb-assets
+deb *args:
     cargo build --release --workspace {{args}}
-    @if grep -qaF '{{luks-spike-marker}}' {{helper-built}}; then echo "refused: {{helper-built}} was built with the dev-only luks-spike feature"; exit 1; fi
-    cargo deb -p {{name}} --no-build
-
-_deb-assets:
     mkdir -p {{deb-assets-dir}}
     sed 's|@libexecdir@|{{libexec-path}}|g' {{ helper-res / helper-bus + '.service.in' }} > {{ deb-assets-dir / helper-bus + '.service' }}
     sed 's|@libexecdir@|{{libexec-path}}|g' {{ helper-res / helper + '.service.in' }} > {{ deb-assets-dir / helper + '.service' }}
     gzip -9nc {{ 'docs' / name + '.1' }} > {{ deb-assets-dir / name + '.1.gz' }}
-
-# Dev only, for apsis-test and never for a release: the .deb whose helper has the `luks-spike`
-# feature (a restore is let through on an encrypted or LVM system disk). Its version says so.
-# In a folder of its own: cargo-deb clears target/debian of older .deb files on every run.
-# Output: target/luks-spike/apsis_<version>+luksspike-1_amd64.deb
-luks-spike-dir := cargo-target-dir / 'luks-spike'
-
-deb-luks-spike *args: _deb-assets
-    cargo build --release --workspace --features apsis-helper/luks-spike {{args}}
-    grep -qaF '{{luks-spike-marker}}' {{helper-built}}
-    mkdir -p {{luks-spike-dir}}
-    cargo deb -p {{name}} --no-build --deb-version {{version}}+luksspike-1 --output {{luks-spike-dir}}/
+    cargo deb -p {{name}} --no-build
 
 # The workspace version, from [workspace.package] in the root Cargo.toml (its first `version`).
 version := `sed -n '0,/^version/s/^version = "\(.*\)"$/\1/p' Cargo.toml`

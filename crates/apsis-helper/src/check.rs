@@ -107,6 +107,7 @@ impl Live {
             devices: &self.devices,
             root_uuid: &self.root_uuid,
             esp_folders: &self.esp_folders,
+            crypttab: &self.crypttab,
             pending_update: self.pending_update,
             restore_armed: self.restore_armed,
         }

@@ -13,8 +13,6 @@
 mod apply;
 mod arm;
 mod check;
-#[cfg(feature = "luks-spike")]
-mod luks_spike;
 #[cfg(test)]
 mod maintainer_scripts;
 mod native;
@@ -24,6 +22,7 @@ mod runner;
 mod service;
 mod settings;
 mod state;
+mod unlock;
 mod usage;
 
 use std::process::ExitCode;
@@ -41,8 +40,6 @@ const IDLE: Duration = Duration::from_secs(60);
 #[tokio::main]
 async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    #[cfg(feature = "luks-spike")]
-    eprintln!("apsis-helper: {}", luks_spike::MARKER);
     if args.iter().any(|a| a == "--apply-restore") {
         // The offline boot's entry point (PLAN 6b.6): no D-Bus.
         return apply::apply_restore();

@@ -23,6 +23,7 @@ use crate::arm;
 use crate::check::{self, Live, SnapshotFiles};
 use crate::native::{self, Access, MOUNT_POINT, Mounted};
 use crate::runner::{DirectRunner, SAFE_PATH};
+use crate::unlock::{self, Boot};
 
 /// How many lines of rsync's standard error the result keeps.
 const STDERR_TAIL_LINES: usize = 20;
@@ -80,6 +81,9 @@ pub struct RealRunner<R: Runner> {
     mounted: Option<Mounted<DirectRunner>>,
     /// plymouth answered; off after its first failure (no splash: the journal has it all).
     plymouth: bool,
+    /// `/` is on a plain partition (`open_backup` saw lsblk say so): nothing unlocks it at
+    /// boot, so the boot refresh has nothing to compare ([`Self::check_unlocking`]).
+    plain_root: bool,
     /// `systemctl reboot --no-block` didn't go through ([`apply::exit_code`]).
     pub restart_failed: bool,
 }
@@ -106,6 +110,7 @@ impl<R: Runner> RealRunner<R> {
             tools,
             mounted: None,
             plymouth: true,
+            plain_root: false,
             restart_failed: false,
         }
     }
@@ -162,19 +167,20 @@ impl<R: Runner> RealRunner<R> {
     }
 }
 
-/// Dev only, see [`crate::luks_spike`].
-#[cfg(feature = "luks-spike")]
 impl<R: Runner> RealRunner<R> {
-    /// After kernelstub: [`crate::luks_spike::check`] of the refreshed ESP against the backup
-    /// taken before the refresh, read with `lsinitramfs -l`. With no backup there's nothing
-    /// to compare with (the apply never refreshes without one).
+    /// After kernelstub, on a system whose `/` isn't on a plain partition: [`unlock::check`]
+    /// of the refreshed ESP against the backup taken before the refresh, read with
+    /// `lsinitramfs -l`. With no backup there's nothing to compare with (the apply never
+    /// refreshes without one).
     fn check_unlocking(&self) -> Result<(), String> {
-        use crate::luks_spike::{self, Boot};
         use esp::{BACKUP_DIR, BootFile};
 
+        if self.plain_root {
+            return Ok(());
+        }
         let backup = self.paths.state_dir.join(BACKUP_DIR);
         if fs::symlink_metadata(&backup).is_err() {
-            eprintln!("apsis-helper: luks-spike: no ESP backup, nothing to compare with");
+            eprintln!("apsis-helper: unlock check: no ESP backup, nothing to compare with");
             return Ok(());
         }
         let manifest = Manifest::load(&self.paths.state_dir)
@@ -183,7 +189,7 @@ impl<R: Runner> RealRunner<R> {
         let text = |path: &Path| {
             fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))
         };
-        let listed = |path: &Path| -> Result<luks_spike::Pieces, String> {
+        let listed = |path: &Path| -> Result<unlock::Pieces, String> {
             let argv = ["lsinitramfs", "-l", &path.to_string_lossy()].map(str::to_owned);
             let output = self.tool(&argv)?;
             if !output.success {
@@ -193,7 +199,7 @@ impl<R: Runner> RealRunner<R> {
                     tail(&output.stderr)
                 ));
             }
-            Ok(luks_spike::pieces(&output.stdout))
+            Ok(unlock::pieces(&output.stdout))
         };
         let (entry_before, entry_after) = (
             text(&backup.join(BootFile::CurrentEntry.name()))?,
@@ -208,16 +214,16 @@ impl<R: Runner> RealRunner<R> {
             pieces: listed(&on_esp(BootFile::Initrd))?,
         };
         eprintln!(
-            "apsis-helper: luks-spike: the initrd before {:?}, after {:?}; root= is {}",
+            "apsis-helper: unlock check: the initrd before has {}; after, {}; root= is {}",
             before.pieces,
             after.pieces,
-            if luks_spike::root_option(before.entry) == luks_spike::root_option(after.entry) {
+            if unlock::root_option(before.entry) == unlock::root_option(after.entry) {
                 "the same"
             } else {
                 "another"
             }
         );
-        luks_spike::check(&before, &after)
+        unlock::check(&before, &after)
     }
 }
 
@@ -329,6 +335,10 @@ impl<R: Runner> apply::Runner for RealRunner<R> {
         if let Err(refusal) = refusal::check(&live.as_system_at_apply(), &files.as_snapshot()) {
             return Err(format!("the restore was refused: {}", refusal.to_wire()));
         }
+        self.plain_root = live
+            .devices
+            .iter()
+            .any(|device| device.uuid == live.root_uuid && device.kind == "part");
         // A separate /home being restored must be the plan's partition, mounted (6b.6).
         if let Some(home) = &plan.separate_home {
             if fstype_at(&mountinfo, Path::new("/home")).is_none() {
@@ -432,9 +442,7 @@ impl<R: Runner> apply::Runner for RealRunner<R> {
                 tail(&output.stderr)
             ));
         }
-        #[cfg(feature = "luks-spike")]
-        self.check_unlocking()?;
-        Ok(())
+        self.check_unlocking()
     }
 
     fn put_back_esp(&mut self, plan: &Plan) -> Result<(), EspError> {
@@ -789,12 +797,11 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
-    /// Dev only (`luks-spike`): after kernelstub the refreshed ESP is compared with the
-    /// backup taken before it, and an initrd that lost what unlocks the disk fails the
-    /// refresh (the apply then puts the boot files back).
-    #[cfg(feature = "luks-spike")]
+    /// After kernelstub the refreshed ESP is compared with the backup taken before it, and
+    /// an initrd that lost what unlocks the disk fails the refresh (the apply then puts the
+    /// boot files back). Not on a plain partition, where nothing is listed.
     #[test]
-    fn the_spike_fails_a_refresh_whose_initrd_cant_unlock_the_disk() {
+    fn a_refresh_whose_initrd_cant_unlock_the_disk_fails() {
         use apsis_core::restore::esp::BootFile;
 
         const ENCRYPTED: &str = "\
@@ -846,6 +853,11 @@ mod tests {
         .unwrap();
         let error = runner.refresh_boot().unwrap_err();
         assert!(error.contains("root= option"), "{error}");
+        // On a plain partition: kernelstub only, whatever the entry says.
+        let calls_before = runner.tools.calls().len();
+        runner.plain_root = true;
+        assert_eq!(runner.refresh_boot(), Ok(()));
+        assert_eq!(runner.tools.calls().len(), calls_before + 1);
         fs::remove_dir_all(&root).unwrap();
     }
 

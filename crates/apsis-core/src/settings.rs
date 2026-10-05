@@ -113,6 +113,9 @@ pub struct Device {
     /// UUID of the device holding this one (Timeshift's `parent_device_uuid`); empty for a
     /// partition on a plain disk, which has no UUID.
     pub parent_uuid: String,
+    /// The kernel names of the devices holding this one (lsblk's `PKNAME`), one for each row
+    /// lsblk listed it in: none for a whole disk, several for an LVM volume on several disks.
+    pub parents: Vec<String>,
 }
 
 impl Device {
@@ -185,8 +188,16 @@ pub fn parse_lsblk(json: &str) -> Result<Vec<Device>> {
     let mut devices: Vec<(Device, String)> = Vec::new();
     for row in rows {
         let kname = text(row, "kname");
-        // An LVM volume on several disks is listed once per disk: keep the first.
-        if kname.is_empty() || devices.iter().any(|(d, _)| d.kname == kname) {
+        let pkname = text(row, "pkname");
+        if kname.is_empty() {
+            continue;
+        }
+        // An LVM volume on several disks is listed once per disk: keep the first, and note
+        // the others' parents.
+        if let Some((listed, _)) = devices.iter_mut().find(|(d, _)| d.kname == kname) {
+            if !pkname.is_empty() && !listed.parents.contains(&pkname) {
+                listed.parents.push(pkname);
+            }
             continue;
         }
         // Older lsblk prints sizes as strings.
@@ -204,8 +215,9 @@ pub fn parse_lsblk(json: &str) -> Result<Vec<Device>> {
             label: text(row, "label"),
             size,
             parent_uuid: String::new(),
+            parents: Vec::from_iter((!pkname.is_empty()).then(|| pkname.clone())),
         };
-        devices.push((device, text(row, "pkname")));
+        devices.push((device, pkname));
     }
     let uuids: Vec<(String, String)> = devices
         .iter()

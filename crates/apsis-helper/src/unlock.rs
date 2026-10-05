@@ -1,21 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Dev only: the `luks-spike` feature. Never in a release build: nothing turns the feature
-//! on, and `just deb` refuses a helper that carries [`MARKER`].
+//! Whether a refreshed ESP can still unlock the system disk: the end of the apply's boot
+//! refresh on a system whose `/` isn't on a plain partition (core's
+//! `refusal::is_restorable_root` lets an encrypted Pop!_OS install through).
 //!
-//! With the feature, core's refusal lets `/` on dm-crypt or LVM through
-//! (`refusal::is_restorable_root`), and the boot refresh ends with the check here: the
-//! refreshed ESP must find and unlock `/` the way the ESP that booted this system did. What
-//! fails it fails the boot refresh, so the apply puts the boot files back (PLAN 6b.6 step 6).
+//! The refreshed ESP must find and unlock `/` the way the ESP that booted this system did.
+//! What fails it fails the boot refresh, so the apply puts the boot files back (PLAN 6b.6
+//! step 6).
 //!
 //! The same installation only. `/etc/fstab` and `/etc/crypttab` aren't copied (the filter's
 //! `DISKS`), a snapshot of another root UUID or with another crypttab is refused before
 //! arming, and no initrd is rebuilt: the snapshot's was built on this system.
 
-/// In the journal at every start of a helper built with the feature, and what `just deb`
-/// and `just deb-luks-spike` look for in the binary.
-pub const MARKER: &str =
-    "luks-spike build (dev only): restore is let through on an encrypted or LVM system disk";
+use std::fmt;
 
 /// What an initrd holds to unlock an encrypted root and to find a root on LVM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -27,6 +24,23 @@ pub struct Pieces {
     /// The size in bytes of `cryptroot/crypttab`, the entries unlocked in the initramfs
     /// (0 on a system without an encrypted root). `None`: the file isn't there.
     pub crypttab: Option<u64>,
+}
+
+/// For the journal: `cryptsetup, lvm, cryptroot/crypttab of 62 bytes`, or what's missing.
+impl fmt::Display for Pieces {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let has = |there: bool, name: &str| format!("{}{name}", if there { "" } else { "no " });
+        let crypttab = match self.crypttab {
+            Some(size) => format!("cryptroot/crypttab of {size} bytes"),
+            None => "no cryptroot/crypttab".to_owned(),
+        };
+        write!(
+            f,
+            "{}, {}, {crypttab}",
+            has(self.cryptsetup, "cryptsetup"),
+            has(self.lvm, "lvm")
+        )
+    }
 }
 
 /// The pieces in `lsinitramfs -l`'s output: `cpio -tv` lines (mode, links, owner, group,
@@ -167,6 +181,14 @@ options root=UUID=11111111-1111-1111-1111-111111111111 ro quiet loglevel=0 splas
             }
         );
         assert_eq!(pieces(""), Pieces::default());
+        assert_eq!(
+            pieces(ENCRYPTED).to_string(),
+            "cryptsetup, lvm, cryptroot/crypttab of 66 bytes"
+        );
+        assert_eq!(
+            Pieces::default().to_string(),
+            "no cryptsetup, no lvm, no cryptroot/crypttab"
+        );
         // A link or a folder of the name isn't the program, and nor is a longer name.
         let lookalikes = "\
 lrwxrwxrwx   1 root     root            3 Apr  8  2024 usr/sbin/lvm -> foo
