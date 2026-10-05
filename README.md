@@ -170,8 +170,12 @@ A restore asks every time.
 ### Known limitations of restore
 
 - **Experimental**, and for **Pop!_OS 24.04 with systemd-boot (kernelstub) only**. Other
-  distributions, GRUB, BIOS boot, btrfs or an encrypted or LVM system disk, and a system split
-  over `/boot`, `/usr` or `/var` partitions are refused before anything happens.
+  distributions, GRUB, BIOS boot, btrfs, and a system split over `/boot`, `/usr` or `/var`
+  partitions are refused before anything happens.
+- **An encrypted system disk works in one layout**: the one Pop!_OS's installer makes with
+  "Encrypt drive" (an LVM volume inside one LUKS partition), on the installation the
+  snapshot was made of. Any other encrypted or LVM layout is refused. The disk's passphrase
+  is asked twice: at the restart that runs the restore, and at the start after it.
 - **A snapshot from another installation is refused**: it must have been taken of this
   system disk.
 - **A file changed in place with the same size and modification time** as in the snapshot

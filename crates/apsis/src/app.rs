@@ -562,7 +562,7 @@ fn refusal_lines(refusal: &Refusal) -> (String, String) {
             fl!("refused-root-filesystem", fstype = fstype.as_str()),
             fl!("refused-this-computer-yet"),
         ),
-        Refusal::RootDevice => (fl!("refused-root-device"), fl!("refused-this-computer-yet")),
+        Refusal::RootDevice => (fl!("refused-root-device"), fl!("refused-root-device-do")),
         Refusal::SplitSystem => (
             fl!("refused-split-system"),
             fl!("refused-this-computer-yet"),

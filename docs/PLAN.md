@@ -1071,7 +1071,7 @@ line on what to do, and Close (wording in 6b.8's string table). The lines below 
 | no `/etc/kernelstub/configuration` or `kernelstub` (GRUB, other distros) | "Restore only works on Pop!_OS with systemd-boot for now." |
 | ESP not mounted at `/boot/efi` as vfat, or no `EFI/Pop_OS-<root-uuid>/` on it | "The boot partition isn't where Pop!_OS keeps it." |
 | root filesystem isn't ext4 | "Restore doesn't support a <fstype> system disk yet." |
-| root on `/dev/mapper/*`, dm-crypt, LVM (lsblk `TYPE` not `part`) | "Restore doesn't support an encrypted or LVM system disk yet." |
+| root's device (lsblk, walked by `PKNAME`) is neither a plain partition (`TYPE` `part`) nor, since 0.6, the layout of an encrypted Pop!_OS install: an `lvm` volume on one `crypt` mapping (`LVM2_member`) of one `part` (`crypto_LUKS`) that the live crypttab opens under the mapping's name by that partition's UUID (`refusal::encrypted_root`; both runs of the LUKS spike, apsis-test, 2026-10-05 and 2026-10-06). LUKS without LVM, LVM without LUKS, a volume on several devices, a mapping of a whole disk or of a RAID, a mapping name or UUID that isn't a plain word: refused | "Restore doesn't support the way this system disk is set up yet." |
 | `/boot`, `/usr` or `/var` a separate mount | "Restore doesn't support a system split over several partitions yet." |
 | **root UUID**: the snapshot's `info.json` `sys-uuid` differs from the UUID of the filesystem mounted at `/` (`findmnt`), or the snapshot's `etc/kernelstub/configuration` names another `root=UUID=` | "This snapshot is from another installation." |
 | snapshot isn't rsync, has no `localhost/` or `exclude.list` | "This snapshot can't be restored: <reason>." |
@@ -1334,7 +1334,7 @@ dashes, no rsync or paths on screen (the helper's own words only in tooltips).
 | refusal | `Restore works only on Pop!_OS with systemd-boot for now.` / `Restore can't be used on this computer yet.` |
 | refusal | `The boot partition isn't where Pop!_OS keeps it.` / `Restore can't be used on this computer.` |
 | refusal | `Restore doesn't support a {fstype} system disk yet.` / `Restore can't be used on this computer yet.` |
-| refusal | `Restore doesn't support an encrypted or LVM system disk yet.` / `Restore can't be used on this computer yet.` |
+| refusal | `Restore doesn't support the way this system disk is set up yet.` / `It works on a plain partition and on Pop!_OS's standard encrypted install. Snapshots still work: their files are on the backup disk, under timeshift/snapshots.` (0.6; before: `Restore doesn't support an encrypted or LVM system disk yet.` / `Restore can't be used on this computer yet.`) |
 | refusal | `Restore doesn't support a system split over several partitions yet.` / `Restore can't be used on this computer yet.` |
 | refusal | `This snapshot's kernel files are incomplete.` / `Pick another snapshot.` |
 | refusal | `This snapshot can't be read: {reason}.` / `Pick another snapshot.` |
