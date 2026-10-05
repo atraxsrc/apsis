@@ -1673,6 +1673,18 @@ snapshots' names filled in is written to the backup disk (`timeshift/apsis-resto
 while preparing, atomically, and the arm keeps it as `last-restore.note` in the state folder.
 It holds only UUIDs and snapshot names: no user names, no emails.
 
+On an encrypted system disk (0.6; the layout `refusal::encrypted_root` lets through) the
+note has three more things, and the plain note stays byte for byte what it was. Before the
+root's mount line: `sudo cryptsetup luksOpen /dev/disk/by-uuid/<luks-partition-uuid> <name>`
+and `sudo vgchange -ay`, with a paragraph before them and one after. `<name>` is the
+mapping's name in the live crypttab (`cryptdata` on a default install): `update-initramfs`
+in the chroot looks the root's mapping up in `/etc/crypttab` by name, so a disk opened under
+another name (a file manager's `luks-<uuid>`) would get an initrd that can't unlock it. The
+paragraph after says what to do when the device is already open under another name. The
+note then also holds that name, and says so; a name or UUID that isn't a plain word is
+refused before any note is written (`root-device`). A second "Known limit" line says the
+unlock lines are untried in a recovery, until the drill on apsis-test has typed them.
+
 1. At power-on, hold Space for the systemd-boot menu and pick **Pop!_OS Recovery**, or boot a
    Pop!_OS live USB of the same version (the recovery opens an installer window; its install
    choices are a reinstall).

@@ -306,12 +306,35 @@ pub fn check(system: &System<'_>, snapshot: &Snapshot<'_>) -> Result<(), Refusal
     Ok(())
 }
 
+/// How an encrypted root is unlocked: what the recovery note's unlock lines are made of
+/// ([`super::recover::text`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unlocking<'a> {
+    /// The mapping's name, as the crypttab has it (`cryptdata`). `update-initramfs` looks the
+    /// root's mapping up in the crypttab by this name, so a disk opened by hand under another
+    /// gets an initrd that can't unlock it.
+    pub name: &'a str,
+    /// The UUID of the LUKS partition the mapping is of.
+    pub luks_uuid: &'a str,
+}
+
+impl System<'_> {
+    /// How the root is unlocked, if it's the encrypted layout [`check`] lets through; `None`
+    /// on a plain partition, and for a root [`check`] refuses.
+    #[must_use]
+    pub fn unlocking(&self) -> Option<Unlocking<'_>> {
+        let root = self
+            .devices
+            .iter()
+            .find(|device| !self.root_uuid.is_empty() && device.uuid == self.root_uuid)?;
+        encrypted_root(root, self.devices, self.crypttab)
+    }
+}
+
 /// Whether `/` may be on `root`, one of lsblk's `devices`. Two layouts are let through:
 ///
 /// - a plain partition;
-/// - what Pop!_OS's installer makes with "Encrypt drive": an LVM volume on one dm-crypt
-///   mapping of one LUKS partition, which the live `crypttab` opens under that name and by
-///   that partition's UUID.
+/// - what Pop!_OS's installer makes with "Encrypt drive" ([`encrypted_root`]).
 ///
 /// The second is the layout both runs of the LUKS spike restored on (apsis-test, 2026-10-05
 /// and 2026-10-06), and nothing wider: LUKS without LVM, LVM without LUKS, a volume on
@@ -319,10 +342,22 @@ pub fn check(system: &System<'_>, snapshot: &Snapshot<'_>) -> Result<(), Refusal
 /// shown them to work. The same installation only, as [`Refusal::OtherInstallation`] and
 /// [`Refusal::CrypttabDiffers`] still hold; the apply's boot refresh then checks that the new
 /// boot files can unlock the disk as the old ones did.
+fn is_restorable_root(root: &Device, devices: &[Device], crypttab: &str) -> bool {
+    root.kind == "part" || encrypted_root(root, devices, crypttab).is_some()
+}
+
+/// The encrypted layout, if `root` is on it: an LVM volume on one dm-crypt mapping of one
+/// LUKS partition, which the live `crypttab` opens under that name and by that partition's
+/// UUID. The name and the UUID are plain words (they end up in the recovery note's command
+/// lines).
 ///
 /// A volume group with a second physical volume isn't seen from here as long as the root's
 /// own volume sits on one: lsblk lists a volume under the devices it's on.
-fn is_restorable_root(root: &Device, devices: &[Device], crypttab: &str) -> bool {
+fn encrypted_root<'a>(
+    root: &Device,
+    devices: &'a [Device],
+    crypttab: &str,
+) -> Option<Unlocking<'a>> {
     // The one device holding `device`, if it's of this kind and holds this.
     let held_by = |device: &Device, kind: &str, holds: &str| {
         let [parent] = device.parents.as_slice() else {
@@ -333,15 +368,20 @@ fn is_restorable_root(root: &Device, devices: &[Device], crypttab: &str) -> bool
             .find(|d| d.kname == *parent)
             .filter(|d| d.kind == kind && d.fstype.eq_ignore_ascii_case(holds))
     };
-    match root.kind.as_str() {
-        "part" => true,
-        "lvm" => held_by(root, "crypt", "LVM2_member")
-            .and_then(|mapping| Some((mapping, held_by(mapping, "part", "crypto_LUKS")?)))
-            .is_some_and(|(mapping, partition)| {
-                crypttab_opens(crypttab, &mapping.name, &partition.uuid)
-            }),
-        _ => false,
+    if root.kind != "lvm" {
+        return None;
     }
+    let mapping = held_by(root, "crypt", "LVM2_member")?;
+    let partition = held_by(mapping, "part", "crypto_LUKS")?;
+    let (name, luks_uuid) = (mapping.name.as_str(), partition.uuid.as_str());
+    let plain = |word: &str, more: &str| {
+        word.starts_with(|c: char| c.is_ascii_alphanumeric())
+            && word
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || more.contains(c))
+    };
+    (plain(name, "_-.+") && plain(luks_uuid, "-") && crypttab_opens(crypttab, name, luks_uuid))
+        .then_some(Unlocking { name, luks_uuid })
 }
 
 /// Whether `crypttab` has an entry that opens the LUKS device of `uuid` under `name`: the
@@ -349,17 +389,16 @@ fn is_restorable_root(root: &Device, devices: &[Device], crypttab: &str) -> bool
 /// names it another way (a device path, `PARTUUID=`, `LABEL=`) isn't one: nothing here could
 /// tell whether it's the same device.
 fn crypttab_opens(crypttab: &str, name: &str, uuid: &str) -> bool {
-    !uuid.is_empty()
-        && crypttab_entries(crypttab).iter().any(|entry| {
-            let mut fields = entry.split(' ');
-            fields.next() == Some(name)
-                && fields.next().is_some_and(|source| {
-                    source
-                        .strip_prefix("UUID=")
-                        .or_else(|| source.strip_prefix("/dev/disk/by-uuid/"))
-                        .is_some_and(|found| found.eq_ignore_ascii_case(uuid))
-                })
-        })
+    crypttab_entries(crypttab).iter().any(|entry| {
+        let mut fields = entry.split(' ');
+        fields.next() == Some(name)
+            && fields.next().is_some_and(|source| {
+                source
+                    .strip_prefix("UUID=")
+                    .or_else(|| source.strip_prefix("/dev/disk/by-uuid/"))
+                    .is_some_and(|found| found.eq_ignore_ascii_case(uuid))
+            })
+    })
 }
 
 /// What's at `/system-update` or `/etc/system-update`, asked of the name itself (`lstat`).
@@ -866,6 +905,54 @@ cryptswap UUID=44444444-4444-4444-4444-444444444444 /dev/urandom swap,plain,offs
                 ..encrypted()
             };
             assert_eq!(case.check(), Ok(()), "{crypttab}");
+        }
+    }
+
+    /// What the recovery note's unlock lines are made of: the mapping's name and the LUKS
+    /// partition's UUID, only for the layout that's let through.
+    #[test]
+    fn the_unlocking_of_an_encrypted_root_is_its_mapping_and_its_partition() {
+        let system = |case: &Case| {
+            System {
+                uefi: true,
+                kernelstub_config: true,
+                kernelstub: true,
+                mountinfo: "",
+                devices: &case.devices,
+                root_uuid: &case.root_uuid,
+                esp_folders: &[],
+                crypttab: &case.crypttab,
+                pending_update: false,
+                restore_armed: false,
+            }
+            .unlocking()
+            .map(|u| (u.name.to_owned(), u.luks_uuid.to_owned()))
+        };
+        assert_eq!(
+            system(&encrypted()),
+            Some(("cryptdata".to_owned(), LUKS_UUID.to_owned()))
+        );
+        assert_eq!(system(&Case::good()), None, "a plain partition");
+        let no_entry = Case {
+            crypttab: String::new(),
+            ..encrypted()
+        };
+        assert_eq!(system(&no_entry), None, "a root the check refuses");
+        // A name or a UUID that isn't a plain word never reaches a command line.
+        for (name, uuid) in [
+            ("crypt data", LUKS_UUID),
+            ("crypt;data", LUKS_UUID),
+            ("-cryptdata", LUKS_UUID),
+            ("", LUKS_UUID),
+            ("cryptdata", "2222 2222"),
+            ("cryptdata", "$(x)"),
+        ] {
+            let mut case = encrypted();
+            case.devices[3].name = name.to_owned();
+            case.devices[2].uuid = uuid.to_owned();
+            case.crypttab = format!("{name} UUID={uuid} none luks\n");
+            assert_eq!(system(&case), None, "{name:?} {uuid:?}");
+            assert_eq!(case.check(), Err(Refusal::RootDevice), "{name:?} {uuid:?}");
         }
     }
 

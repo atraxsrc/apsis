@@ -206,7 +206,8 @@ below do: they rebuild that entry's initrd and rewrite its files on the ESP. The
 backup of the ESP first (the restore itself does).
 
 While preparing, Apsis writes `timeshift/apsis-restore-RECOVER.txt` on the backup disk: these
-steps with this machine's disk UUIDs and the snapshots' names filled in, two complete
+steps with this machine's disk UUIDs and the snapshots' names filled in (and, on an
+encrypted system disk, the lines that unlock it), two complete
 commands and no line to edit, each line short enough for an 80-column console. It's written
 again at every preparation. When the restore is armed ("Restart now"), its copy is kept as
 `/var/lib/apsis/restore/last-restore.note` on the system disk (root only), readable once step
@@ -226,6 +227,22 @@ starts from either boot entry, the way back is the window: restore the safety sn
 
    If the live system mounted the backup disk by itself, unmount it first:
    `sudo umount /dev/disk/by-uuid/<backup-uuid>`.
+
+   On an encrypted system disk (Pop!_OS's "Encrypt drive"), unlock it first and bring up its
+   LVM volume. Use the name the installed system's `/etc/crypttab` has for it (`cryptdata`
+   on a default install; `RECOVER.txt` has the line with the name and the UUID filled in):
+   `update-initramfs` below looks that name up, and with another name it builds an initrd
+   that can't unlock the disk. `cryptsetup` asks for the disk's passphrase.
+
+   ```sh
+   sudo cryptsetup luksOpen /dev/disk/by-uuid/<luks-partition-uuid> cryptdata
+   sudo vgchange -ay
+   ```
+
+   If `luksOpen` says the device is in use, the live system opened it under another name,
+   which `lsblk` shows below the partition: `sudo vgchange -an`, then `sudo cryptsetup close
+   <that name>`, then the two lines again. **Known limit:** these unlock lines are untried
+   in a recovery so far.
 
    Mount the system disk, its boot partition (ESP) and the backup disk, read-only:
 

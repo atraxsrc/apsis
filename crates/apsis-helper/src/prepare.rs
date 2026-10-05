@@ -349,6 +349,7 @@ fn prepare_in(
     let esp_uuid = mount_uuid(&DirectRunner, "/boot/efi")?;
     let note = recover::text(
         &live.root_uuid,
+        live.as_system().unlocking(),
         &esp_uuid,
         &backup_uuid,
         &request.snapshot,

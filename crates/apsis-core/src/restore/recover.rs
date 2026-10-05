@@ -4,13 +4,15 @@
 //! restore goes wrong" steps with this machine's UUIDs and the snapshots' names filled in,
 //! written while preparing. Two complete commands, one to restore the same snapshot again
 //! and one to go back to the safety snapshot, so nobody edits a line in the recovery. It
-//! holds only UUIDs and snapshot names. Every line fits an 80-column console.
+//! holds only UUIDs, snapshot names and, on an encrypted system disk, the name its mapping
+//! has in the crypttab. Every line fits an 80-column console.
 
 use std::fs::File;
 use std::io;
 use std::path::Path;
 
 use super::file::{self, FileError};
+use super::refusal::Unlocking;
 
 /// The note's name, in the backup disk's `timeshift/` folder next to `snapshots/`.
 pub const FILE: &str = "apsis-restore-RECOVER.txt";
@@ -57,14 +59,48 @@ fn rsync(snapshot: &str, old_format: bool) -> String {
     )
 }
 
+/// The lines that unlock an encrypted system disk and bring up its LVM volume, before the
+/// root can be mounted by its UUID. The name is the crypttab's: `update-initramfs` in the
+/// chroot looks the root's mapping up there by name, so a disk opened under another name
+/// (a file manager's `luks-<uuid>`) would get an initrd that can't unlock it. A name too
+/// long for the line goes on a line of its own.
+fn unlock_lines(unlocking: Unlocking<'_>) -> String {
+    let Unlocking { name, luks_uuid } = unlocking;
+    let device = format!("     /dev/disk/by-uuid/{luks_uuid}");
+    let open = if device.len() + 1 + name.len() <= 80 {
+        format!("{device} {name}")
+    } else {
+        format!("{device} \\\n     {name}")
+    };
+    // No `\` after the opening quote: it would eat the first line's indent.
+    format!(
+        "   The system disk is encrypted. Unlock it first, under exactly the name in
+   the line below (update-initramfs looks that name up in the crypttab), then
+   bring up its LVM volume. cryptsetup asks for the disk's passphrase.
+
+   sudo cryptsetup luksOpen \\
+{open}
+   sudo vgchange -ay
+
+   If luksOpen says the device is in use, the live system opened it under
+   another name (lsblk shows it below the partition). Close that one first:
+   vgchange -an, then cryptsetup close with that name, both with sudo. Then
+   run the two lines again.
+
+"
+    )
+}
+
 /// The note's text for a restore of `snapshot` on the machine whose root, ESP and backup
-/// disk have these filesystem UUIDs. `old_format`: the snapshot was made without ACLs and
-/// extended attributes, so its line has no `-A -X`. `safety_snapshot`: the one this
-/// preparation took, always the new format; with none, one line says so in place of its
-/// command.
+/// disk have these filesystem UUIDs. `unlocking`: how an encrypted root is opened
+/// ([`super::refusal::System::unlocking`]); `None` on a plain partition, whose note has no
+/// such lines. `old_format`: the snapshot was made without ACLs and extended attributes, so
+/// its line has no `-A -X`. `safety_snapshot`: the one this preparation took, always the new
+/// format; with none, one line says so in place of its command.
 #[must_use]
 pub fn text(
     root_uuid: &str,
+    unlocking: Option<Unlocking<'_>>,
     esp_uuid: &str,
     backup_uuid: &str,
     snapshot: &str,
@@ -81,17 +117,32 @@ pub fn text(
             )
         },
     );
+    let unlock = unlocking.map(unlock_lines).unwrap_or_default();
+    let (names, limit, first) = if unlocking.is_some() {
+        (
+            "It holds only this machine's disk UUIDs, its encrypted disk's mapping name\n\
+             and snapshot names.",
+            "\nKnown limit: the unlock lines in step 2 are untried in a recovery so far.",
+            "first mount line",
+        )
+    } else {
+        (
+            "It holds only this machine's disk UUIDs and snapshot names.",
+            "",
+            "first line",
+        )
+    };
     format!(
         "\
 Apsis restore: if the computer doesn't start afterwards
 
 Written by Apsis while preparing to restore the snapshot {snapshot}.
-It holds only this machine's disk UUIDs and snapshot names.
+{names}
 If this note and last-restore.note (step 2) differ, follow last-restore.note.
 
 A restore never touches the recovery partition or the Pop_OS-oldkern entry;
 step 2 rebuilds that entry's initrd and rewrites its files on the ESP.
-Known limit: these lines are untried after a restore that changed the kernel.
+Known limit: these lines are untried after a restore that changed the kernel.{limit}
 
 1. At power-on, hold Space for the systemd-boot menu and pick Pop!_OS Recovery,
    or boot a Pop!_OS live USB of the same version.
@@ -100,10 +151,10 @@ Known limit: these lines are untried after a restore that changed the kernel.
 2. In a terminal, one line at a time. lsblk -f shows the same UUIDs as below.
    If a line prints error, failed or E:, stop there: the lines after it count
    on it. update-initramfs and kernelstub print a lot; that alone is fine.
-   After the first line this note can also be read, with sudo, as
+   After the {first} this note can also be read, with sudo, as
    /mnt/var/lib/apsis/restore/last-restore.note
 
-   sudo mount /dev/disk/by-uuid/{root_uuid} /mnt
+{unlock}   sudo mount /dev/disk/by-uuid/{root_uuid} /mnt
    sudo mount /dev/disk/by-uuid/{esp_uuid} /mnt/boot/efi
    sudo mkdir -p /media/backup
    sudo mount -o ro /dev/disk/by-uuid/{backup_uuid} \\
@@ -154,6 +205,14 @@ mod tests {
     const NAME: &str = "2026-09-25_11-28-53";
     const SAFETY: &str = "2026-10-04_09-15-07";
 
+    const LUKS: &str = "22222222-2222-2222-2222-222222222222";
+    /// An encrypted Pop!_OS install's root: the mapping `cryptdata` of the LUKS partition.
+    const UNLOCKING: Unlocking<'static> = Unlocking {
+        name: "cryptdata",
+        luks_uuid: LUKS,
+    };
+    const GOLDEN_ENCRYPTED: &str = include_str!("../../tests/fixtures/recover/encrypted.txt");
+
     const GOLDEN_SAFETY: &str = include_str!("../../tests/fixtures/recover/safety-snapshot.txt");
     const GOLDEN_NO_SAFETY: &str =
         include_str!("../../tests/fixtures/recover/no-safety-snapshot.txt");
@@ -203,19 +262,93 @@ mod tests {
 
     #[test]
     fn with_a_safety_snapshot_the_note_is_the_golden_file_byte_for_byte() {
-        let note = text(ROOT, ESP, BACKUP, NAME, false, Some(SAFETY));
+        let note = text(ROOT, None, ESP, BACKUP, NAME, false, Some(SAFETY));
         assert_eq!(note, GOLDEN_SAFETY);
     }
 
     #[test]
     fn without_a_safety_snapshot_the_note_is_the_golden_file_byte_for_byte() {
-        let note = text(ROOT, ESP, BACKUP, NAME, false, None);
+        let note = text(ROOT, None, ESP, BACKUP, NAME, false, None);
         assert_eq!(note, GOLDEN_NO_SAFETY);
     }
 
     #[test]
+    fn on_an_encrypted_disk_the_note_is_the_golden_file_byte_for_byte() {
+        let note = text(
+            ROOT,
+            Some(UNLOCKING),
+            ESP,
+            BACKUP,
+            NAME,
+            false,
+            Some(SAFETY),
+        );
+        assert_eq!(note, GOLDEN_ENCRYPTED);
+    }
+
+    /// The disk is unlocked under the crypttab's name and its volume brought up before the
+    /// root is mounted; the rest of the note is the plain one's, line for line.
+    #[test]
+    fn an_encrypted_disk_is_unlocked_by_name_before_the_root_is_mounted() {
+        let note = text(
+            ROOT,
+            Some(UNLOCKING),
+            ESP,
+            BACKUP,
+            NAME,
+            false,
+            Some(SAFETY),
+        );
+        let commands = commands(&note);
+        assert_eq!(
+            commands[..3],
+            [
+                format!("   sudo cryptsetup luksOpen \\\n     /dev/disk/by-uuid/{LUKS} cryptdata"),
+                "   sudo vgchange -ay".to_owned(),
+                format!("   sudo mount /dev/disk/by-uuid/{ROOT} /mnt"),
+            ]
+        );
+        assert_eq!(commands.len(), 12);
+        for command in &commands {
+            assert!(sh_n(command), "sh -n refused:\n{command}");
+        }
+        let plain = text(ROOT, None, ESP, BACKUP, NAME, false, Some(SAFETY));
+        assert_eq!(commands[2..], self::commands(&plain)[..]);
+        let only_here: Vec<&str> = note
+            .lines()
+            .filter(|line| !plain.lines().any(|p| p == *line))
+            .collect();
+        assert!(
+            only_here.iter().all(|line| !line.contains("rsync")),
+            "{only_here:#?}"
+        );
+        assert!(note.contains("Known limit: the unlock lines"));
+        assert!(!plain.contains("cryptsetup") && !plain.contains("vgchange"));
+        assert!(note.is_ascii() && !note.contains('@'));
+    }
+
+    /// A long mapping name goes on a line of its own, and no line wraps.
+    #[test]
+    fn a_long_mapping_name_keeps_every_line_in_80_columns() {
+        for length in [1, 20, 21, 60] {
+            let name = "n".repeat(length);
+            let unlocking = Unlocking {
+                name: &name,
+                luks_uuid: LUKS,
+            };
+            let note = text(ROOT, Some(unlocking), ESP, BACKUP, NAME, false, None);
+            for line in note.lines() {
+                assert!(line.chars().count() <= 80, "{length}: {line}");
+            }
+            let open = &commands(&note)[0];
+            assert!(open.ends_with(&name) && sh_n(open), "{open}");
+            assert_eq!(open.lines().count(), if length <= 20 { 2 } else { 3 });
+        }
+    }
+
+    #[test]
     fn without_a_safety_snapshot_one_line_takes_the_place_of_the_go_back() {
-        let note = text(ROOT, ESP, BACKUP, NAME, false, None);
+        let note = text(ROOT, None, ESP, BACKUP, NAME, false, None);
         assert_eq!(rsync_lines(&note).len(), 1);
         let said: Vec<_> = note
             .lines()
@@ -233,9 +366,9 @@ mod tests {
         assert!(!sh_n("   for d in dev; do sudo mount --rbind /$d /mnt/$d;"));
         assert!(!sh_n("   sudo rsync -a \\\n     '--exclude-from=x"));
         for (note, count) in [
-            (text(ROOT, ESP, BACKUP, NAME, false, Some(SAFETY)), 10),
-            (text(ROOT, ESP, BACKUP, NAME, false, None), 9),
-            (text(ROOT, ESP, BACKUP, NAME, true, Some(SAFETY)), 10),
+            (text(ROOT, None, ESP, BACKUP, NAME, false, Some(SAFETY)), 10),
+            (text(ROOT, None, ESP, BACKUP, NAME, false, None), 9),
+            (text(ROOT, None, ESP, BACKUP, NAME, true, Some(SAFETY)), 10),
         ] {
             let commands = commands(&note);
             assert_eq!(commands.len(), count, "{commands:#?}");
@@ -247,7 +380,7 @@ mod tests {
 
     #[test]
     fn both_commands_name_the_kept_filter_and_their_snapshot_in_full() {
-        let note = text(ROOT, ESP, BACKUP, NAME, false, Some(SAFETY));
+        let note = text(ROOT, None, ESP, BACKUP, NAME, false, Some(SAFETY));
         let [same, back] = <[String; 2]>::try_from(rsync_lines(&note)).unwrap();
         for (command, name) in [(&same, NAME), (&back, SAFETY)] {
             assert!(command.contains(FILTER), "{command}");
@@ -272,7 +405,7 @@ mod tests {
     /// F4: the go-back's flags are its own. A safety snapshot is always the new format.
     #[test]
     fn after_an_old_format_snapshot_only_the_same_restore_drops_acls_and_attributes() {
-        let note = text(ROOT, ESP, BACKUP, NAME, true, Some(SAFETY));
+        let note = text(ROOT, None, ESP, BACKUP, NAME, true, Some(SAFETY));
         let [same, back] = <[String; 2]>::try_from(rsync_lines(&note)).unwrap();
         assert!(same.contains("sudo rsync -a --numeric-ids "), "{same}");
         assert!(!same.contains("-A -X"), "{same}");
@@ -288,8 +421,8 @@ mod tests {
         // ROOT and BACKUP are as long as a filesystem UUID gets (36); the ESP is vfat, whose
         // UUID is always nine characters.
         for note in [
-            text(ROOT, ESP, BACKUP, NAME, false, Some(SAFETY)),
-            text(ROOT, ESP, BACKUP, NAME, true, None),
+            text(ROOT, None, ESP, BACKUP, NAME, false, Some(SAFETY)),
+            text(ROOT, None, ESP, BACKUP, NAME, true, None),
         ] {
             for line in note.lines() {
                 assert!(line.chars().count() <= 80, "{} > 80: {line}", line.len());
@@ -299,7 +432,7 @@ mod tests {
 
     #[test]
     fn the_note_keeps_what_check_8_typed_and_holds_no_names() {
-        let note = text(ROOT, ESP, BACKUP, NAME, false, Some(SAFETY));
+        let note = text(ROOT, None, ESP, BACKUP, NAME, false, Some(SAFETY));
         for needle in [
             &format!("   sudo mount /dev/disk/by-uuid/{ROOT} /mnt\n"),
             &format!("   sudo mount /dev/disk/by-uuid/{ESP} /mnt/boot/efi\n"),
@@ -324,7 +457,7 @@ mod tests {
     #[test]
     fn what_is_written_is_the_text_byte_for_byte_in_both_places() {
         let (state, backup) = (temp_dir("recover-state"), temp_dir("recover-backup"));
-        let note = text(ROOT, ESP, BACKUP, NAME, false, Some(SAFETY));
+        let note = text(ROOT, None, ESP, BACKUP, NAME, false, Some(SAFETY));
         write(&state, &backup, &note).unwrap();
         assert_eq!(fs::read(state.join(NOTE_FILE)).unwrap(), note.as_bytes());
         assert_eq!(fs::read(backup.join(FILE)).unwrap(), note.as_bytes());
@@ -341,7 +474,7 @@ mod tests {
     /// note stays whole and no partial file is left, under either name.
     #[test]
     fn a_write_cut_midway_leaves_the_earlier_note_whole_and_no_partial_file() {
-        let note = text(ROOT, ESP, BACKUP, NAME, false, Some(SAFETY));
+        let note = text(ROOT, None, ESP, BACKUP, NAME, false, Some(SAFETY));
         let half = |file: &mut fs::File, bytes: &[u8]| {
             file.write_all(&bytes[..bytes.len() / 2])?;
             Err(io::Error::other("cut"))
