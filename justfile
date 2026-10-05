@@ -147,13 +147,28 @@ uninstall:
 # Output: target/debian/apsis_<version>-1_amd64.deb
 deb-assets-dir := 'target' / 'deb-assets'
 
-deb *args:
+deb *args: _deb-assets
     cargo build --release --workspace {{args}}
+    cargo deb -p {{name}} --no-build
+
+_deb-assets:
     mkdir -p {{deb-assets-dir}}
     sed 's|@libexecdir@|{{libexec-path}}|g' {{ helper-res / helper-bus + '.service.in' }} > {{ deb-assets-dir / helper-bus + '.service' }}
     sed 's|@libexecdir@|{{libexec-path}}|g' {{ helper-res / helper + '.service.in' }} > {{ deb-assets-dir / helper + '.service' }}
     gzip -9nc {{ 'docs' / name + '.1' }} > {{ deb-assets-dir / name + '.1.gz' }}
-    cargo deb -p {{name}} --no-build
+
+# Dev only, for apsis-test and never a release: the same package under a version of its own,
+# so a build of a branch can't be taken for the release's (<version>-1). It sorts above the
+# release and below the next one. The code is what `deb` packages: nothing is switched on.
+# In a folder of its own: cargo-deb clears target/debian of older .deb files on every run.
+# Output: target/dev/apsis_<version>+dev<dev-n>_amd64.deb
+dev-n := '1'
+dev-dir := cargo-target-dir / 'dev'
+
+deb-dev *args: _deb-assets
+    cargo build --release --workspace {{args}}
+    mkdir -p {{dev-dir}}
+    cargo deb -p {{name}} --no-build --deb-version {{version}}+dev{{dev-n}} --output {{dev-dir}}/
 
 # The workspace version, from [workspace.package] in the root Cargo.toml (its first `version`).
 version := `sed -n '0,/^version/s/^version = "\(.*\)"$/\1/p' Cargo.toml`
