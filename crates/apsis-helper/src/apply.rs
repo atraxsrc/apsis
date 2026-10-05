@@ -162,6 +162,65 @@ impl<R: Runner> RealRunner<R> {
     }
 }
 
+/// Dev only, see [`crate::luks_spike`].
+#[cfg(feature = "luks-spike")]
+impl<R: Runner> RealRunner<R> {
+    /// After kernelstub: [`crate::luks_spike::check`] of the refreshed ESP against the backup
+    /// taken before the refresh, read with `lsinitramfs -l`. With no backup there's nothing
+    /// to compare with (the apply never refreshes without one).
+    fn check_unlocking(&self) -> Result<(), String> {
+        use crate::luks_spike::{self, Boot};
+        use esp::{BACKUP_DIR, BootFile};
+
+        let backup = self.paths.state_dir.join(BACKUP_DIR);
+        if fs::symlink_metadata(&backup).is_err() {
+            eprintln!("apsis-helper: luks-spike: no ESP backup, nothing to compare with");
+            return Ok(());
+        }
+        let manifest = Manifest::load(&self.paths.state_dir)
+            .map_err(|error| format!("the ESP backup's manifest couldn't be read: {error}"))?;
+        let on_esp = |file: BootFile| self.esp.join(file.esp_path(&manifest.root_uuid));
+        let text = |path: &Path| {
+            fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))
+        };
+        let listed = |path: &Path| -> Result<luks_spike::Pieces, String> {
+            let argv = ["lsinitramfs", "-l", &path.to_string_lossy()].map(str::to_owned);
+            let output = self.tool(&argv)?;
+            if !output.success {
+                return Err(format!(
+                    "lsinitramfs couldn't list {}: {}",
+                    path.display(),
+                    tail(&output.stderr)
+                ));
+            }
+            Ok(luks_spike::pieces(&output.stdout))
+        };
+        let (entry_before, entry_after) = (
+            text(&backup.join(BootFile::CurrentEntry.name()))?,
+            text(&on_esp(BootFile::CurrentEntry))?,
+        );
+        let before = Boot {
+            entry: &entry_before,
+            pieces: listed(&backup.join(BootFile::Initrd.name()))?,
+        };
+        let after = Boot {
+            entry: &entry_after,
+            pieces: listed(&on_esp(BootFile::Initrd))?,
+        };
+        eprintln!(
+            "apsis-helper: luks-spike: the initrd before {:?}, after {:?}; root= is {}",
+            before.pieces,
+            after.pieces,
+            if luks_spike::root_option(before.entry) == luks_spike::root_option(after.entry) {
+                "the same"
+            } else {
+                "another"
+            }
+        );
+        luks_spike::check(&before, &after)
+    }
+}
+
 /// `udevadm wait --timeout=60 /dev/disk/by-uuid/<uuid>`: the backup disk, up to a minute.
 #[must_use]
 pub fn udevadm_argv(uuid: &str) -> [String; 4] {
@@ -373,6 +432,8 @@ impl<R: Runner> apply::Runner for RealRunner<R> {
                 tail(&output.stderr)
             ));
         }
+        #[cfg(feature = "luks-spike")]
+        self.check_unlocking()?;
         Ok(())
     }
 
@@ -725,6 +786,66 @@ mod tests {
         );
         let output = streamed.tool(&["echo".to_owned()]).unwrap();
         assert_eq!(output.stdout, "one\ntwo\n");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Dev only (`luks-spike`): after kernelstub the refreshed ESP is compared with the
+    /// backup taken before it, and an initrd that lost what unlocks the disk fails the
+    /// refresh (the apply then puts the boot files back).
+    #[cfg(feature = "luks-spike")]
+    #[test]
+    fn the_spike_fails_a_refresh_whose_initrd_cant_unlock_the_disk() {
+        use apsis_core::restore::esp::BootFile;
+
+        const ENCRYPTED: &str = "\
+-rw-r--r--   1 root     root           66 Oct  1 10:00 cryptroot/crypttab
+-rwxr-xr-x   1 root     root       163944 Apr  8  2024 usr/sbin/cryptsetup
+-rwxr-xr-x   1 root     root      3021000 Apr  8  2024 usr/sbin/lvm
+";
+        const PLAIN: &str = "-rw-r--r--   1 root     root   0 Oct  1 10:00 cryptroot/crypttab\n";
+        let root = temp("root");
+        let esp_dir = root.join("boot/efi");
+        for file in [
+            BootFile::Kernel,
+            BootFile::Initrd,
+            BootFile::Cmdline,
+            BootFile::CurrentEntry,
+        ] {
+            let path = esp_dir.join(file.esp_path(UUID));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, format!("options root=UUID={UUID} ro quiet\n")).unwrap();
+        }
+        let state_dir = arm::Paths::under(&root).state_dir;
+        fs::create_dir_all(&state_dir).unwrap();
+        esp::back_up(&esp_dir, &state_dir, UUID).unwrap();
+        // Twice: kernelstub, then lsinitramfs of the backup's initrd and of the ESP's.
+        let tools = FakeTools::default()
+            .answer(true, 0, "", "")
+            .answer(true, 0, ENCRYPTED, "")
+            .answer(true, 0, ENCRYPTED, "")
+            .answer(true, 0, "", "")
+            .answer(true, 0, ENCRYPTED, "")
+            .answer(true, 0, PLAIN, "");
+        let mut runner = RealRunner::under(&root, &temp("mount"), tools);
+        assert_eq!(runner.refresh_boot(), Ok(()));
+        let error = runner.refresh_boot().unwrap_err();
+        assert!(error.contains("cryptsetup, lvm"), "{error}");
+        let calls = runner.tools.calls();
+        assert_eq!(calls.len(), 6);
+        assert_eq!(calls[1][..2], ["lsinitramfs", "-l"]);
+        assert!(calls[1][2].ends_with("esp-backup/initrd.img"), "{calls:?}");
+        assert!(
+            calls[2][2].ends_with(&format!("boot/efi/EFI/Pop_OS-{UUID}/initrd.img")),
+            "{calls:?}"
+        );
+        // Another root= in the new entry fails it too.
+        fs::write(
+            esp_dir.join(BootFile::CurrentEntry.esp_path(UUID)),
+            "options root=/dev/sdX9 ro quiet\n",
+        )
+        .unwrap();
+        let error = runner.refresh_boot().unwrap_err();
+        assert!(error.contains("root= option"), "{error}");
         fs::remove_dir_all(&root).unwrap();
     }
 
