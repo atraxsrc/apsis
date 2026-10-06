@@ -48,7 +48,6 @@
     <control>touch</control>
   </supports>
   <categories>
-    <category>COSMIC</category>
     <category>System</category>
     <category>Utility</category>
   </categories>
