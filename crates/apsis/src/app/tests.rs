@@ -1242,9 +1242,17 @@ fn creating_shows_the_elapsed_time_until_there_is_a_percent() {
 /// Lays `element` out at `size` with a headless renderer; `None` if there's none here. Runs
 /// only with `APSIS_LAYOUT_TEST=1`: it measures real text, so it depends on the fonts
 /// installed.
-fn layout(
+fn layout(element: Element<'_, Message>, size: Size) -> Option<cosmic::iced::core::layout::Node> {
+    layout_in(element, size, cosmic::font::default(), 14.0)
+}
+
+/// [`layout`] with another default font and text size, as a theme with a larger or wider
+/// interface font has them.
+fn layout_in(
     mut element: Element<'_, Message>,
     size: Size,
+    font: cosmic::iced::Font,
+    text_size: f32,
 ) -> Option<cosmic::iced::core::layout::Node> {
     use cosmic::iced::core::layout::Limits as LayoutLimits;
     use cosmic::iced::core::renderer::Headless;
@@ -1254,8 +1262,8 @@ fn layout(
         return None;
     }
     let renderer = cosmic::iced::futures::executor::block_on(<cosmic::Renderer as Headless>::new(
-        cosmic::font::default(),
-        14.0.into(),
+        font,
+        text_size.into(),
         Some("tiny-skia"),
     ))?;
     let mut tree = Tree::new(&element);
@@ -1313,6 +1321,128 @@ fn the_popup_fits_its_width() {
     };
     assert!(node.bounds().width <= POPUP_WIDTH + 0.5);
     assert!(node.bounds().height < 520.0, "{}", node.bounds().height);
+}
+
+/// The popup in each state, with the default font, a wide one and a large one: it keeps its
+/// width, the line under the ring stays one line, and the buttons stay inside.
+#[test]
+fn the_popup_fits_with_a_large_font_in_every_state() {
+    let mut states = Vec::new();
+    let mut normal = model();
+    let mut list = fixture();
+    list.usage = Some(DiskUsage {
+        total: 1_000_203_837_440,
+        used: 950_000_000_000,
+        free: 50_203_837_440,
+    });
+    normal.on_listed(Ok(list));
+    states.push(("normal", normal));
+    let mut unplugged = model();
+    unplugged.on_listed(Ok(fixture()));
+    unplugged.disk_seen = Some(false);
+    states.push(("unplugged", unplugged));
+    let mut unchosen = model();
+    let mut list = fixture();
+    list.device = None;
+    unchosen.on_listed(Ok(list));
+    states.push(("no disk chosen", unchosen));
+    let mut busy = model();
+    busy.on_listed(Ok(fixture()));
+    busy.running = Some(Operation::Create(String::new()));
+    busy.job = Some(job(JobKind::Create, JobState::Running, NEWEST));
+    busy.progress = Some(Progress {
+        percent: Some(42.0),
+        eta_seconds: None,
+        text: String::new(),
+    });
+    states.push(("job", busy));
+    states.push(("not listed", model()));
+    for (name, app) in &states {
+        for (font, text_size) in [
+            (cosmic::font::default(), 14.0),
+            (cosmic::font::mono(), 14.0),
+            (cosmic::font::default(), 18.0),
+        ] {
+            let Some(node) = layout_in(
+                app.popup_view(),
+                Size::new(POPUP_WIDTH, 1000.0),
+                font,
+                text_size,
+            ) else {
+                return;
+            };
+            let at = format!("{name}, {text_size} px {font:?}");
+            assert!(
+                node.bounds().width <= POPUP_WIDTH + 0.5,
+                "{at}: {:?}",
+                node.bounds()
+            );
+            let column = node.children();
+            // Header, ring, the line under it, (errors,) buttons.
+            let line = column[2].bounds();
+            assert!(
+                line.height < text_size * 2.0,
+                "{at}: the line wraps, {line:?}"
+            );
+            let buttons = column.last().unwrap();
+            for button in buttons.children() {
+                let right = buttons.bounds().x + button.bounds().x + button.bounds().width;
+                assert!(
+                    right <= POPUP_WIDTH - 15.5,
+                    "{at}: a button sticks out to {right}"
+                );
+            }
+        }
+    }
+}
+
+/// Every line the ring's centre can show stays within 70% of its inner diameter, at the size
+/// it's drawn at. Measures real text, so only with `APSIS_LAYOUT_TEST=1`.
+#[test]
+fn the_ring_centre_never_reaches_the_track() {
+    use super::view::{RING_LARGE, RING_PLAIN, RING_TEXT_MAX, ring_text_size, text_width};
+    if std::env::var_os("APSIS_LAYOUT_TEST").is_none_or(|v| v != "1") {
+        eprintln!("layout test skipped; set APSIS_LAYOUT_TEST=1 to run it");
+        return;
+    }
+    let large = [
+        "just now",
+        "59m ago",
+        "23h ago",
+        "47h ago",
+        "334d ago",
+        "1000d ago",
+        "100%",
+    ];
+    let plain = [
+        fl!("ring-no-snapshot"),
+        fl!("ring-deleting"),
+        fl!("ring-creating"),
+        fl!("ring-preparing"),
+        fl!("ring-ready"),
+        fl!("stopping"),
+    ];
+    for (lines, sizes) in [
+        (large.map(str::to_owned).to_vec(), &RING_LARGE[..]),
+        (plain.to_vec(), &RING_PLAIN[..]),
+    ] {
+        for line in lines {
+            let size = ring_text_size(&line, sizes);
+            let width = text_width(&line, size, cosmic::font::bold());
+            assert!(
+                width <= RING_TEXT_MAX,
+                "{line} at {size}: {width} > {RING_TEXT_MAX}"
+            );
+        }
+    }
+    for caption in [
+        fl!("ring-last-snapshot"),
+        fl!("ring-creating-caption"),
+        fl!("ring-preparing-caption"),
+    ] {
+        let width = text_width(&caption, 12.0, cosmic::font::default());
+        assert!(width <= RING_TEXT_MAX, "{caption}: {width}");
+    }
 }
 
 /// What a click in the middle of each part of `element`, laid out at `size`, sends: which
@@ -1564,23 +1694,80 @@ fn screenshots() {
         Size::new(480.0, 320.0),
     );
 
-    let mut popup = model();
-    popup.on_listed(Ok(fixture()));
-    let Listing::Loaded(list) = &mut popup.listing else {
-        panic!()
+    // The popup in each of its states. The ages are relative to now, so the newest snapshot
+    // is made that long ago.
+    let ago = |minutes: i64| {
+        let then = jiff::Zoned::now() - jiff::Span::new().minutes(minutes);
+        then.strftime("%Y-%m-%d_%H-%M-%S").to_string()
     };
-    list.usage = Some(DiskUsage {
-        total: 1_000_203_837_440,
-        used: 400_000_000_000,
-        free: 600_203_837_440,
+    let popup_with = |newest: Option<String>, used_share: f64| {
+        let mut popup = model();
+        let mut list = fixture();
+        list.snapshots.clear();
+        if let Some(name) = newest {
+            list.snapshots.push(Snapshot {
+                created: apsis_core::parse_snapshot_name(&name).unwrap(),
+                name,
+                tags: vec![apsis_core::Tag::OnDemand],
+                comment: None,
+                rsync_flags: None,
+            });
+        }
+        let total: u64 = 28 * 1024 * 1024 * 1024;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss,
+            reason = "a test size"
+        )]
+        let used = (total as f64 * used_share) as u64;
+        list.usage = Some(DiskUsage {
+            total,
+            used,
+            free: total - used,
+        });
+        popup.on_listed(Ok(list));
+        popup
+    };
+    let normal = popup_with(Some(ago(34)), 0.58);
+    let nearly_full = popup_with(Some(ago(34)), 0.94);
+    let overdue = popup_with(Some(ago(9 * 24 * 60)), 0.58);
+    let no_snapshot = popup_with(None, 0.02);
+    let mut unplugged = popup_with(Some(ago(34)), 0.58);
+    unplugged.disk_seen = Some(false);
+    let mut busy = popup_with(Some(ago(34)), 0.58);
+    busy.running = Some(Operation::Create(String::new()));
+    busy.job = Some(job(JobKind::Create, JobState::Running, NEWEST));
+    busy.progress = Some(Progress {
+        percent: Some(42.0),
+        eta_seconds: Some(192),
+        text: String::new(),
     });
-    for dark in [true, false] {
-        shoot(
-            "popup",
-            dark,
-            popup.popup_view(),
-            Size::new(POPUP_WIDTH, 460.0),
-        );
+    // The widest age's fit, as a made-up "11mo ago" (Apsis says `334d ago`).
+    let mut long = normal.status_view().ring(true);
+    long.age = "11mo ago".to_owned();
+    shoot(
+        "popup-age-11mo",
+        true,
+        normal.popup_with(long),
+        Size::new(POPUP_WIDTH, 370.0),
+    );
+    for (name, popup) in [
+        ("popup-normal", &normal),
+        ("popup-nearly-full", &nearly_full),
+        ("popup-overdue", &overdue),
+        ("popup-no-snapshot", &no_snapshot),
+        ("popup-unplugged", &unplugged),
+        ("popup-job-42", &busy),
+    ] {
+        for dark in [true, false] {
+            shoot(
+                name,
+                dark,
+                popup.popup_view(),
+                Size::new(POPUP_WIDTH, 370.0),
+            );
+        }
     }
 }
 

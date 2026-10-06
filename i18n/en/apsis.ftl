@@ -32,10 +32,21 @@ strip-disk-not-connected = not connected
 strip-disk-unknown = unknown
 strip-next-manual = manual only
 
-# Popup
+# Popup: the disk ring and the last snapshot in its centre
 open-apsis = Open Apsis
 refresh = Refresh
-overview-more = { $count } older
+ring-last-snapshot = last snapshot
+ring-no-snapshot = No snapshot
+ring-disk = { $device } · { $free } free of { $total }
+ring-disk-not-connected = Backup disk not connected
+ring-no-disk = No backup disk chosen
+ring-disk-unknown = Backup disk unknown
+ring-creating = Creating
+ring-creating-caption = creating
+ring-deleting = Deleting
+ring-preparing = Preparing
+ring-preparing-caption = preparing restore
+ring-ready = Ready to restore
 
 # Toolbar and list
 create = Create

@@ -24,7 +24,7 @@ use super::{
     error_summary,
 };
 use crate::settings_view::{MAX_REMIND_DAYS, Row, Section, SettingsView};
-use crate::status::{DiskStrip, StatusView};
+use crate::status::{DiskStrip, Ring, StatusView};
 use crate::{fl, fmt};
 
 /// Width of the snapshot list's date column.
@@ -33,6 +33,19 @@ const DATE_WIDTH: f32 = 150.0;
 const SIGN_WIDTH: f32 = 12.0;
 /// Height of the disk and progress bars.
 const BAR_GIRTH: f32 = 8.0;
+/// Width and height of the popup's disk ring.
+const RING_SIZE: f32 = 170.0;
+/// Width of the ring's track and arc.
+const RING_WIDTH: f32 = 10.0;
+/// Radius of the dot at the arc's end.
+const RING_DOT: f32 = 7.0;
+/// The widest the ring's centre text may be: 70% of the ring's inner diameter, so it never
+/// comes near the track.
+pub(super) const RING_TEXT_MAX: f32 = 0.7 * (RING_SIZE - 2.0 * RING_DOT - RING_WIDTH);
+/// Sizes for the centre's large line (the age, or the job's percent), largest first.
+pub(super) const RING_LARGE: [f32; 3] = [24.0, 20.0, 14.0];
+/// Sizes for a line in place of the age: `No snapshot`, `Deleting`, `Ready to restore`.
+pub(super) const RING_PLAIN: [f32; 2] = [14.0, 12.0];
 /// What the restore dialog needs besides its scrolling body: its padding, title, the muted
 /// line, the gaps and the button row, plus a margin to the window's edges. The
 /// body scrolls within the window's height minus this, so the buttons always show.
@@ -136,10 +149,21 @@ impl AppModel {
             .into()
     }
 
-    /// The panel popup: read-only. The last snapshot, the backup disk, a running job, the
-    /// newest few snapshots, and buttons to open the window and to list again.
+    /// The panel popup: read-only. The disk ring with the last snapshot's age (or the running
+    /// job) in its centre, the backup disk's free space under it, any error, and buttons to
+    /// open the window and to list again.
     pub(super) fn popup_view(&self) -> Element<'_, Message> {
-        let status = self.status_view().strip();
+        let chosen = !matches!(&self.listing, Listing::Loaded(list) if list.device.is_none());
+        self.popup_with(self.status_view().ring(chosen))
+    }
+
+    /// The popup for `ring`.
+    pub(super) fn popup_with(&self, ring: Ring) -> Element<'_, Message> {
+        let disk = if ring.disk.is_empty() {
+            fl!("loading")
+        } else {
+            ring.disk.clone()
+        };
         let mut children: Vec<Element<'_, Message>> = vec![
             widget::row::with_children(vec![
                 icon::icon(self.icon.clone()).size(24).into(),
@@ -148,15 +172,12 @@ impl AppModel {
             .spacing(8)
             .align_y(Alignment::Center)
             .into(),
+            widget::container(self.disk_ring(&ring))
+                .center_x(Length::Fill)
+                .into(),
+            widget::container(dim(disk)).center_x(Length::Fill).into(),
         ];
-        children.extend(self.status_lines(&status));
-        if let Some(job) = self.job_line() {
-            children.push(job);
-        } else if let Some(line) = self.result_line() {
-            children.push(line);
-        }
-        children.push(widget::divider::horizontal::default().into());
-        children.push(self.popup_snapshots());
+        children.extend(self.popup_errors());
         children.push(
             widget::row::with_children(vec![
                 widget::button::suggested(fl!("open-apsis"))
@@ -176,35 +197,125 @@ impl AppModel {
             .into()
     }
 
-    /// The popup's newest snapshots as plain rows, or what the list says when there are none.
-    fn popup_snapshots(&self) -> Element<'_, Message> {
-        match &self.listing {
-            Listing::Loaded(list) if !list.snapshots.is_empty() => {
-                let mut rows: Vec<Element<'_, Message>> = list
-                    .snapshots
-                    .iter()
-                    .take(super::POPUP_ROWS)
-                    .map(|snapshot| {
-                        widget::row::with_children(vec![
-                            body(fmt::when(snapshot.created))
-                                .width(Length::Fixed(DATE_WIDTH - 20.0))
-                                .into(),
-                            body(snapshot.comment.clone().unwrap_or_default())
-                                .width(Length::Fill)
-                                .wrapping(iced_text::Wrapping::None)
-                                .into(),
-                        ])
-                        .spacing(8)
-                        .into()
-                    })
-                    .collect();
-                if let Some(more) = fmt::older_count(list.snapshots.len(), super::POPUP_ROWS) {
-                    rows.push(dim(fl!("overview-more", count = more.to_string())));
-                }
-                widget::column::with_children(rows).spacing(4).into()
+    /// The ring, with the last snapshot's age and `last snapshot` in its centre. While a job
+    /// runs, the ring is the job's percent and its centre says which job; without a percent,
+    /// the track only. Its tooltip has the disk's full figures either way.
+    fn disk_ring(&self, ring: &Ring) -> Element<'_, Message> {
+        let dim_caption = |text: String| -> Element<'_, Message> {
+            caption(text)
+                .class(theme::Text::Custom(dim_text))
+                .wrapping(iced_text::Wrapping::None)
+                .into()
+        };
+        let (centre, used, nearly_full): (Vec<Element<'_, Message>>, _, _) = match self.ring_job() {
+            Some(RingJob {
+                caption: Some(name),
+                percent: Some(percent),
+                ..
+            }) => {
+                #[allow(clippy::cast_possible_truncation, reason = "0 to 1")]
+                let share = (percent / 100.0).clamp(0.0, 1.0) as f32;
+                (
+                    vec![
+                        ring_text(fmt::percent(percent), &RING_LARGE).into(),
+                        dim_caption(name),
+                    ],
+                    Some(share),
+                    false,
+                )
             }
-            _ => self.list_message(),
+            Some(job) => (vec![ring_text(job.name, &RING_PLAIN).into()], None, false),
+            None => {
+                let sizes: &[f32] = if ring.dated { &RING_LARGE } else { &RING_PLAIN };
+                let age = ring_text(ring.age.clone(), sizes);
+                let age = if ring.overdue {
+                    age.class(theme::Text::Custom(warning_text))
+                } else {
+                    age
+                };
+                let mut lines = vec![age.into()];
+                if ring.dated {
+                    lines.push(dim_caption(fl!("ring-last-snapshot")));
+                }
+                (lines, ring.used, ring.nearly_full)
+            }
+        };
+        let size = Length::Fixed(RING_SIZE);
+        let drawn = cosmic::iced::widget::canvas(DiskRing { used, nearly_full })
+            .width(size)
+            .height(size);
+        let centre = widget::container(
+            widget::column::with_children(centre)
+                .spacing(2)
+                .align_x(Alignment::Center),
+        )
+        .center_x(size)
+        .center_y(size);
+        let stack = cosmic::iced::widget::stack![drawn, centre];
+        match &ring.figures {
+            Some(figures) => widget::tooltip(
+                stack,
+                body(figures.clone()),
+                widget::tooltip::Position::Bottom,
+            )
+            .into(),
+            None => stack.into(),
         }
+    }
+
+    /// The running job for the ring: `Creating` with its percent, `Deleting`, `Stopping…`,
+    /// `Ready to restore`.
+    pub(super) fn ring_job(&self) -> Option<RingJob> {
+        let job = self.active_job();
+        let kind = job
+            .map(|j| j.kind)
+            .or(self.running.as_ref().map(super::Operation::kind))?;
+        let plain = |name: String| RingJob {
+            name,
+            caption: None,
+            percent: None,
+        };
+        if job.is_some_and(|j| j.state == JobState::Stopping) {
+            return Some(plain(fl!("stopping")));
+        }
+        if kind == JobKind::Restore && self.ready.is_some() {
+            return Some(plain(fl!("ring-ready")));
+        }
+        let (name, caption) = match kind {
+            JobKind::Create => (fl!("ring-creating"), fl!("ring-creating-caption")),
+            JobKind::Restore => (fl!("ring-preparing"), fl!("ring-preparing-caption")),
+            _ => return Some(plain(fl!("ring-deleting"))),
+        };
+        let percent = self
+            .progress
+            .as_ref()
+            .filter(|p| p.has_estimate())
+            .and_then(|p| p.percent)
+            .or_else(|| job.and_then(|j| j.percent));
+        Some(RingJob {
+            name,
+            caption: Some(caption),
+            percent,
+        })
+    }
+
+    /// The popup's error lines: a list that failed, a job that failed, a restore that didn't
+    /// end well. Lines that only say something went fine are the window's.
+    fn popup_errors(&self) -> Vec<Element<'_, Message>> {
+        let mut lines = Vec::new();
+        if let Listing::Failed(error) = &self.listing {
+            lines.push(
+                widget::text(error_summary(error, self.known_uuid.as_deref()))
+                    .class(theme::Text::Custom(error_text))
+                    .into(),
+            );
+        }
+        match &self.status {
+            Some(Status::Error(..)) => lines.extend(self.result_line()),
+            None if self.result_phrase().is_some() => lines.extend(self.restore_result_line()),
+            _ => {}
+        }
+        lines
     }
 
     /// The window: the list page (toolbar, list, status area), the settings, or About.
@@ -1269,4 +1380,115 @@ fn text_style(theme: &Theme, color: Color) -> iced_text::Style {
         selected_fill: cosmic.accent.base.into(),
         selected_text_color: Some(cosmic.on_accent_color().into()),
     }
+}
+
+/// The popup's disk ring: the track in the theme's divider colour, the used share as an arc
+/// from the top, clockwise, with a dot at its end, in the accent colour (the warning colour
+/// when the disk is nearly full). Drawn from the live theme every frame, so it follows a theme
+/// change.
+struct DiskRing {
+    used: Option<f32>,
+    nearly_full: bool,
+}
+
+impl cosmic::iced::widget::canvas::Program<Message, Theme, cosmic::Renderer> for DiskRing {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &cosmic::Renderer,
+        theme: &Theme,
+        bounds: cosmic::iced::Rectangle,
+        _cursor: cosmic::iced::mouse::Cursor,
+    ) -> Vec<cosmic::iced::widget::canvas::Geometry<cosmic::Renderer>> {
+        use std::f32::consts::{FRAC_PI_2, TAU};
+
+        use cosmic::iced::widget::canvas::{Frame, LineCap, Path, Stroke, path::Arc};
+        use cosmic::iced::{Point, Radians};
+
+        let cosmic = theme.cosmic();
+        let mut frame = Frame::new(renderer, bounds.size());
+        let centre = frame.center();
+        let radius = bounds.width.min(bounds.height) / 2.0 - RING_DOT;
+        let track = Color::from(cosmic.background(theme.transparent).divider);
+        frame.stroke(
+            &Path::circle(centre, radius),
+            Stroke::default().with_color(track).with_width(RING_WIDTH),
+        );
+        if let Some(used) = self.used.filter(|used| *used > 0.0) {
+            let colour = Color::from(if self.nearly_full {
+                cosmic.warning_color()
+            } else {
+                cosmic.accent_color()
+            });
+            let start = -FRAC_PI_2;
+            let end = start + used.min(1.0) * TAU;
+            let arc = Path::new(|path| {
+                path.arc(Arc {
+                    center: centre,
+                    radius,
+                    start_angle: Radians(start),
+                    end_angle: Radians(end),
+                });
+            });
+            frame.stroke(
+                &arc,
+                Stroke::default()
+                    .with_color(colour)
+                    .with_width(RING_WIDTH)
+                    .with_line_cap(LineCap::Round),
+            );
+            let dot = Point::new(centre.x + radius * end.cos(), centre.y + radius * end.sin());
+            frame.fill(&Path::circle(dot, RING_DOT), colour);
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+/// How wide `content` is on one line at `size` in `font`, as the text widget lays it out.
+pub(super) fn text_width(content: &str, size: f32, font: cosmic::iced::Font) -> f32 {
+    use cosmic::iced::advanced::text::{self, Paragraph as _};
+    <cosmic::Renderer as text::Renderer>::Paragraph::with_text(text::Text {
+        content,
+        bounds: cosmic::iced::Size::INFINITE,
+        size: size.into(),
+        line_height: text::LineHeight::default(),
+        font,
+        align_x: text::Alignment::Default,
+        align_y: cosmic::iced::alignment::Vertical::Top,
+        shaping: text::Shaping::Advanced,
+        wrapping: text::Wrapping::None,
+        ellipsize: text::Ellipsize::None,
+    })
+    .min_width()
+}
+
+/// A running job as the ring shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct RingJob {
+    /// `Creating`, `Deleting`, `Stopping…`: the centre's line without a percent.
+    pub name: String,
+    /// `creating`: under the percent, when there is one.
+    pub caption: Option<String>,
+    pub percent: Option<f64>,
+}
+
+/// The size from `sizes` (largest first) that keeps `content` within [`RING_TEXT_MAX`]; the
+/// smallest when none does.
+pub(super) fn ring_text_size(content: &str, sizes: &[f32]) -> f32 {
+    sizes
+        .iter()
+        .copied()
+        .find(|size| text_width(content, *size, cosmic::font::bold()) <= RING_TEXT_MAX)
+        .unwrap_or_else(|| sizes.last().copied().unwrap_or(14.0))
+}
+
+/// A line of the ring's centre, bold, at the largest of `sizes` that fits.
+fn ring_text<'a>(content: String, sizes: &[f32]) -> widget::Text<'a, Theme> {
+    let size = ring_text_size(&content, sizes);
+    widget::text(content)
+        .size(size)
+        .font(cosmic::font::bold())
+        .wrapping(iced_text::Wrapping::None)
 }

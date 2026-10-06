@@ -74,12 +74,6 @@ pub fn duration(seconds: u64) -> String {
     }
 }
 
-/// How many snapshots the overview leaves out of its `shown` rows, if any.
-#[must_use]
-pub fn older_count(total: usize, shown: usize) -> Option<usize> {
-    total.checked_sub(shown).filter(|&more| more > 0)
-}
-
 /// `sdX1` for `/dev/sdX1`: the device's name without the folder.
 #[must_use]
 pub fn device_name(device: &str) -> &str {
@@ -129,14 +123,6 @@ mod tests {
         assert_eq!(percent(99.91), "99%");
         assert_eq!(percent(100.0), "100%");
         assert_eq!(percent(-3.0), "0%");
-    }
-
-    #[test]
-    fn older_snapshots_are_counted_only_when_there_are_some() {
-        assert_eq!(older_count(9, 5), Some(4));
-        assert_eq!(older_count(6, 5), Some(1));
-        assert_eq!(older_count(5, 5), None);
-        assert_eq!(older_count(0, 5), None);
     }
 
     #[test]

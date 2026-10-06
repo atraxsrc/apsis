@@ -62,8 +62,6 @@ const WINDOW_RESIZE_BORDER: f64 = 8.0;
 const WINDOW_SHOWN_FALLBACK: Duration = Duration::from_millis(1500);
 /// The panel popup's width.
 const POPUP_WIDTH: f32 = 360.0;
-/// Newest snapshots the popup lists.
-const POPUP_ROWS: usize = 5;
 /// Width of the right-click menu.
 const MENU_WIDTH: f32 = 240.0;
 /// While the helper is busy with a job this window can't see: how often to list again. A

@@ -117,6 +117,89 @@ impl StatusView {
             }
         }
     }
+
+    /// The popup's ring: the age in its centre, how much of it is drawn, and the line under
+    /// it. `chosen` is false when the list says no backup disk is set.
+    #[must_use]
+    pub fn ring(&self, chosen: bool) -> Ring {
+        let not_connected = Ring {
+            age: "-".to_owned(),
+            dated: false,
+            overdue: false,
+            used: None,
+            nearly_full: false,
+            disk: fl!("ring-disk-not-connected"),
+            figures: None,
+        };
+        let status = match self {
+            Self::Unloaded => {
+                return Ring {
+                    disk: String::new(),
+                    ..not_connected
+                };
+            }
+            Self::Failed => return not_connected,
+            Self::Loaded(status) => status,
+        };
+        let (age, overdue) = match (status.last, status.due()) {
+            (Some(age), due) => (ago(age), matches!(due, Due::Overdue { .. })),
+            (None, due) => (fl!("ring-no-snapshot"), matches!(due, Due::Never { .. })),
+        };
+        let mut ring = Ring {
+            age,
+            dated: status.last.is_some(),
+            overdue,
+            ..not_connected
+        };
+        match &status.disk {
+            _ if !chosen => ring.disk = fl!("ring-no-disk"),
+            DiskStatus::Mounted { device, usage } => {
+                let device = fmt::device_name(device);
+                #[allow(clippy::cast_possible_truncation, reason = "0 to 1")]
+                let used = (1.0 - usage.free_fraction()) as f32;
+                ring.used = Some(used.clamp(0.0, 1.0));
+                ring.nearly_full = status.disk_warning();
+                ring.disk = fl!(
+                    "ring-disk",
+                    device = device,
+                    free = fmt::size_short(usage.free),
+                    total = fmt::size_short(usage.total)
+                );
+                ring.figures = Some(format!(
+                    "{device}  {} / {} · {}",
+                    fmt::size_short(usage.used),
+                    fmt::size_short(usage.total),
+                    fl!(
+                        "strip-used-free",
+                        pct = status.used_pct().unwrap_or(0).to_string(),
+                        free = fmt::size_short(usage.free)
+                    )
+                ));
+            }
+            DiskStatus::NotMounted => {}
+            DiskStatus::Unknown => ring.disk = fl!("ring-disk-unknown"),
+        }
+        ring
+    }
+}
+
+/// What the popup's ring shows. No widgets; the view draws it in the theme's colours.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ring {
+    /// `34m ago`, `No snapshot`, or `-` while nothing is known.
+    pub age: String,
+    /// `age` is a snapshot's age, so `last snapshot` goes under it.
+    pub dated: bool,
+    /// The age takes the warning colour: the reminder is due.
+    pub overdue: bool,
+    /// The used share of the backup disk, 0 to 1. `None`: the track only.
+    pub used: Option<f32>,
+    /// The arc takes the warning colour: the disk is nearly full.
+    pub nearly_full: bool,
+    /// `sda · 11G free of 28G`, `Backup disk not connected`, `No backup disk chosen`.
+    pub disk: String,
+    /// The full figures, for the tooltip: `sda  15G / 28G · 58% used · 11G free`.
+    pub figures: Option<String>,
 }
 
 /// The apsis strip's text: the time column and the disk column. No widgets; `app.rs` lays it out
@@ -403,5 +486,44 @@ mod tests {
         assert_eq!(text(loaded(Some(1), None, DiskStatus::Unknown)), "unknown");
         assert_eq!(StatusView::Unloaded.strip().last, "-");
         assert_eq!(StatusView::Failed.strip().next, "manual only");
+    }
+
+    #[test]
+    fn ring_says_the_age_and_the_free_space() {
+        let ring = loaded(Some(12), Some(7), disk(372 * G, 224 * G)).ring(true);
+        assert_eq!(ring.age, "12h ago");
+        assert!(ring.dated && !ring.overdue && !ring.nearly_full);
+        assert_eq!(ring.disk, "sdx1 · 224G free of 596G");
+        assert_eq!(
+            ring.figures.as_deref(),
+            Some("sdx1  372G / 596G · 63% used · 224G free")
+        );
+        let used = ring.used.unwrap();
+        assert!((used - 0.624).abs() < 0.01, "{used}");
+    }
+
+    #[test]
+    fn ring_warns_for_an_overdue_snapshot_and_a_nearly_full_disk() {
+        let ring = loaded(Some(9 * 24), Some(7), disk(899 * G, 99 * G)).ring(true);
+        assert!(ring.overdue && ring.nearly_full);
+        let none = loaded(None, Some(7), disk(G, 99 * G)).ring(true);
+        assert_eq!(none.age, "No snapshot");
+        assert!(!none.dated && none.overdue && !none.nearly_full);
+        assert!(!loaded(None, None, disk(G, 99 * G)).ring(true).overdue);
+    }
+
+    #[test]
+    fn ring_without_a_disk_draws_the_track_only() {
+        for ring in [
+            StatusView::Failed.ring(true),
+            loaded(Some(1), None, DiskStatus::NotMounted).ring(true),
+        ] {
+            assert_eq!(ring.disk, "Backup disk not connected");
+            assert_eq!((ring.used, ring.figures), (None, None));
+        }
+        let unchosen = loaded(Some(1), None, DiskStatus::Unknown).ring(false);
+        assert_eq!(unchosen.disk, "No backup disk chosen");
+        assert_eq!(unchosen.used, None);
+        assert_eq!(StatusView::Unloaded.ring(true).disk, "");
     }
 }
