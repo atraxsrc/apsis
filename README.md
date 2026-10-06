@@ -18,21 +18,58 @@
   <img width="649" height="448" alt="Settings: Include" src="docs/3.png" />
 </p>
 
-Apsis takes snapshots of your system, the way Timeshift does, and lives in the COSMIC panel.
-The panel shows when the last snapshot was taken and how full the backup disk is; the window
-creates, lists and deletes snapshots and holds the settings.
+Apsis takes snapshots of your system and can put the system back to one of them. It is made
+for the COSMIC desktop: an applet in the panel shows when the last snapshot was taken and how
+full the backup disk is, and a window creates, lists, deletes and restores snapshots and holds
+the settings.
 
-Timeshift works fine on COSMIC. Apsis is a native alternative, and Timeshift can still read its
-snapshots.
+It takes rsync snapshots the way Timeshift does and keeps Timeshift's layout on the backup
+disk: snapshots Timeshift made keep working in Apsis, and Timeshift can still read Apsis's.
+Apsis doesn't need Timeshift installed.
 
-> **Status:** 0.6.0. Apsis takes rsync snapshots itself and doesn't need
-> Timeshift. It uses Timeshift's layout on the backup disk, so snapshots Timeshift made keep
-> working in Apsis. Manual only: there is no schedule, and a snapshot
-> is only deleted when you delete it. **Restoring the whole system is experimental** (since
-> 0.5.0): it works on Pop!_OS with systemd-boot, and the restore runs at the next start,
-> outside the desktop. **Restoring an encrypted install is new in 0.6.0**: the layout
-> Pop!_OS's installer makes with "Encrypt drive", run on one laptop so far. Read "If a
-> restore goes wrong" below before you rely on it.
+> **Status: 0.6.0** ([changelog](CHANGELOG.md)). Snapshots are manual: there is no schedule,
+> and a snapshot is only deleted when you delete it. **Restoring the whole system is
+> experimental** (since 0.5.0), for Pop!_OS 24.04 with systemd-boot only; the restore runs at
+> the next start, outside the desktop. **New in 0.6.0: restore on an encrypted install**, in
+> the layout Pop!_OS's installer makes with "Encrypt drive", run on one laptop so far. Read
+> ["If a restore goes wrong"](#if-a-restore-goes-wrong) before you rely on it.
+
+| You want to | Go to |
+|---|---|
+| know if Apsis is for you | [Why Apsis](#why-apsis), [What it does](#what-it-does) |
+| install it | [Requirements](#requirements), [Install](#install) |
+| take your first snapshot | [Use](#use), [Settings](#settings) |
+| put the system back | [Restore the system](#restore-the-system) |
+| fix something | [Troubleshooting](#troubleshooting); after a restore, [If a restore goes wrong](#if-a-restore-goes-wrong) |
+| see what changed | [CHANGELOG.md](CHANGELOG.md) |
+| report a vulnerability | [SECURITY.md](SECURITY.md), privately |
+| report a bug or help | [Contributing](#contributing) |
+| see how it's built | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+
+## Why Apsis
+
+Timeshift works fine on COSMIC. Apsis is a native alternative: the same kind of snapshot,
+made for this desktop.
+
+- **It lives in the panel.** The last snapshot and the backup disk are one glance away, and
+  the icon turns the warning colour when the last snapshot is getting old or the disk is
+  nearly full.
+- **It looks like the rest of COSMIC.** Standard COSMIC widgets that follow the theme live:
+  light and dark, accent colour, fonts.
+- **The window never runs as root.** The applet and the window run as you. A small helper
+  does the work that needs root, and polkit asks for your password
+  ([SECURITY.md](SECURITY.md)).
+- **Your snapshots aren't locked in.** They are plain folders in Timeshift's layout, so you
+  can go back to Timeshift, or use both.
+- **A careful restore.** It runs at the next start with the desktop stopped, so no file is
+  in use while it's replaced. It takes a safety snapshot first, keeps the old boot files if
+  the new ones fail the check, and refuses rather than guesses.
+- **You decide.** A snapshot is taken when you click Create and deleted when you click
+  Delete. Nothing happens on a schedule.
+
+Apsis isn't for you if you need scheduled snapshots, automatic deletion, btrfs snapshots,
+single-file restore or an encrypted backup disk: it has none of them. Timeshift has
+schedules and btrfs snapshots.
 
 ## What it does
 
@@ -43,11 +80,12 @@ snapshots.
 - **A filter list**, like Timeshift's Filters tab: folders, files or patterns to leave out
   (`-`) or keep (`+`).
 - **Delete snapshots**, one or several at once.
-- **Restore the whole system** to a snapshot (0.5.0, experimental). Apsis checks the snapshot
-  fits this computer, takes a safety snapshot of the system as it is now, and puts the system
-  files back at the next start, outside the desktop, then starts normally. Your home folders
-  are kept unless you choose to restore them too.
 - **Stop** a snapshot while it's being made; what it copied so far is removed.
+- **Restore the whole system** to a snapshot (experimental, since 0.5.0; on an encrypted
+  Pop!_OS install since 0.6.0). Apsis checks the snapshot fits this computer, takes a safety
+  snapshot of the system as it is now, and puts the system files back at the next start,
+  outside the desktop, then starts normally. Your home folders are kept unless you choose to
+  restore them too.
 - **Status in the panel**: the tooltip shows the last snapshot and the backup disk; an optional
   label beside the icon shows both at a glance. The icon turns the warning colour when the last
   snapshot is older than a week (you choose how long), or the disk is nearly full.
@@ -55,15 +93,6 @@ snapshots.
 
 Not in Apsis: scheduled snapshots, automatic deletion, restoring single files, btrfs
 snapshots, and encrypted backup disks.
-
-**How restore differs from Timeshift's.** Timeshift restores from the running system or a live
-USB and rebuilds the boot files for the bootloader it finds. Apsis restores at the next start
-(systemd's offline-update mode, like a Pop!_OS release upgrade), so no file is in use while it's
-replaced; it keeps the live `fstab` and `crypttab` and the boot partition's layout, refreshes
-the boot files with kernelstub exactly as Pop!_OS's own kernel hooks do, uses the snapshot's
-initrds as they are, keeps the kernel the computer started with until the new boot files have
-been checked, and keeps the old boot files if the refresh or the check fails. It never restores
-onto another installation, and it refuses rather than guesses.
 
 ## Requirements
 
@@ -110,11 +139,7 @@ Both install `apsis-helper`: a small root service that does the work that needs 
 deciding who may do what. What runs as root: [SECURITY.md](SECURITY.md). Files and design:
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-**Upgrading from 0.3?** Open the settings once. Your old settings are shown as they will be
-saved (a note at the top says what changed: a home folder set to "everything" becomes the
-`/home` choice, "hidden files only" becomes a `+` filter); snapshots keep holding the same
-files. Click Save. File restore is gone in 0.4: anything already in `~/Apsis-restored/`, and
-any `*.apsis-before-*` file next to an original, is yours and can be deleted by hand.
+### Upgrading
 
 **Upgrading, reinstalling or removing while Apsis is busy.** From 0.5.0 the package waits
 its turn. While a snapshot, a delete, a restore's preparation or a settings save runs, apt
@@ -129,6 +154,12 @@ afterwards.
 **The upgrade from 0.4.x doesn't wait.** It runs the installed 0.4.x package's script, which
 stops the helper even in the middle of a snapshot or a delete. Upgrade from 0.4.x while
 nothing runs.
+
+**Upgrading from 0.3?** Open the settings once. Your old settings are shown as they will be
+saved (a note at the top says what changed: a home folder set to "everything" becomes the
+`/home` choice, "hidden files only" becomes a `+` filter); snapshots keep holding the same
+files. Click Save. File restore is gone in 0.4: anything already in `~/Apsis-restored/`, and
+any `*.apsis-before-*` file next to an original, is yours and can be deleted by hand.
 
 ## Use
 
@@ -150,25 +181,96 @@ one still in `timeshift/snapshots/` (a delete cut off by an older Apsis leaves i
 **Known limit:** a folder in `timeshift/snapshots/` with no `info.json` is only a warning, and
 Apsis won't delete it; it needs removing by hand, as root.
 
-4. **Restore the system** (0.5.0, experimental): select one snapshot, **Restore**. Apsis checks
-   that the snapshot fits this computer (same installation, UEFI, Pop!_OS with systemd-boot,
-   an ext4 system disk on a plain partition or on Pop!_OS's standard encrypted install) and
-   shows the choices: keep your home folders as they are now
-   (default) or restore them too, and take a safety snapshot first (on by default). The safety
-   snapshot is the way back: the system as it was right before the restore, listed as "Safety
-   snapshot, before restoring <date>", costing only the files that differ from the newest
-   snapshot. To undo the restore, restore it like any other snapshot; without it there is no
-   way back. **Restore**
-   then prepares: it measures the space, takes the safety snapshot and writes the plan. **Ready to restore** is the last word: **Restart now** restarts the
-   computer, restores the system with the desktop stopped, and restarts once more; **Cancel
-   restore** (or Esc, or closing the window) drops the plan and keeps the safety snapshot.
-   Once it restarts, the restore can't be stopped: don't turn off the computer until it's
-   back at the login screen. After you log in, the window's status line says how it went.
+To restore the system to a snapshot: see [Restore the system](#restore-the-system).
 
 **Why does it ask for my password?** Snapshots touch system files, so creating, deleting and
 saving the settings run as root, and your system asks you (polkit) to confirm. It's remembered
 for a few minutes. Listing needs no password, and neither does stopping a snapshot you started.
 A restore asks every time.
+
+### Keyboard shortcuts
+
+| key | does |
+|---|---|
+| `Ctrl+N` | Create |
+| `Delete` | Delete the selected snapshots |
+| `Ctrl+R`, `F5` | Refresh |
+| `Ctrl+,` | Settings |
+| `Ctrl+A` | Select all |
+| `↑` `↓` | Move the selection |
+| `Esc` | Close a dialog (on the "Ready to restore" prompt: cancel the restore), leave the settings, clear the selection |
+
+Restore has no shortcut: click it, or Tab to it and press Enter.
+
+## Settings
+
+**Location**: the disk snapshots go to. Only disks that can hold snapshots can be picked (a
+Linux filesystem, not encrypted); the others are listed with the reason.
+
+**Include**: the system is always included. `/root` is the root user's home folder (on by
+default). `/home` is every user's home folder: documents, photos and settings (off by
+default). With `/home` included, a full restore puts your documents back as they were
+in the snapshot too.
+
+**Filters**: each line is `+` (keep) or `-` (leave out) and a pattern. rsync takes the
+**first** line that matches, top to bottom, so order matters: new lines go on top, and Move Up
+/ Move Down reorder them. Add Folder and Add File pick a path; Add Pattern takes a typed one
+(start it with `+ ` to include; anything else is excluded). Built-in excludes (`/proc`, `/dev`,
+`/tmp`, caches, other mounts) always come first.
+
+- `*` matches any name within one folder level; it doesn't cross a `/`.
+- `**` matches anything, across folders.
+- `***` after a folder means the folder and everything in it.
+- A pattern starting with `/` starts at the root of the system. Without the leading `/`, a
+  pattern with a `/` in it matches the end of any path: `- home/Downloads` leaves out
+  `/home/Downloads` and `/srv/home/Downloads`, not `/home/you/Downloads`.
+
+| filter | effect |
+|---|---|
+| `- /var/lib/libvirt/***` | leave out virtual machine disk images |
+| `- /home/*/Downloads/***` | leave out every user's Downloads folder (with `/home` included) |
+| `+ /home/you/Projects/***` | keep one folder of your home even with `/home` left out |
+
+**Misc** (saved at once, for you only): **Remind me** after this many days without a snapshot
+(0 turns it off), and the **Panel label**.
+
+## Restore the system
+
+Experimental, since 0.5.0. For Pop!_OS 24.04 with systemd-boot, on a plain partition or, since
+0.6.0, on Pop!_OS's standard encrypted install. Read
+[Known limitations of restore](#known-limitations-of-restore) first, and keep
+[If a restore goes wrong](#if-a-restore-goes-wrong) where you can read it without this
+computer.
+
+1. Select one snapshot, **Restore**. Apsis checks that the snapshot fits this computer (same
+   installation, UEFI, Pop!_OS with systemd-boot, an ext4 system disk on a plain partition or
+   on Pop!_OS's standard encrypted install). If it doesn't, the dialog says why and nothing
+   happens.
+2. Choose: keep your home folders as they are now (default) or restore them too, and take a
+   safety snapshot first (on by default).
+3. **Restore** then prepares: it measures the space, takes the safety snapshot and writes the
+   plan.
+4. **Ready to restore** is the last word: **Restart now** restarts the computer, restores the
+   system with the desktop stopped, and restarts once more; **Cancel restore** (or Esc, or
+   closing the window) drops the plan and keeps the safety snapshot.
+5. Once it restarts, the restore can't be stopped: don't turn off the computer until it's
+   back at the login screen. On an encrypted system disk the passphrase is asked twice: at
+   the restart that runs the restore, and at the start after it.
+6. After you log in, the window's status line says how it went.
+
+**The safety snapshot is the way back**: the system as it was right before the restore,
+listed as "Safety snapshot, before restoring <date>", costing only the files that differ
+from the newest snapshot. To undo the restore, restore it like any other snapshot; without
+it there is no way back.
+
+**How restore differs from Timeshift's.** Timeshift restores from the running system or a live
+USB and rebuilds the boot files for the bootloader it finds. Apsis restores at the next start
+(systemd's offline-update mode, like a Pop!_OS release upgrade), so no file is in use while it's
+replaced; it keeps the live `fstab` and `crypttab` and the boot partition's layout, refreshes
+the boot files with kernelstub exactly as Pop!_OS's own kernel hooks do, uses the snapshot's
+initrds as they are, keeps the kernel the computer started with until the new boot files have
+been checked, and keeps the old boot files if the refresh or the check fails. It never restores
+onto another installation, and it refuses rather than guesses.
 
 ### Known limitations of restore
 
@@ -335,52 +437,6 @@ don't want it. **Some files were not restored**: rsync's log names them, and it'
 `sudo less /var/lib/apsis/restore/rsync-log`. See the helper's log for the details:
 `journalctl -b -1 -u apsis-restore` (the restore's own boot) and `journalctl -u apsis-helper`.
 
-### Keyboard shortcuts
-
-| key | does |
-|---|---|
-| `Ctrl+N` | Create |
-| `Delete` | Delete the selected snapshots |
-| `Ctrl+R`, `F5` | Refresh |
-| `Ctrl+,` | Settings |
-| `Ctrl+A` | Select all |
-| `↑` `↓` | Move the selection |
-| `Esc` | Close a dialog (on the "Ready to restore" prompt: cancel the restore), leave the settings, clear the selection |
-
-Restore has no shortcut: click it, or Tab to it and press Enter.
-
-## Settings
-
-**Location**: the disk snapshots go to. Only disks that can hold snapshots can be picked (a
-Linux filesystem, not encrypted); the others are listed with the reason.
-
-**Include**: the system is always included. `/root` is the root user's home folder (on by
-default). `/home` is every user's home folder: documents, photos and settings (off by
-default). With `/home` included, a full restore (0.5.0) puts your documents back as they were
-in the snapshot too.
-
-**Filters**: each line is `+` (keep) or `-` (leave out) and a pattern. rsync takes the
-**first** line that matches, top to bottom, so order matters: new lines go on top, and Move Up
-/ Move Down reorder them. Add Folder and Add File pick a path; Add Pattern takes a typed one
-(start it with `+ ` to include; anything else is excluded). Built-in excludes (`/proc`, `/dev`,
-`/tmp`, caches, other mounts) always come first.
-
-- `*` matches any name within one folder level; it doesn't cross a `/`.
-- `**` matches anything, across folders.
-- `***` after a folder means the folder and everything in it.
-- A pattern starting with `/` starts at the root of the system. Without the leading `/`, a
-  pattern with a `/` in it matches the end of any path: `- home/Downloads` leaves out
-  `/home/Downloads` and `/srv/home/Downloads`, not `/home/you/Downloads`.
-
-| filter | effect |
-|---|---|
-| `- /var/lib/libvirt/***` | leave out virtual machine disk images |
-| `- /home/*/Downloads/***` | leave out every user's Downloads folder (with `/home` included) |
-| `+ /home/you/Projects/***` | keep one folder of your home even with `/home` left out |
-
-**Misc** (saved at once, for you only): **Remind me** after this many days without a snapshot
-(0 turns it off), and the **Panel label**.
-
 ## Troubleshooting
 
 | you see | what to do |
@@ -404,6 +460,18 @@ in the snapshot too.
 | the computer keeps restarting into the restore | boot the recovery and `rm /mnt/system-update` as in "If a restore goes wrong" |
 | anything else | the helper's log: `journalctl -u apsis-helper -e` |
 
+### Still stuck?
+
+- **The logs.** `journalctl -u apsis-helper -e` is the helper's log. After a restore,
+  `journalctl -b -1 -u apsis-restore` is the log of the restore's own boot.
+- **The manual page**: `man apsis`.
+- **After a restore**: [If a restore goes wrong](#if-a-restore-goes-wrong).
+- **Ask, or report a bug**: [open an issue](https://github.com/atraxsrc/apsis/issues). Say
+  which version (the window's About page shows it), what you did, what you expected and
+  what the status line or the dialog said, with the log lines around it. Logs hold disk
+  UUIDs, your user name and your computer's name: take out what you don't want public.
+- **A security problem** doesn't go in an issue: see [Security](#security).
+
 ## Uninstall
 
 ```sh
@@ -419,7 +487,38 @@ waits for its restart (see "Upgrading, reinstalling or removing while Apsis is b
 of a job and doesn't cancel a restore that waits for its restart, so run it only while
 nothing runs and no restore waits.
 
-## Development
+## Security
+
+The applet and the window always run as your user. `apsis-helper` is the only part that runs
+as root: a D-Bus service started on demand, with polkit deciding who may do what.
+[SECURITY.md](SECURITY.md) has the details.
+
+Please report vulnerabilities privately, as [SECURITY.md](SECURITY.md) describes, not in a
+public issue.
+
+## Contributing
+
+Bug reports, questions and ideas are welcome as
+[issues](https://github.com/atraxsrc/apsis/issues); see "Still stuck?" above for what helps
+in a report. A report of how Restore went on your hardware, good or bad, is especially
+useful: it has run on one laptop so far.
+
+For code:
+
+- Build with the [requirements](#requirements) above. `just run` runs it in a window, no
+  root needed.
+- Before a pull request, run what CI runs: `cargo fmt --all --check`, `cargo clippy --locked
+  --workspace --all-targets -- -D warnings` and `cargo test --locked --workspace`. The tests
+  need no root.
+- Keep changes small, and say how you tested them. A change to Restore needs more than unit
+  tests: say what ran on real hardware and what didn't.
+- No hard-coded colours: every colour comes from the COSMIC theme.
+- The window's texts are in `i18n/en/apsis.ftl` (Fluent). English is the only language so
+  far.
+- How it's built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Why things are the way they
+  are: [docs/DECISIONS.md](docs/DECISIONS.md).
+
+### Development
 
 ```sh
 just run             # run in a window, no root needed
@@ -441,10 +540,6 @@ A system snapshot is the same idea: a fixed point on the machine's timeline that
 
 The logo shows exactly that: an orbit with its two apsides, the glowing one being the point you
 come back to.
-
-## Security
-
-Please report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
 ## License
 
