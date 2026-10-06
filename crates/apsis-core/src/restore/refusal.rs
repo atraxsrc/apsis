@@ -956,8 +956,9 @@ cryptswap UUID=44444444-4444-4444-4444-444444444444 /dev/urandom swap,plain,offs
         }
     }
 
-    /// The same machine from lsblk's own JSON, through [`parse_lsblk`]. The file is written
-    /// by hand from what the spike's log shows of apsis-test, with placeholders.
+    /// The same machine from lsblk's own JSON, through [`parse_lsblk`]. The file is lsblk's
+    /// output on apsis-test (the drill's `pre` log, 2026-10-06; its backup disk and zram
+    /// among the rows, no `label` column), with the UUIDs replaced by placeholders.
     #[test]
     fn the_encrypted_layout_is_read_from_lsblks_json() {
         let devices =

@@ -1,12 +1,85 @@
 {
    "blockdevices": [
-      {"name":"nvme0n1", "kname":"nvme0n1", "pkname":null, "type":"disk", "fstype":null, "uuid":null, "size":512110190592, "label":null},
-      {"name":"nvme0n1p1", "kname":"nvme0n1p1", "pkname":"nvme0n1", "type":"part", "fstype":"vfat", "uuid":"AAAA-0001", "size":1071644672, "label":null},
-      {"name":"nvme0n1p2", "kname":"nvme0n1p2", "pkname":"nvme0n1", "type":"part", "fstype":"vfat", "uuid":"AAAA-0002", "size":4294967296, "label":null},
-      {"name":"nvme0n1p3", "kname":"nvme0n1p3", "pkname":"nvme0n1", "type":"part", "fstype":"crypto_LUKS", "uuid":"22222222-2222-2222-2222-222222222222", "size":502446456832, "label":null},
-      {"name":"nvme0n1p4", "kname":"nvme0n1p4", "pkname":"nvme0n1", "type":"part", "fstype":"swap", "uuid":"44444444-4444-4444-4444-444444444444", "size":4294967296, "label":null},
-      {"name":"cryptdata", "kname":"dm-0", "pkname":"nvme0n1p3", "type":"crypt", "fstype":"LVM2_member", "uuid":"AbCdEf-0000-0000-0000-0000-0000-GhIjKl", "size":502429679616, "label":null},
-      {"name":"data-root", "kname":"dm-1", "pkname":"dm-0", "type":"lvm", "fstype":"ext4", "uuid":"11111111-1111-1111-1111-111111111111", "size":502425485312, "label":null},
-      {"name":"cryptswap", "kname":"dm-2", "pkname":"nvme0n1p4", "type":"crypt", "fstype":"swap", "uuid":"55555555-5555-5555-5555-555555555555", "size":4294442496, "label":null}
+      {
+         "name": "sda",
+         "kname": "sda",
+         "pkname": null,
+         "type": "disk",
+         "fstype": "ext4",
+         "uuid": "66666666-6666-6666-6666-666666666666",
+         "size": 30784094208
+      },{
+         "name": "zram0",
+         "kname": "zram0",
+         "pkname": null,
+         "type": "disk",
+         "fstype": null,
+         "uuid": null,
+         "size": 16644046848
+      },{
+         "name": "cryptdata",
+         "kname": "dm-0",
+         "pkname": "nvme0n1p3",
+         "type": "crypt",
+         "fstype": "LVM2_member",
+         "uuid": "AbCdEf-0000-0000-0000-0000-0000-GhIjKl",
+         "size": 502427639296
+      },{
+         "name": "data-root",
+         "kname": "dm-1",
+         "pkname": "dm-0",
+         "type": "lvm",
+         "fstype": "ext4",
+         "uuid": "11111111-1111-1111-1111-111111111111",
+         "size": 502423093248
+      },{
+         "name": "cryptswap",
+         "kname": "dm-2",
+         "pkname": "nvme0n1p4",
+         "type": "crypt",
+         "fstype": "swap",
+         "uuid": "55555555-5555-5555-5555-555555555555",
+         "size": 4294442496
+      },{
+         "name": "nvme0n1",
+         "kname": "nvme0n1",
+         "pkname": null,
+         "type": "disk",
+         "fstype": null,
+         "uuid": null,
+         "size": 512110190592
+      },{
+         "name": "nvme0n1p1",
+         "kname": "nvme0n1p1",
+         "pkname": "nvme0n1",
+         "type": "part",
+         "fstype": "vfat",
+         "uuid": "AAAA-0001",
+         "size": 1071644160
+      },{
+         "name": "nvme0n1p2",
+         "kname": "nvme0n1p2",
+         "pkname": "nvme0n1",
+         "type": "part",
+         "fstype": "vfat",
+         "uuid": "AAAA-0002",
+         "size": 4294966784
+      },{
+         "name": "nvme0n1p3",
+         "kname": "nvme0n1p3",
+         "pkname": "nvme0n1",
+         "type": "part",
+         "fstype": "crypto_LUKS",
+         "uuid": "22222222-2222-2222-2222-222222222222",
+         "size": 502444416512
+      },{
+         "name": "nvme0n1p4",
+         "kname": "nvme0n1p4",
+         "pkname": "nvme0n1",
+         "type": "part",
+         "fstype": "swap",
+         "uuid": "44444444-4444-4444-4444-444444444444",
+         "size": 4294966784
+      }
    ]
 }
