@@ -6,16 +6,16 @@
 
 <p align="center">System snapshot and restore for the COSMIC™ desktop.</p>
 <p align="center">
-  <img width="357" height="386" alt="The panel popup" src="docs/4.png" />
+  <img width="359" height="342" alt="The panel popup" src="docs/4.png" />
 </p>
 <p align="center">
-  <img width="647" height="445" alt="The window" src="docs/1.png" />
+  <img width="733" height="528" alt="The window" src="docs/1.png" />
 </p>
 <p align="center">
-  <img width="649" height="448" alt="Settings: Location" src="docs/2.png" />
+  <img width="733" height="528" alt="Settings: Location" src="docs/2.png" />
 </p>
 <p align="center">
-  <img width="649" height="448" alt="Settings: Include" src="docs/3.png" />
+  <img width="733" height="528" alt="Settings: Include" src="docs/3.png" />
 </p>
 
 Apsis takes snapshots of your system and can put the system back to one of them. It is made
