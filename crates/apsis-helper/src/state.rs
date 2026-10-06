@@ -1267,6 +1267,7 @@ mod ready_tests {
 /// script's `flock -n` finds, and what the helper does while a script holds the lock.
 #[cfg(test)]
 mod lock_tests {
+    use std::io::{BufRead, BufReader};
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     use super::tests::{drain, flock_exit, hold, state};
@@ -1533,16 +1534,26 @@ mod lock_tests {
 
     /// Test 15. What the helper starts mid-job (rsync, `mount`, `systemd-run`) never holds
     /// a copy of the lock, so the lock dies with the helper and not with its children.
+    /// The child says `ready` before its open files are read: during exec the kernel lets
+    /// the spawning parent go before it closes the close-on-exec descriptors, so
+    /// `/proc/<pid>/fd` read straight after `spawn` can still list the test's own. The shell
+    /// that wrote the line is past its exec, and `exec sleep` after it opens nothing.
     #[tokio::test]
     async fn a_child_never_keeps_the_lock() {
         let (state, _changes) = state();
         let lock = state.lock();
         let running = state.begin(JobKind::Create).await.unwrap();
         assert_eq!(flock_exit(&lock), 75, "held while the job runs");
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "echo ready; exec sleep 30"])
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line, "ready\n", "the child is past its exec");
         // What the child has open: a copy of the lock would outlive a helper that's killed.
         let open: Vec<PathBuf> = std::fs::read_dir(format!("/proc/{}/fd", child.id()))
             .unwrap()
