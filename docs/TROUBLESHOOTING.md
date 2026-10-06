@@ -1,6 +1,6 @@
 # Troubleshooting
 
-What the messages mean, what to do about them, and upgrading from older versions.
+What the messages mean, what to do about them, upgrading from older versions and uninstalling.
 
 | you see | what to do |
 |---|---|
@@ -56,3 +56,13 @@ saved (a note at the top says what changed: a home folder set to "everything" be
 `/home` choice, "hidden files only" becomes a `+` filter); snapshots keep holding the same
 files. Click Save. File restore is gone in 0.4: anything already in `~/Apsis-restored/`, and
 any `*.apsis-before-*` file next to an original, is yours and can be deleted by hand.
+
+## Uninstall
+
+Your snapshots stay on the backup disk. `apt purge` also removes `/var/lib/apsis`, the
+restore's state folder, including the kept recovery pair (`last-restore.filter` and
+`last-restore.note`). `apt remove` is refused while a job runs, and cancels a restore that
+waits for its restart (see "Upgrading, reinstalling or removing while Apsis is busy").
+`just uninstall` runs none of the package's checks: it stops the helper even in the middle
+of a job and doesn't cancel a restore that waits for its restart, so run it only while
+nothing runs and no restore waits.
