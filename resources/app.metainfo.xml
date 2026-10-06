@@ -62,11 +62,15 @@
   <screenshots>
     <screenshot type="default">
       <caption>The window: the snapshot list, the last snapshot and the backup disk</caption>
-      <image type="source" width="733" height="528">https://raw.githubusercontent.com/atraxsrc/apsis/d3998ee2f7846b5e44db008b2148e8136f803ecd/docs/1.png</image>
+      <image type="source" width="730" height="529">https://raw.githubusercontent.com/atraxsrc/apsis/d3998ee2f7846b5e44db008b2148e8136f803ecd/docs/1.png</image>
     </screenshot>
     <screenshot>
-      <caption>The panel popup: a read-only overview</caption>
-      <image type="source" width="359" height="342">https://raw.githubusercontent.com/atraxsrc/apsis/d3998ee2f7846b5e44db008b2148e8136f803ecd/docs/4.png</image>
+      <caption>The panel popup: how full the backup disk is and how old the last snapshot is</caption>
+      <image type="source" width="355" height="353">https://raw.githubusercontent.com/atraxsrc/apsis/d3998ee2f7846b5e44db008b2148e8136f803ecd/docs/4.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The panel popup while a snapshot is made</caption>
+      <image type="source" width="355" height="353">https://raw.githubusercontent.com/atraxsrc/apsis/d3998ee2f7846b5e44db008b2148e8136f803ecd/docs/5.png</image>
     </screenshot>
     <screenshot>
       <caption>Settings: the disk where snapshots are saved</caption>
