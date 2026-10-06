@@ -157,7 +157,7 @@ _deb-assets:
     sed 's|@libexecdir@|{{libexec-path}}|g' {{ helper-res / helper + '.service.in' }} > {{ deb-assets-dir / helper + '.service' }}
     gzip -9nc {{ 'docs' / name + '.1' }} > {{ deb-assets-dir / name + '.1.gz' }}
 
-# Dev only, for apsis-test and never a release: the same package under a version of its own,
+# Dev only, for a test machine and never a release: the same package under a version of its own,
 # so a build of a branch can't be taken for the release's (<version>-1). It sorts above the
 # release and below the next one. The code is what `deb` packages: nothing is switched on.
 # In a folder of its own: cargo-deb clears target/debian of older .deb files on every run.

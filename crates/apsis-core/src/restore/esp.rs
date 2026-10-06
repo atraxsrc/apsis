@@ -945,7 +945,7 @@ pub(in crate::restore) mod tests {
         "loader/entries.srel",
     ];
 
-    /// What kernel-install leaves on a Pop!_OS ESP (apsis-test, check 0.1): a folder per
+    /// What kernel-install leaves on a Pop!_OS ESP: a folder per
     /// kernel under the machine id (a placeholder here) and `EFI/Linux`, all empty. Never
     /// read, backed up or written, and never an error.
     const KERNEL_INSTALL: [&str; 3] = [
@@ -954,7 +954,7 @@ pub(in crate::restore) mod tests {
         "EFI/Linux",
     ];
 
-    /// A machine as apsis-test: the ESP boots copies of the kernel and initrd, and `/boot`
+    /// A typical Pop!_OS machine: the ESP boots copies of the kernel and initrd, and `/boot`
     /// links to the files they were copied from.
     pub(in crate::restore) struct Lab {
         pub esp: PathBuf,
@@ -1896,7 +1896,7 @@ pub(in crate::restore) mod tests {
         }
     }
 
-    /// Check 0.1 on apsis-test: the ESP also holds kernel-install's `<machine-id>/<version>/`
+    /// A real Pop!_OS ESP also holds kernel-install's `<machine-id>/<version>/`
     /// folders and `EFI/Linux/`, all empty. They aren't in the list: the check, the backup,
     /// the put-back and the clearing all pass with them there, nothing of them is backed up,
     /// and they're the same empty folders afterwards.
@@ -2089,7 +2089,7 @@ pub(in crate::restore) mod tests {
         );
     }
 
-    /// The owner's machine on 2026-10-01 (Pop!_OS 24.04, kernels 7.1.5 and 7.0.11): the
+    /// A real machine (Pop!_OS 24.04, kernels 7.1.5 and 7.0.11): the
     /// sizes in `EFI/Pop_OS-<root uuid>/`, and a 1020M ESP with 361M free.
     const REAL: EspSizes = EspSizes {
         current: BootSizes {

@@ -237,9 +237,9 @@ pub fn remove_arm_files(paths: &Paths) -> io::Result<Vec<&'static str>> {
             removed.push(name);
         }
     }
-    // The drop-in's folder is Apsis's too: Pop's unit ships none (check 1, 2026-10-02). It
+    // The drop-in's folder is Apsis's too: Pop's unit ships none. It
     // stays if another drop-in is in it. The wants folder the same: the arm made it if it
-    // wasn't there, and each restore left it behind empty (N3, check 8). It stays if another
+    // wasn't there, and each restore left it behind empty. It stays if another
     // unit's link is in it.
     for folder in [paths.drop_in.parent(), paths.wants_link.parent()]
         .into_iter()
@@ -376,7 +376,7 @@ mod tests {
         (root, paths, exe)
     }
 
-    /// Q3 (owner, 2026-10-04): `--disarm` is run by the disarm timer and by the package's
+    /// `--disarm` is run by the disarm timer and by the package's
     /// `prerm`, so its line names neither. In the journal the unit says who ran it; on
     /// apt's output the `prerm`'s own line follows.
     #[test]
@@ -621,9 +621,9 @@ mod tests {
             &paths.helper_copy,
             &paths.state_dir.join("state.json"),
             &paths.state_dir.join("request.json"),
-            // The drop-in's folder too: Pop's unit has none of its own (check 1, 2026-10-02).
+            // The drop-in's folder too: Pop's unit has none of its own.
             paths.drop_in.parent().unwrap(),
-            // And the wants folder, empty once Apsis's link is out of it (N3, check 8).
+            // And the wants folder, empty once Apsis's link is out of it.
             paths.wants_link.parent().unwrap(),
         ] {
             assert!(fs::symlink_metadata(path).is_err(), "{}", path.display());
@@ -640,7 +640,7 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
-    /// N3 (check 8): each restore left an empty `system-update.target.wants/`. It goes with
+    /// Each restore left an empty `system-update.target.wants/`. It goes with
     /// Apsis's link when nothing else is in it, and stays, with what's in it, when another
     /// unit's link is there.
     #[test]

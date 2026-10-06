@@ -9,7 +9,7 @@
 //! they work unchanged with a temp folder as `/`.
 //!
 //! Each test skips with a message if rsync isn't installed. What a run without root can't
-//! show is in the ignored tests at the end, each with its reason and its check on apsis-test.
+//! show is in the ignored tests at the end, each with its reason.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -34,7 +34,7 @@ use rustix::process::{Pid, Signal};
 const NEW: &str = "6.9.3-76060903-generic";
 const OLD: &str = "6.8.0-76060800-generic";
 
-/// A Pop!_OS machine as apsis-test, with the backup disk mounted for the restore and another
+/// A typical Pop!_OS machine, with the backup disk mounted for the restore and another
 /// disk at `/srv/data`. Devices are placeholders.
 const MOUNTINFO: &str = "\
 24 1 259:3 / / rw,relatime shared:1 - ext4 /dev/sdX3 rw
@@ -758,7 +758,7 @@ fn the_fixed_exclusions_hold_without_any_mount() {
 /// A machine id as kernel-install names its ESP folder. A placeholder.
 const MACHINE_ID: &str = "0123456789abcdef0123456789abcdef";
 
-/// Check 0.1 on apsis-test: the snapshot's `boot/efi` is a full copy of the ESP as it was
+/// The snapshot's `boot/efi` is a full copy of the ESP as it was
 /// (the kernels, kernel-install's empty `<machine-id>/<version>/` and `EFI/Linux/`), and the
 /// live ESP has moved on since. Nothing of the snapshot's copy is transferred, and nothing
 /// the snapshot lacks is deleted, on the ESP or in `/recovery`: with the two mounted, and
@@ -1191,7 +1191,7 @@ fn a_file_that_cant_be_read_exits_23_and_ends_with_problems() {
     let tail = copied(&output).tail;
     assert!(tail.contains("Permission denied (13)"), "{tail}");
     assert!(tail.contains("(code 23)"), "{tail}");
-    // What the journal gets, one line each (item 9): the file rsync couldn't read, by name
+    // What the journal gets, one line each: the file rsync couldn't read, by name
     // and with the reason, then rsync's closing line. No empty line among them.
     let copied = copied(&output);
     let lines: Vec<&str> = copied.error_lines().collect();
@@ -1583,14 +1583,13 @@ fn an_old_format_restore_doesnt_strip_live_xattrs() {
 
 // ---- what a run without root can't show ----
 //
-// These need root to set up (another owner, a device node, a file capability), and Claude
-// never runs anything as root. They're ignored here, with the reason, and each has its check
-// on apsis-test. `sudo cargo test -- --ignored` would run them; nobody is
-// asked to.
+// These need root to set up (another owner, a device node, a file capability), and the
+// tests never run anything as root. They're ignored here, with the reason.
+// `sudo cargo test -- --ignored` would run them; nobody is asked to.
 
 /// `--numeric-ids`: owners come back by number, whatever the user database says.
 #[test]
-#[ignore = "needs root: only root can give a file to another owner. apsis-test check 11"]
+#[ignore = "needs root: only root can give a file to another owner"]
 fn owners_come_back_by_number() {
     let Some(lab) = lab("root-owners") else {
         return;
@@ -1606,7 +1605,7 @@ fn owners_come_back_by_number() {
 
 /// `-a` is `--devices --specials` too: a device node comes back as that device.
 #[test]
-#[ignore = "needs root: only root can make a device node. apsis-test check 11"]
+#[ignore = "needs root: only root can make a device node"]
 fn a_device_node_comes_back_as_a_device() {
     let Some(lab) = lab("root-device") else {
         return;
@@ -1628,7 +1627,7 @@ fn a_device_node_comes_back_as_a_device() {
 
 /// `-X` as root copies `security.*` too: a file capability (`ping`'s) comes back.
 #[test]
-#[ignore = "needs root: security.capability needs CAP_SETFCAP. apsis-test checks 1 and 11"]
+#[ignore = "needs root: security.capability needs CAP_SETFCAP"]
 fn a_file_capability_comes_back() {
     let Some(lab) = lab("root-capability") else {
         return;

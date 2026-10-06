@@ -734,8 +734,8 @@ impl AppModel {
                 )
                 .into(),
             // Two answers; nothing is armed until Restart now. Esc cancels.
-            // The date and comment first: the last place to see which row this is (owner,
-            // 2026-10-02, after check 1 restored a safety snapshot by mistake).
+            // The date and comment first: the last place to see which row this is (it's
+            // easy to restore a safety snapshot by mistake).
             Dialog::Ready { snapshot } => widget::dialog()
                 .title(fl!("ready-title"))
                 .control(
@@ -887,7 +887,7 @@ impl AppModel {
     }
 
     /// Settings: a back button, Cancel and Save, the tabs, and the active tab. Cancel is
-    /// always clickable: it drops any change and leaves the page (C3, check 9).
+    /// always clickable: it drops any change and leaves the page.
     fn settings_page(&self) -> Element<'_, Message> {
         let dirty = matches!(&self.settings, SettingsLoad::Ready(v) if v.dirty());
         let busy = self.saving_settings || self.running.is_some() || self.loading;

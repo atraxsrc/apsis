@@ -758,7 +758,7 @@ impl Found {
         }
     }
 
-    /// What a delete cut part-way in place leaves (an Apsis delete before fix 2, or perhaps
+    /// What a delete cut part-way in place leaves (an older Apsis delete, or perhaps
     /// Timeshift's): a snapshot name, a readable `info.json`, no `exclude.list` (the walk goes
     /// in `readdir` order). A leftover row that Delete removes; never the `--link-dest` base,
     /// never removed unasked. Whether Timeshift building a snapshot in place ever looks the

@@ -260,7 +260,7 @@ fn the_list_is_newest_first_then_the_leftovers() {
             when = fmt::when(apsis_core::parse_snapshot_name(LEFTOVER).unwrap())
         )
     );
-    // Fix 2 (owner, Q1 A): one text for an interrupted create and a cut or half-done delete;
+    // One text for an interrupted create and a cut or half-done delete;
     // the next create removes only the first kind.
     assert_eq!(
         fl!("leftover-row"),
@@ -444,7 +444,7 @@ fn a_delete_of_several_stops_at_the_first_failure_and_says_what_went() {
 
 /// The helper frees the lock, announces the end (through its own task) and sends `Finished`
 /// to the caller: on the bus the two can come in either order. This window's own job must be
-/// known as its own whichever comes first; the real bug (apsis-test, check 13): `Finished`
+/// known as its own whichever comes first; the real bug: `Finished`
 /// first, then the end, shown as "A delete started elsewhere failed".
 fn own_job_in_both_orders(
     operation: Operation,
@@ -639,7 +639,7 @@ fn a_refusal_before_the_job_began_waits_for_no_end() {
     }
 }
 
-/// A delete while a restore is armed (row 12, 2026-10-04) is refused in the helper before
+/// A delete while a restore is armed is refused in the helper before
 /// anything ran, one or several alike. The line and its tooltip say so in plain words with
 /// no path; nothing is listed, the selection stays, and no job end is waited for (none
 /// began), so the next end of that kind is another window's at once.
@@ -1366,7 +1366,7 @@ fn clicks(mut element: Element<'_, Message>, size: Size) -> Option<Vec<Message>>
     Some(sent)
 }
 
-/// C3 (check 9): Settings' Cancel is always clickable and leaves the page, with nothing
+/// Settings' Cancel is always clickable and leaves the page, with nothing
 /// changed and while a job runs; Save stays off until something changed.
 #[test]
 fn settings_cancel_is_always_clickable_and_leaves_the_page() {
@@ -1650,7 +1650,7 @@ mod restore {
         assert!(!app.can_restore(), "the disk is gone");
     }
 
-    /// No key opens the dialog (owner, 2026-09-30); Enter isn't a shortcut at all.
+    /// No key opens the dialog; Enter isn't a shortcut at all.
     #[test]
     fn no_key_opens_restore() {
         let mut app = window();
@@ -1924,7 +1924,7 @@ mod restore {
         );
     }
 
-    /// A `Restore` refused because a restore is armed (B1, 2026-10-04) is refused in the
+    /// A `Restore` refused because a restore is armed is refused in the
     /// helper before the job began: the dialog opens with the two lines, nothing is listed,
     /// and no job end is waited for (none comes), so another window's restore job is shown
     /// as that at once.
@@ -2025,8 +2025,8 @@ mod restore {
         assert!(app.ready.is_none());
     }
 
-    /// A refused "Restart now" drops the plan (owner, 2026-10-02): the dialog says so, and
-    /// the status line stops saying `ready` (check 4, 2026-10-03).
+    /// A refused "Restart now" drops the plan: the dialog says so, and
+    /// the status line stops saying `ready`.
     #[test]
     fn a_refused_restart_now_says_the_plan_was_dropped() {
         let mut app = ready();
@@ -2099,7 +2099,7 @@ mod restore {
                 "{lines:?}"
             );
         }
-        // A restore that's armed already (the armed-gap fix, 2026-10-04): plain words, no
+        // A restore that's armed already: plain words, no
         // path and no file name.
         let armed = Dialog::Refused {
             snapshot: NEWEST.to_owned(),
@@ -2282,7 +2282,7 @@ mod restore {
     }
 
     /// The result's tooltip says what happened to home and names the safety snapshot, from
-    /// `result.json` through `RestoreResult` (fix 6, 2026-10-04): the four combinations.
+    /// `result.json` through `RestoreResult`: the four combinations.
     #[test]
     fn the_result_tooltip_has_home_and_the_safety_snapshot_from_the_result() {
         for (home, safety, tooltip) in [
@@ -2318,7 +2318,7 @@ mod restore {
         assert_eq!(tone(Outcome::Done, ""), None);
     }
 
-    /// Fix 5 (check 6): `problems` isn't shown as `done`. Its line says that some files
+    /// Fix 5: `problems` isn't shown as `done`. Its line says that some files
     /// weren't restored when the helper names the log, and that a cleanup step failed for
     /// anything else; the tooltip has the helper's own words, which name the log.
     #[test]
@@ -2361,7 +2361,7 @@ mod restore {
         assert_eq!(tone(Outcome::Problems, KERNEL), Some(Tone::Warning));
     }
 
-    /// `boot-broken` isn't shown as `boot-kept` (triage, 2026-10-03): nothing was put back,
+    /// `boot-broken` isn't shown as `boot-kept`: nothing was put back,
     /// so the line says the computer may not start next time, in the error colour, and both
     /// the line and the tooltip send the reader to the README before a restart.
     #[test]
@@ -2387,7 +2387,7 @@ mod restore {
         assert_eq!(tone(Outcome::BootBroken, WHY), Some(Tone::Error));
     }
 
-    /// The `boot-kept` tooltip (check 7): one wording for a refresh that failed, a check
+    /// The `boot-kept` tooltip: one wording for a refresh that failed, a check
     /// that failed and boot files that were never touched. It doesn't say "didn't check
     /// out" or "put back".
     #[test]
@@ -2416,8 +2416,7 @@ mod restore {
         }
     }
 
-    /// The `failed` tooltip offers the safety snapshot only if one was taken (the window
-    /// knows since fix 6).
+    /// The `failed` tooltip offers the safety snapshot only if one was taken.
     #[test]
     fn the_failed_tooltip_offers_the_safety_snapshot_only_if_there_is_one() {
         const WHY: &str = "the backup disk was disconnected";

@@ -54,7 +54,7 @@ pub struct Request<'a> {
     /// The text of the snapshot's own `exclude.list`.
     pub snapshot_excludes: &'a str,
     /// `/root` is restored (the snapshot has it, with content: `dialog::Dialog::has_root`).
-    /// Otherwise `/root` is kept whole, like a kept `/home` (owner, 2026-10-02): the
+    /// Otherwise `/root` is kept whole, like a kept `/home`: the
     /// snapshot's own `+ /root/**` line would let `--delete` empty it against an empty source.
     pub restore_root: bool,
 }
@@ -234,7 +234,7 @@ pub fn has_root(snapshot_excludes: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// A Pop!_OS machine as apsis-test: ESP, recovery, a data disk, the backup disk mounted
+    /// A typical Pop!_OS machine: ESP, recovery, a data disk, the backup disk mounted
     /// by the helper and by the desktop, and a bind mount. Devices are placeholders.
     const MOUNTINFO: &str = "\
 24 1 259:3 / / rw,relatime shared:1 - ext4 /dev/sdX3 rw
@@ -267,7 +267,7 @@ mod tests {
         }
     }
 
-    /// `/root` is kept whole when the snapshot has nothing there (owner, 2026-10-02): the
+    /// `/root` is kept whole when the snapshot has nothing there: the
     /// rule comes before the snapshot's own lines, whose `+ /root/**` would otherwise let
     /// `--delete` empty it.
     #[test]

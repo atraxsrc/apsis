@@ -46,8 +46,8 @@ pub enum Refusal {
     PendingUpdate,
     /// `/system-update` is Apsis's own link: a restore is armed and waits for the restart.
     /// The dialog's [`check`] says so, read-only, and the helper's preparation refuses with
-    /// it before it touches anything, so the armed plan's files stay as they are (the
-    /// armed-state gap, 2026-10-04). Another tool's link at either name is
+    /// it before it touches anything, so the armed plan's files stay as they are.
+    /// Another tool's link at either name is
     /// [`Refusal::PendingUpdate`] in both places. Never at apply, where the link is the
     /// restore's own.
     RestoreArmed,
@@ -336,12 +336,11 @@ impl System<'_> {
 /// - a plain partition;
 /// - what Pop!_OS's installer makes with "Encrypt drive" ([`encrypted_root`]).
 ///
-/// The second is the layout both runs of the LUKS spike restored on (apsis-test, 2026-10-05
-/// and 2026-10-06), and nothing wider: LUKS without LVM, LVM without LUKS, a volume on
-/// several devices, a mapping of a whole disk or of a RAID stay refused until a machine has
-/// shown them to work. The same installation only, as [`Refusal::OtherInstallation`] and
-/// [`Refusal::CrypttabDiffers`] still hold; the apply's boot refresh then checks that the new
-/// boot files can unlock the disk as the old ones did.
+/// The second is the layout restore has been run on, and nothing wider: LUKS without LVM, LVM
+/// without LUKS, a volume on several devices, a mapping of a whole disk or of a RAID stay refused
+/// until a machine has shown them to work. The same installation only, as
+/// [`Refusal::OtherInstallation`] and [`Refusal::CrypttabDiffers`] still hold; the apply's boot
+/// refresh then checks that the new boot files can unlock the disk as the old ones did.
 fn is_restorable_root(root: &Device, devices: &[Device], crypttab: &str) -> bool {
     root.kind == "part" || encrypted_root(root, devices, crypttab).is_some()
 }
@@ -434,7 +433,7 @@ pub fn check_arming(
 /// The names Pop!_OS's release upgrade leaves at the root while it's in progress or half done
 /// (`pop-upgrade`'s `upgrade.sh`): the two it makes before the offline boot, and
 /// the one it touches during it. Any of them present refuses arming. fwupd's history database
-/// and PackageKit's staged update are not among them, on purpose (owner, 2026-10-01).
+/// and PackageKit's staged update are not among them, on purpose.
 pub const POP_UPGRADE_NAMES: [&str; 3] = [
     "/pop-upgrade",
     "/pop_preparing_release_upgrade",
@@ -614,7 +613,7 @@ mod tests {
         assert_eq!(Refusal::from_wire("boot-files:no-modules"), None);
     }
 
-    /// A Pop!_OS machine as apsis-test. Devices are placeholders.
+    /// A typical Pop!_OS machine. Devices are placeholders.
     const MOUNTINFO: &str = "\
 24 1 259:3 / / rw,relatime shared:1 - ext4 /dev/sdX3 rw
 25 24 0:5 / /dev rw,nosuid shared:2 - devtmpfs udev rw
@@ -654,8 +653,8 @@ cryptdata UUID=22222222-2222-2222-2222-222222222222 none luks
 cryptswap UUID=44444444-4444-4444-4444-444444444444 /dev/urandom swap,plain,offset=1024,cipher=aes-xts-plain64,size=512
 ";
 
-    /// The devices of an encrypted Pop!_OS install ("Encrypt drive"), as apsis-test's after
-    /// its reinstall (2026-10-05): the root is an LVM volume on a mapping of a partition.
+    /// The devices of an encrypted Pop!_OS install ("Encrypt drive"): the root is an LVM volume on
+    /// a mapping of a partition.
     fn encrypted_devices() -> Vec<Device> {
         vec![
             device("sdX", "disk", "", ""),
@@ -889,7 +888,7 @@ cryptswap UUID=44444444-4444-4444-4444-444444444444 /dev/urandom swap,plain,offs
         }
     }
 
-    /// The layout the LUKS spike restored on: an LVM volume on a mapping of a LUKS partition
+    /// The layout restore has been run on: an LVM volume on a mapping of a LUKS partition
     /// that the live crypttab opens.
     #[test]
     fn an_encrypted_pop_os_machine_restores_its_own_snapshot() {
@@ -957,8 +956,8 @@ cryptswap UUID=44444444-4444-4444-4444-444444444444 /dev/urandom swap,plain,offs
     }
 
     /// The same machine from lsblk's own JSON, through [`parse_lsblk`]. The file is lsblk's
-    /// output on apsis-test (the drill's `pre` log, 2026-10-06; its backup disk and zram
-    /// among the rows, no `label` column), with the UUIDs replaced by placeholders.
+    /// output on a real encrypted install (its backup disk and zram among the rows, no `label`
+    /// column), with the UUIDs replaced by placeholders.
     #[test]
     fn the_encrypted_layout_is_read_from_lsblks_json() {
         let devices =
@@ -1446,7 +1445,7 @@ cryptswap UUID=44444444-4444-4444-4444-444444444444 /dev/urandom swap,plain,offs
         }
     }
 
-    /// apsis-test's live crypttab: cryptswap with a random key.
+    /// A real Pop!_OS crypttab: cryptswap with a random key.
     const CRYPTTAB: &str = "cryptswap UUID=00000000-0000-0000-0000-00000000c0de /dev/urandom \
                             swap,plain,offset=1024,cipher=aes-xts-plain64,size=512
 ";

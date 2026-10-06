@@ -1286,7 +1286,7 @@ fn cut_delete(lab: &Lab) -> Cut {
     }
 }
 
-/// Fix 2, test 1. The move comes first: a delete cut part-way leaves the folder in the
+/// The move comes first: a delete cut part-way leaves the folder in the
 /// staging folder, not in `snapshots/`. (Which files at the top of the folder went before the
 /// cut depends on `readdir`'s order; test A shows nothing goes before the move.)
 #[test]
@@ -1318,7 +1318,6 @@ fn a_delete_moves_the_folder_out_of_snapshots_before_it_removes_anything() {
     }
 }
 
-/// Fix 2, test 2.
 #[test]
 fn a_cut_delete_is_a_leftover_row_and_delete_removes_it() {
     if root_skips("a_cut_delete_is_a_leftover_row_and_delete_removes_it") {
@@ -1339,7 +1338,6 @@ fn a_cut_delete_is_a_leftover_row_and_delete_removes_it() {
     }
 }
 
-/// Fix 2, test 3.
 #[test]
 fn the_next_create_removes_a_cut_deletes_folder() {
     if root_skips("the_next_create_removes_a_cut_deletes_folder") {
@@ -1365,7 +1363,7 @@ fn the_next_create_removes_a_cut_deletes_folder() {
     }
 }
 
-/// `snapshots/<FIRST>` as the reinstall on apsis-test left it: `info.json` and part of
+/// `snapshots/<FIRST>` as a cut delete can leave it: `info.json` and part of
 /// `localhost/`, no `exclude.list`.
 fn half_deleted(lab: &Lab) -> NativeRsync<QuietRunner> {
     let backend = two_snapshots(lab);
@@ -1374,7 +1372,7 @@ fn half_deleted(lab: &Lab) -> NativeRsync<QuietRunner> {
     backend
 }
 
-/// Fix 2, test 4 (and owner's Q2: no warning for it).
+/// No warning for it.
 #[test]
 fn a_half_deleted_folder_in_snapshots_is_listed_as_a_leftover() {
     for lab in labs("fix2-half-row") {
@@ -1387,7 +1385,6 @@ fn a_half_deleted_folder_in_snapshots_is_listed_as_a_leftover() {
     }
 }
 
-/// Fix 2, test 5.
 #[test]
 fn delete_removes_a_half_deleted_folder_in_snapshots() {
     for lab in labs("fix2-half-delete") {
@@ -1402,7 +1399,7 @@ fn delete_removes_a_half_deleted_folder_in_snapshots() {
     }
 }
 
-/// Fix 2, test 6: nothing is removed from `snapshots/` unasked. Every path stays, with its
+/// Nothing is removed from `snapshots/` unasked. Every path stays, with its
 /// inode and size; change times don't count, as the new snapshot's hard links to the same
 /// files change their link count.
 #[test]
@@ -1423,7 +1420,7 @@ fn a_create_never_removes_a_half_deleted_folder_in_snapshots() {
     }
 }
 
-/// Fix 2, test 7: a row only where Delete would accept it.
+/// A row only where Delete would accept it.
 #[test]
 fn a_folder_without_info_json_stays_refused_and_is_no_leftover() {
     for lab in labs("fix2-no-info") {
@@ -1463,7 +1460,7 @@ fn a_folder_without_info_json_stays_refused_and_is_no_leftover() {
     }
 }
 
-/// Fix 2, test 8: `RENAME_NOREPLACE`.
+/// `RENAME_NOREPLACE`.
 #[test]
 fn a_delete_refuses_a_taken_staging_name_and_moves_nothing() {
     for lab in labs("fix2-taken") {
@@ -1483,7 +1480,6 @@ fn a_delete_refuses_a_taken_staging_name_and_moves_nothing() {
     }
 }
 
-/// Fix 2, test 9.
 #[test]
 fn a_delete_refuses_a_symlinked_staging_folder_before_the_move() {
     for lab in labs("fix2-staging-link") {
@@ -1504,7 +1500,6 @@ fn a_delete_refuses_a_symlinked_staging_folder_before_the_move() {
     }
 }
 
-/// Fix 2, test 10.
 #[test]
 fn a_delete_makes_the_staging_folder_and_leaves_none_behind() {
     for lab in labs("fix2-staging-gone") {
@@ -1517,7 +1512,7 @@ fn a_delete_makes_the_staging_folder_and_leaves_none_behind() {
     }
 }
 
-/// Fix 2, addition A: the move fails (here `EACCES`, a read-only `snapshots/`; `EINVAL` from a
+/// The move fails (here `EACCES`, a read-only `snapshots/`; `EINVAL` from a
 /// filesystem without `RENAME_NOREPLACE` takes the same arm). The delete refuses and nothing
 /// is removed: there is no plain rename and no delete in place to fall back to.
 #[test]
@@ -1543,7 +1538,7 @@ fn a_failed_move_refuses_the_delete_and_removes_nothing() {
     }
 }
 
-/// Fix 2, addition B: a cut between the move and the tag links leaves a dangling link. The
+/// A cut between the move and the tag links leaves a dangling link. The
 /// list ignores it, Delete of the leftover leaves it, the next create removes it.
 #[test]
 fn a_cut_before_the_tag_links_leaves_a_dangling_link_the_next_create_removes() {
@@ -1586,7 +1581,7 @@ fn a_cut_before_the_tag_links_leaves_a_dangling_link_the_next_create_removes() {
     }
 }
 
-/// Fix 2, addition C: the `--link-dest` base is the newest valid snapshot; neither a
+/// The `--link-dest` base is the newest valid snapshot; neither a
 /// half-deleted folder in `snapshots/` nor a cut delete's folder in `apsis-staging/` is one.
 #[test]
 fn a_create_never_links_to_a_half_deleted_folder() {

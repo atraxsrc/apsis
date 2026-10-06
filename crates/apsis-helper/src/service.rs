@@ -222,7 +222,7 @@ impl Helper {
                 return Err(Error::InvalidSnapshotName(snapshot.clone()));
             }
             // Refused while a restore is armed, before the password and again before the
-            // lock (B1); the preparation's own guard is the third line, under the lock.
+            // lock; the preparation's own guard is the third line, under the lock.
             let (uid, running) = self
                 .begin_unless_armed(
                     &arm::Paths::system(),
@@ -310,7 +310,7 @@ impl Helper {
             }
             // From here the plan is this call's: whatever happens, it ends. Until it does
             // it stays in its slot, marked, with the job lock on disk: no write and no
-            // package script gets in between here and the link (row 5).
+            // package script gets in between here and the link.
             let ready = self
                 .state
                 .take_ready()?
@@ -360,7 +360,7 @@ impl Helper {
                     Ok(())
                 }
                 Err(error) => {
-                    // One path removes a plan, with one wording (check 4): the files that
+                    // One path removes a plan, with one wording: the files that
                     // are left go, the journal says why, and the job ends `stopped`.
                     remove_plan(ready, &describe_error(&error)).await;
                     Err(error)
@@ -798,7 +798,7 @@ impl Helper {
     /// While a restore is armed every delete is refused, whichever snapshot it names: the
     /// armed plan's snapshot and its safety snapshot must be there at the restart, armed
     /// lasts minutes at most, and "no delete while armed" is the rule that can be said in
-    /// one line (owner, 2026-10-04). Before the password and again before the lock, as
+    /// one line. Before the password and again before the lock, as
     /// `Restore` is ([`Helper::begin_unless_armed`]): no job begins, so nothing is
     /// announced, nothing is mounted and no snapshot goes; a delete of several is refused
     /// once, as a whole. Not looked at a third time under the lock: that refusal would be a
@@ -1208,7 +1208,7 @@ fn describe_list(list: &SnapshotList) -> String {
 }
 
 /// One journal line for an error: `refused: ...` when nothing ran, else `failed: ...`. A
-/// restore the helper refused is `refused:` too (check 4, 2026-10-03). While preparing, a
+/// restore the helper refused is `refused:` too. While preparing, a
 /// refusal comes before anything is written but the working files in the state folder: the
 /// safety snapshot isn't made yet. At "Restart now" it comes after the preparation (the
 /// safety snapshot exists and stays) and before anything is armed.
@@ -1470,7 +1470,7 @@ mod tests {
         (root, paths, exe)
     }
 
-    /// Row 12 (2026-10-04): while Apsis's own link is in place, `Delete` and `DeleteMany`
+    /// While Apsis's own link is in place, `Delete` and `DeleteMany`
     /// are refused before the password is asked for and before the write lock: no job
     /// begins, so nothing is announced, nothing mounts and no snapshot goes. One refusal
     /// for the whole call. The snapshot folders, the state folder and the arm are the same
@@ -1585,7 +1585,7 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// B1 (owner, 2026-10-04): while Apsis's own link is in place, `Restore` is refused
+    /// While Apsis's own link is in place, `Restore` is refused
     /// before the password is asked for and before the write lock, as the refusal the
     /// dialog knows (`restore-armed`). No job begins, so nothing is announced and no other
     /// window shows anything; the armed plan's files and the arm are the same afterwards,
@@ -1722,7 +1722,7 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// Q8 (owner, 2026-10-04): `CancelRestore`, the starter-gone path and a refused
+    /// `CancelRestore`, the starter-gone path and a refused
     /// "Restart now" all remove the plan's files through [`remove_plan`]. While the files
     /// go, the plan is still in its slot (every write is `Busy`) and the file lock is held
     /// (a package script is refused); both are free once it ends `stopped`.
@@ -1802,7 +1802,7 @@ mod tests {
         }
     }
 
-    /// Fix 2, test 12: a half-deleted folder in `snapshots/` travels in `leftovers`, and that
+    /// A half-deleted folder in `snapshots/` travels in `leftovers`, and that
     /// is enough for `Delete` (and `DeleteMany`, which goes through the same check).
     #[test]
     fn delete_known_accepts_a_half_deleted_folder_the_list_shows() {
@@ -1882,7 +1882,7 @@ mod tests {
             format!("refused: {}", Error::Busy)
         );
         assert_eq!(describe_error(&Error::Stopped), "stopped");
-        // A refused restore is a refusal in the journal, not a failure (check 4).
+        // A refused restore is a refusal in the journal, not a failure.
         assert_eq!(
             describe_error(&Error::RestoreRefused(
                 "system-space:10106179719:209661952".to_owned()

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The .deb's maintainer scripts (`resources/deb/`), run and not only read (fix 1
-//! and 1b).
+//! The .deb's maintainer scripts (`resources/deb/`), run and not only read.
 //!
 //! Each script names its paths once, as variables at its top. A test runs a copy in which
 //! only those lines are changed, to paths under a temp folder, with a `PATH` that holds
@@ -418,7 +417,7 @@ const STOPPED: [&str; 3] = [
     "  the job lock is held",
 ];
 
-/// Test 1 (fix 1). While a job holds the lock the `prerm` refuses, for each of its four
+/// Test 1. While a job holds the lock the `prerm` refuses, for each of its four
 /// operations: exit 75, the one line, and nothing else happens.
 #[test]
 fn prerm_refuses_with_75_while_a_job_holds_the_lock() {
@@ -442,7 +441,7 @@ fn prerm_refuses_with_75_while_a_job_holds_the_lock() {
     }
 }
 
-/// Test 2 (fix 1). With the lock free the `prerm` takes it and still holds it while the
+/// Test 2. With the lock free the `prerm` takes it and still holds it while the
 /// helper is stopped, so no job can begin between the test and the stop.
 #[test]
 fn prerm_holds_the_lock_through_the_stop() {
@@ -459,7 +458,7 @@ fn prerm_holds_the_lock_through_the_stop() {
     }
 }
 
-/// Round c. The lock file the `prerm` makes is root's alone (0600), whatever the umask it
+/// The lock file the `prerm` makes is root's alone (0600), whatever the umask it
 /// was started with: `flock` works on a read-only descriptor, so a file others could open
 /// would let any user hold the lock.
 #[test]
@@ -474,7 +473,7 @@ fn prerm_makes_the_lock_file_for_root_alone() {
     }
 }
 
-/// Test 3 (fix 1b) and addition A. Apsis's link: the helper disarms, the script says so in
+/// Apsis's link: the helper disarms, the script says so in
 /// one line, the timer and then the helper are stopped. Another tool's link, or none: the
 /// helper isn't run and the link is as it was.
 #[test]
@@ -596,7 +595,7 @@ fn prerm_ignores_other_arguments() {
     }
 }
 
-/// As before fix 1: without systemd (a chroot, an image build) nothing is asked of it, and a
+/// Without systemd (a chroot, an image build) nothing is asked of it, and a
 /// helper that isn't running isn't stopped. The lock is taken all the same.
 #[test]
 fn prerm_stops_only_a_running_helper_and_only_with_systemd() {
@@ -662,7 +661,7 @@ const FORGOTTEN: [&str; 4] = [
     "busctl call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig",
 ];
 
-/// Test 8 (fix 1b, Q4). `postrm remove` stops the disarm timer, then removes Apsis's link,
+/// Test 8. `postrm remove` stops the disarm timer, then removes Apsis's link,
 /// the unit, its wants link and the drop-in (and their folders when empty). The state
 /// folder and the config stay (purge's), and so does another tool's link.
 #[test]

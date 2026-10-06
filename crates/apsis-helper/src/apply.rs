@@ -54,8 +54,8 @@ pub fn apply_restore() -> ExitCode {
     }
 }
 
-/// The apply for this boot on `runner`'s root: the boot screen's line first, once (owner,
-/// 2026-10-02: one `plymouth display-message` at the start; a live bar during the copy is
+/// The apply for this boot on `runner`'s root: the boot screen's line first, once (one
+/// `plymouth display-message` at the start; a live bar during the copy is
 /// 0.5.x's), then core's state machine.
 pub fn run<R: Runner>(runner: &mut RealRunner<R>) -> apply::End {
     use apply::Runner as _;
@@ -124,7 +124,7 @@ impl<R: Runner> RealRunner<R> {
 
     /// Runs one of the tools; its output, or why it couldn't run. The standard output is
     /// collected from the stream: the helper's runner hands it over piece by piece and keeps
-    /// none of it in `RunOutput::stdout` (found in check 1, 2026-10-02).
+    /// none of it in `RunOutput::stdout`.
     fn tool(&self, argv: &[String]) -> Result<apsis_core::RunOutput, String> {
         let argv: Vec<OsString> = argv.iter().map(Into::into).collect();
         let mut stdout = String::new();
@@ -144,7 +144,7 @@ impl<R: Runner> RealRunner<R> {
         self.plymouth(&plymouth_progress_argv(percent));
     }
 
-    /// The boot screen's line, once (owner, 2026-10-02).
+    /// The boot screen's line, once.
     fn splash(&mut self, text: &str) {
         self.plymouth(&plymouth_message_argv(text));
     }
@@ -248,7 +248,7 @@ pub fn kernelstub_argv() -> [String; 3] {
 /// The boot refresh naming the snapshot's kernel. kernelstub left alone takes the newest
 /// kernel in `/boot` by version (`KernelOption.latest_option`, `application.py:167`), and
 /// after a rollback's copy that is the protected running kernel (rule 10), so every rollback
-/// would end `boot-kept` (check 2, 2026-10-02). `--kernel-path` and `--initrd-path` win over
+/// would end `boot-kept`. `--kernel-path` and `--initrd-path` win over
 /// it (`application.py:171-193`) and aren't saved in its configuration. The two paths are
 /// what the restored `/boot/vmlinuz` and `/boot/initrd.img` point to: the kernel the check
 /// (`esp::check`) compares the ESP with.
@@ -291,7 +291,7 @@ pub fn plymouth_progress_argv(percent: u8) -> [String; 3] {
     ]
 }
 
-/// The restart, as check 0.3 did it from inside `system-update.target`.
+/// The restart, as it works from inside `system-update.target`.
 #[must_use]
 pub fn reboot_argv() -> [String; 3] {
     ["systemctl", "reboot", "--no-block"].map(str::to_owned)
@@ -502,15 +502,15 @@ impl<R: Runner> apply::Runner for RealRunner<R> {
     }
 
     /// The journal only: the boot screen keeps the start line (`run`), and the lines of the
-    /// steps would replace it (check 1, 2026-10-02).
+    /// steps would replace it.
     fn say(&mut self, line: &str) {
         eprintln!("apsis-helper: {line}");
     }
 
     fn restart(&mut self) {
         // The backup disk first: `systemctl reboot --no-block` starts the shutdown at once,
-        // and systemd stops this unit with TERM while it's still unmounting (check 1,
-        // 2026-10-02: "Failed with result 'signal'").
+        // and systemd stops this unit with TERM while it's still unmounting ("Failed with
+        // result 'signal'").
         self.mounted = None;
         self.restart_failed = match self.tool(&reboot_argv()) {
             Ok(output) => !output.success,
@@ -600,7 +600,7 @@ mod tests {
         }
 
         /// Like the helper's `QuietRunner`: the scripted stdout goes to the callback line by
-        /// line and `RunOutput::stdout` stays empty (found in check 1, 2026-10-02).
+        /// line and `RunOutput::stdout` stays empty.
         fn run_streaming(
             &self,
             argv: &[OsString],
@@ -751,7 +751,7 @@ mod tests {
         fs::remove_dir_all(&mount).unwrap();
     }
 
-    /// The apply's first words (owner, 2026-10-02): the boot screen's line, once, before
+    /// The apply's first words: the boot screen's line, once, before
     /// anything else, through plymouth; a live bar during the copy is 0.5.x's.
     #[test]
     fn the_apply_says_its_line_first_and_leaves_another_tools_link_alone() {
@@ -863,10 +863,9 @@ mod tests {
 
     /// kernelstub left alone takes the newest kernel in `/boot` by version (its
     /// `KernelOption.latest_option`), and after a rollback's copy that is the protected
-    /// running kernel, not the snapshot's: every rollback would end `boot-kept` (check 2,
-    /// 2026-10-02). So the refresh names the kernel and initrd the restored tree's links
-    /// point to, with the options kernelstub has for it. Without the links: the plain call,
-    /// and the check decides.
+    /// running kernel, not the snapshot's: every rollback would end `boot-kept`. So the refresh
+    /// names the kernel and initrd the restored tree's links point to, with the options kernelstub
+    /// has for it. Without the links: the plain call, and the check decides.
     #[test]
     fn the_boot_refresh_names_the_kernel_the_links_point_to() {
         let root = temp("root");
@@ -899,7 +898,7 @@ mod tests {
     }
 
     /// The journal's lines stay in the journal: only the start line reaches the boot screen
-    /// (owner, 2026-10-02; check 1 saw "copying, attempt 1 of 3" replace it).
+    /// (a line like "copying, attempt 1 of 3" would replace it).
     #[test]
     fn say_goes_to_the_journal_only_and_restart_through_the_tools() {
         let root = temp("root");

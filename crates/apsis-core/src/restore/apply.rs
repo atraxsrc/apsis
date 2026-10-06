@@ -128,7 +128,7 @@ impl Copied {
     }
 
     /// rsync's last error lines, without the empty ones: what the journal gets, one line
-    /// each, after a plain exit 23 (check 6, 2026-10-03). The helper has cut them to its
+    /// each, after a plain exit 23. The helper has cut them to its
     /// last 20.
     pub fn error_lines(&self) -> impl Iterator<Item = &str> {
         self.tail.lines().filter(|line| !line.trim().is_empty())
@@ -164,7 +164,7 @@ pub trait Runner {
 
     /// Reads what's at the snapshot's place, for [`check_snapshot`]. Asked right before
     /// every copy, and again after a copy that exited 23 (a disk that vanished mid-copy
-    /// looks like a few unreadable files to rsync; check 6, 2026-10-03).
+    /// looks like a few unreadable files to rsync).
     fn find_snapshot(&mut self, plan: &Plan) -> SnapshotFound;
 
     /// Step 3: pass 1, rsync over `/`. It returns only when what rsync wrote is on disk
@@ -227,7 +227,7 @@ pub trait Runner {
     fn now(&mut self) -> i64;
 
     /// One line for the journal. Nothing of it reaches the boot screen: the real runner
-    /// writes there itself, its start line and the copy's progress (check 1, 2026-10-02).
+    /// writes there itself, its start line and the copy's progress.
     fn say(&mut self, line: &str);
 
     /// Restarts the computer. Called once, last, by [`apply`] alone: with the link gone
@@ -445,7 +445,7 @@ fn run(paths: &Paths<'_>, runner: &mut impl Runner) -> End {
         ));
         // A plain 23 is also what rsync 3.2.7 gives when the whole backup disk vanishes
         // under it: its "skipping file deletion" line comes only from a later folder's
-        // deletion pass, and once the walk collapses none comes (check 6, 2026-10-03). So
+        // deletion pass, and once the walk collapses none comes. So
         // after a plain 23 the snapshot is looked at once more: gone, the copy broke.
         let broke = match copied.end() {
             CopyEnd::Ended { problems: false } => Ok(false),
@@ -898,7 +898,7 @@ fn clean_up(paths: &Paths<'_>, runner: &mut impl Runner) -> bool {
         ));
     }
     // The plan went into `result.json`; what's left of it is a leftover for the helper's
-    // next start (check 1, 2026-10-02).
+    // next start.
     match fs::remove_file(paths.state_dir.join(plan::FILE)) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -1394,10 +1394,10 @@ mod tests {
         let mut fake = Fake::new(&lab);
         assert_eq!(boot(&mut fake), End::Finished(Outcome::Done));
         // The plan went with the arm: `result.json` has what the window needs, and nothing
-        // is left for the helper's next start to remove (check 1, 2026-10-02).
+        // is left for the helper's next start to remove.
         assert!(!lab.state.join(plan::FILE).exists());
-        // The journal says how the copy ended (check 1, 2026-10-02: the step's timestamps
-        // were all it had).
+        // The journal says how the copy ended (without it, the step's timestamps would be all
+        // it had).
         assert!(
             fake.said
                 .iter()
@@ -1447,7 +1447,7 @@ mod tests {
         assert_eq!(State::load(&lab.state).unwrap(), state(1, Step::End, false));
     }
 
-    /// Item 1: what a step depends on is on disk before the step runs.
+    /// What a step depends on is on disk before the step runs.
     #[test]
     fn the_state_is_saved_before_each_step_that_depends_on_it() {
         let lab = armed("apply-state-first");
@@ -1601,7 +1601,7 @@ mod tests {
         assert!(!is_linked(&lab));
     }
 
-    /// Item 1: no copy without its attempt on disk first.
+    /// No copy without its attempt on disk first.
     #[test]
     fn a_state_that_cant_be_saved_stops_before_the_copy() {
         let lab = armed("apply-state-unsaved");
@@ -1687,7 +1687,7 @@ mod tests {
     }
 
     /// The backup's own refusal is the apply's backstop: only part of the previous kernel's
-    /// files on the ESP (item 4). Nothing was changed, so nothing is put back.
+    /// files on the ESP. Nothing was changed, so nothing is put back.
     #[test]
     fn an_esp_backup_that_fails_leaves_the_boot_files_alone() {
         let lab = armed("apply-backup-fails");
@@ -2077,7 +2077,7 @@ mod tests {
     }
 
     /// rsync 3.2.7 exits a plain 23, with no "skipping file deletion" line, when the whole
-    /// backup disk vanishes under it (check 6, 2026-10-03: the line comes only from a later
+    /// backup disk vanishes under it (the line comes only from a later
     /// folder's deletion pass, and once the walk collapses none comes). So after a plain 23
     /// the snapshot is looked at again: gone, the copy broke like any other, the boot files
     /// aren't touched, and it's tried again.
@@ -2242,7 +2242,7 @@ mod tests {
             .collect()
     }
 
-    /// Item 9 (check 6, 2026-10-03): a plain 23 with the snapshot still there says rsync's
+    /// A plain 23 with the snapshot still there says rsync's
     /// last error lines, one line each and in order, after the copy's end and before the
     /// boot files. The result's message stays the one that names the log.
     #[test]
@@ -2532,7 +2532,7 @@ mod tests {
 
     // ---- power cuts ----
 
-    /// Item 2: the power goes before and after every single thing the runner is asked, in
+    /// The power goes before and after every single thing the runner is asked, in
     /// the first boot. The boots after it end where an uncut restore ends.
     fn cut_everywhere(
         name: &str,
@@ -2644,7 +2644,7 @@ mod tests {
         assert!(!is_linked(&lab));
     }
 
-    // ---- the ESP backup after a power cut (item 3) ----
+    // ---- the ESP backup after a power cut ----
 
     /// The power went after the boot refresh had changed the ESP. The backup of before is
     /// kept, not taken again over the changed ESP, and it's what's put back.
@@ -2967,7 +2967,7 @@ mod tests {
         assert_eq!(fake.count_of("refresh_boot"), 0);
     }
 
-    // ---- the arm check (item 6) ----
+    // ---- the arm check ----
 
     /// systemd.offline-updates(7), point 5: a link that points somewhere else is another
     /// tool's update. It's left where it is, and the apply doesn't restart under that tool.
@@ -3086,7 +3086,7 @@ mod tests {
         }
     }
 
-    // ---- no clock (item 7) ----
+    // ---- no clock ----
 
     /// The apply compares no time with any clock: a plan from 1970, or from the future of a
     /// clock that's hours off, is applied.
@@ -3115,7 +3115,7 @@ mod tests {
         }
     }
 
-    // ---- the minimal report (item 8) ----
+    // ---- the minimal report ----
 
     /// A clock that gives no time: the real result is refused, and the minimal one is
     /// written in its place, with the real outcome.

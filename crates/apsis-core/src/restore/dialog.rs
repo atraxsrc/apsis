@@ -49,7 +49,7 @@ pub struct Inputs<'a> {
     pub boot_files: Result<(), Refusal>,
     /// The snapshot's `exclude.list`, if it has one.
     pub snapshot_excludes: Option<&'a str>,
-    /// The snapshot's `localhost/root` is a folder with something in it (owner, 2026-10-02):
+    /// The snapshot's `localhost/root` is a folder with something in it:
     /// a list that lets `/root` in isn't `has_root` without it, or the restore's `--delete`
     /// would empty `/root` against an empty source.
     pub root_has_content: bool,
@@ -162,7 +162,7 @@ mod tests {
         );
     }
 
-    /// The owner's rule (2026-10-02): a list that lets `/root` in isn't enough; the
+    /// The rule: a list that lets `/root` in isn't enough; the
     /// snapshot's `/root` must have content, or the restore would wipe `/root` against an
     /// empty source. Then `has_root` is false and the filter keeps `/root`.
     #[test]

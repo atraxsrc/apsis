@@ -430,7 +430,7 @@ impl State {
     /// marked where it is and the job lock on disk is taken, in one step. The caller arms
     /// with it or removes its files, then ends it with [`Ready::end`]. Until then the plan
     /// stays in its slot: every write is still `Busy`, reads go on, `Job()` still shows it,
-    /// and a package script is refused (the armed-gap audit's row 5). `None`: no
+    /// and a package script is refused. `None`: no
     /// plan waits.
     ///
     /// # Errors
@@ -1263,7 +1263,7 @@ mod ready_tests {
     }
 }
 
-/// The job lock on disk (fix 1, row 5 and Q8 of 2026-10-04): what a package
+/// The job lock on disk: what a package
 /// script's `flock -n` finds, and what the helper does while a script holds the lock.
 #[cfg(test)]
 mod lock_tests {
@@ -1331,7 +1331,7 @@ mod lock_tests {
         running.end(JobState::Failed);
     }
 
-    /// Round c. A lock file that others could open (the `prerm` of a build before the
+    /// A lock file that others could open (the `prerm` of a build before the
     /// `umask` made it 0644, and `flock` works on a read-only descriptor, so any user could
     /// have held the lock) is closed to them when the helper takes it.
     #[tokio::test]
@@ -1348,7 +1348,7 @@ mod lock_tests {
         running.end(JobState::Done);
     }
 
-    /// Round c. A lock file that isn't the expected owner's (root's outside the tests) is
+    /// A lock file that isn't the expected owner's (root's outside the tests) is
     /// someone else's file: the job is refused `Busy`, and the file is left as it is. No
     /// test can make a file owned by another uid without root, so the expected owner is the
     /// one that differs here.
@@ -1394,7 +1394,7 @@ mod lock_tests {
     }
 
     /// Test 12. Held while the restore prepares, free once the plan is ready: an upgrade at
-    /// the prompt goes on (decided).
+    /// the prompt goes on.
     #[tokio::test]
     async fn a_ready_plan_holds_no_file_lock() {
         let (state, _changes) = state();
@@ -1407,7 +1407,7 @@ mod lock_tests {
         assert_eq!(flock_exit(&lock), 0, "free at the prompt");
     }
 
-    /// Test 13, row 5. "Restart now" (and a cancel) takes the plan by marking it where it
+    /// "Restart now" (and a cancel) takes the plan by marking it where it
     /// is and taking the file lock, in one step: until the plan ends every write is still
     /// `Busy`, a package script is refused, nobody else gets the plan, and reads and `Job()`
     /// go on as at the prompt.
@@ -1470,7 +1470,7 @@ mod lock_tests {
         assert_eq!(drain(&mut changes), restore_ended("stopped"));
     }
 
-    /// Q8, like 13. The starter leaving the bus takes its plan the same way: marked where
+    /// The starter leaving the bus takes its plan the same way: marked where
     /// it is, with the file lock, until its files are gone and it ends `stopped`.
     #[tokio::test]
     async fn a_gone_starter_marks_the_plan_and_takes_the_lock_too() {
@@ -1494,7 +1494,7 @@ mod lock_tests {
         running.end(JobState::Stopped);
     }
 
-    /// Q8, like 14. A package script holds the lock when the starter leaves: the plan stays
+    /// A package script holds the lock when the starter leaves: the plan stays
     /// ready and unmarked (the script stops the helper next), and the watcher hears `Busy`.
     #[tokio::test]
     async fn a_gone_starters_plan_stays_while_the_file_lock_is_held_elsewhere() {

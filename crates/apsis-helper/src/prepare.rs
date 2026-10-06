@@ -36,7 +36,7 @@ pub struct Request {
 }
 
 /// The safety snapshot's comment: "Safety snapshot, before restoring <the snapshot's date as
-/// the list shows it>" (the first words say what the row is, owner 2026-10-02).
+/// the list shows it>" (the first words say what the row is).
 #[must_use]
 pub fn safety_comment(snapshot: &str) -> String {
     let date = parse_snapshot_name(snapshot).map_or_else(
@@ -150,7 +150,7 @@ pub fn prepare(request: &Request, state: &Arc<State>, cancel: Arc<Cancel>) -> Re
 }
 
 /// A preparation's end: one that didn't get to "ready" leaves no filter and no note in
-/// `dir` (check 8 found a stopped one's filter in the place of the last
+/// `dir` (otherwise a stopped one's filter could take the place of the last
 /// restore's). A file that can't be removed is logged, and the preparation's own error
 /// stays the answer.
 ///
@@ -180,7 +180,7 @@ fn or_remove_working_files<T>(dir: &Path, prepared: Result<T>) -> Result<T> {
 /// is no longer "ready" in the helper (its job ended at "armed; restarting"), so
 /// [`State::begin`] lets a second `Restore` through, and a preparation's first step clears
 /// the state folder: the armed plan, its filter, `state.json` and the helper copy would go,
-/// and the next start would find the link with nothing behind it (found 2026-10-04). And
+/// and the next start would find the link with nothing behind it. And
 /// the removal after a failed preparation would take the armed plan's filter and note.
 ///
 /// `Restore` looks at Apsis's own link itself, before the password and before the lock, so
@@ -484,7 +484,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Found in check 1 (2026-10-02): the quiet runner keeps no stdout, so the size must be
+    /// The quiet runner keeps no stdout, so the size must be
     /// read from the stream, or every restore is refused as `size-unknown`.
     #[test]
     fn the_dry_run_reads_the_size_from_the_stream() {
@@ -553,7 +553,7 @@ sent 1,228,900 bytes  received 50 bytes\n";
         found
     }
 
-    /// What a preparation did first before the armed-gap fix, and how it then ended while
+    /// What a preparation did first in older versions, and how it then ended while
     /// a link was there: the state folder cleared, then the dialog's refusal.
     fn as_before_the_fix(dir: &Path) -> Result<()> {
         clear_leftovers(dir)?;
@@ -567,7 +567,7 @@ sent 1,228,900 bytes  received 50 bytes\n";
         }
     }
 
-    /// The armed-state gap (found 2026-10-04): while Apsis's `/system-update` is in place,
+    /// While Apsis's `/system-update` is in place,
     /// a second preparation is refused before it touches anything. Every file of the armed
     /// plan and of the arm is there afterwards, byte for byte, the log too, and nothing new
     /// is written. The refusal comes before the wrapper that removes a failed preparation's

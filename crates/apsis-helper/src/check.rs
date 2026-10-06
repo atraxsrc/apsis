@@ -88,7 +88,7 @@ impl Live {
 
     /// The same view in the offline boot: `/system-update` is Apsis's own link there (the
     /// apply's step 1 checked it), so only `/etc/system-update` is another update's
-    /// (check 1, 2026-10-02; `refusal::check_pending`'s note), and the restore that runs
+    /// (`refusal::check_pending`'s note), and the restore that runs
     /// isn't refused as armed.
     pub(crate) fn as_system_at_apply(&self) -> refusal::System<'_> {
         refusal::System {
@@ -139,7 +139,7 @@ pub struct SnapshotFiles {
     pub crypttab: Option<String>,
     /// `localhost/var/lib/dpkg/status`.
     pub dpkg_status: Option<String>,
-    /// `localhost/root` is a folder with at least one entry (owner, 2026-10-02).
+    /// `localhost/root` is a folder with at least one entry.
     pub root_has_content: bool,
 }
 
@@ -406,7 +406,7 @@ mod tests {
         assert_eq!(files.crypttab.as_deref(), Some("# none\n"));
         assert_eq!(files.dpkg_status.as_deref(), Some(DPKG));
         assert!(files.root_has_content);
-        // An empty /root, or none: no content (the owner's rule, 2026-10-02).
+        // An empty /root, or none: no content.
         fs::remove_file(dir.join("localhost/root/.bashrc")).unwrap();
         assert!(!SnapshotFiles::read(&dir).root_has_content);
         fs::remove_dir(dir.join("localhost/root")).unwrap();
@@ -463,7 +463,7 @@ mod tests {
         let system = Live::read(&root, &FakeSystem, MOUNTINFO).unwrap();
         assert!(system.pending_update);
         // In the offline boot `/system-update` is Apsis's own link (the apply's step 1
-        // checked), so only `/etc/system-update` counts there (check 1, 2026-10-02).
+        // checked), so only `/etc/system-update` counts there.
         assert!(!system.etc_system_update);
         assert!(!system.as_system_at_apply().pending_update);
         write(root.join("etc/system-update"), "");
@@ -509,7 +509,7 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The dialog's check while a link is in place (the armed-gap fix, 2026-10-04): Apsis's
+    /// The dialog's check while a link is in place: Apsis's
     /// own link is `restore-armed`, another tool's at either name is `pending-update`, the
     /// same split as the preparation's. A read: nothing under the root changes.
     #[test]

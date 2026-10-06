@@ -476,7 +476,7 @@ pub enum Dialog {
         safety_snapshot: bool,
     },
     /// "Can't restore this snapshot": the reason; `dropped` when a ready plan was dropped by
-    /// a refused "Restart now" (owner, 2026-10-02).
+    /// a refused "Restart now".
     Refused {
         snapshot: String,
         refusal: Refusal,
@@ -1581,9 +1581,8 @@ impl AppModel {
         self.status = Some(match result {
             Ok(()) => Status::Info(fl!("restarting")),
             Err(CliError::RestoreRefused(refusal)) => {
-                // The plan was dropped with the refusal (owner, 2026-10-02), and the helper
-                // ended its job `stopped`: the line under the dialog says that, not `ready`
-                // (check 4, 2026-10-03).
+                // The plan was dropped with the refusal, and the helper
+                // ended its job `stopped`: the line under the dialog says that, not `ready`.
                 self.dialog = Some(Dialog::Refused {
                     snapshot,
                     refusal,
@@ -1727,7 +1726,7 @@ impl AppModel {
         };
         let date = result.snapshot.as_deref().map(date_of).unwrap_or_default();
         let name = result.snapshot.clone().unwrap_or_default();
-        // From `result.json` (fix 6, 2026-10-04). A result always says what happened to
+        // From `result.json`. A result always says what happened to
         // home (`RestoreResult::from_wire`); without it the tooltip says nothing of home.
         let home = match result.home {
             Some(Home::Keep) => fl!("result-home-kept"),
