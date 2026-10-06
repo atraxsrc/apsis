@@ -1495,7 +1495,7 @@ fn every_run_is_in_the_c_locale() {
 fn set_user_xattr(path: &Path, value: &[u8]) -> bool {
     match rustix::fs::setxattr(
         path,
-        "user.apsis-test",
+        "user.apsis-tests",
         value,
         rustix::fs::XattrFlags::empty(),
     ) {
@@ -1507,7 +1507,7 @@ fn set_user_xattr(path: &Path, value: &[u8]) -> bool {
 
 fn user_xattr(path: &Path) -> Option<Vec<u8>> {
     let mut value = [0_u8; 64];
-    rustix::fs::getxattr(path, "user.apsis-test", &mut value[..])
+    rustix::fs::getxattr(path, "user.apsis-tests", &mut value[..])
         .ok()
         .map(|length| value[..length].to_vec())
 }

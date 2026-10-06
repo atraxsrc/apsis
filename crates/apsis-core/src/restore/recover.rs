@@ -118,18 +118,20 @@ pub fn text(
         },
     );
     let unlock = unlocking.map(unlock_lines).unwrap_or_default();
-    let (names, limit, first) = if unlocking.is_some() {
+    let changed_kernel = if safety_snapshot.is_some() {
+        "restore the\nsafety snapshot from the window instead."
+    } else {
+        "restore\nanother snapshot from the window instead."
+    };
+    let (names, first) = if unlocking.is_some() {
         (
             "It holds only this machine's disk UUIDs, its encrypted disk's mapping name\n\
              and snapshot names.",
-            "\nKnown limit: step 2's unlock lines have run in a recovery once, on Pop!_OS's\n\
-             standard encrypted install; the \"in use\" case under them is untried.",
             "first mount line",
         )
     } else {
         (
             "It holds only this machine's disk UUIDs and snapshot names.",
-            "",
             "first line",
         )
     };
@@ -143,7 +145,7 @@ If this note and last-restore.note (step 2) differ, follow last-restore.note.
 
 A restore never touches the recovery partition or the Pop_OS-oldkern entry;
 step 2 rebuilds that entry's initrd and rewrites its files on the ESP.
-Known limit: these lines are untried after a restore that changed the kernel.{limit}
+If the restore changed the kernel and the system still starts, {changed_kernel}
 
 1. At power-on, hold Space for the systemd-boot menu and pick Pop!_OS Recovery,
    or boot a Pop!_OS live USB of the same version.
@@ -323,7 +325,6 @@ mod tests {
             only_here.iter().all(|line| !line.contains("rsync")),
             "{only_here:#?}"
         );
-        assert!(note.contains("Known limit: step 2's unlock lines"));
         assert!(!plain.contains("cryptsetup") && !plain.contains("vgchange"));
         assert!(note.is_ascii() && !note.contains('@'));
     }
@@ -394,7 +395,7 @@ mod tests {
             assert!(command.contains("--numeric-ids --delete --force --sparse"));
         }
         assert!(back.contains("sudo rsync -a -A -X "), "{back}");
-        // Each is labelled, by its snapshot's full name (F3: S's name was nowhere).
+        // Each is labelled, by its snapshot's full name.
         assert!(note.contains(&format!("(a) Restore the same snapshot again, {NAME}:")));
         assert!(note.contains(&format!("(b) Go back to the safety snapshot, {SAFETY}:")));
         assert!(
@@ -403,7 +404,7 @@ mod tests {
         );
     }
 
-    /// F4: the go-back's flags are its own. A safety snapshot is always the new format.
+    /// The go-back's flags are its own. A safety snapshot is always the new format.
     #[test]
     fn after_an_old_format_snapshot_only_the_same_restore_drops_acls_and_attributes() {
         let note = text(ROOT, None, ESP, BACKUP, NAME, true, Some(SAFETY));
@@ -454,7 +455,7 @@ mod tests {
         assert_eq!(FILE, "apsis-restore-RECOVER.txt");
     }
 
-    /// Check 8's `RECOVER-AS-CODE`: what lands in both places is `text`, byte for byte.
+    /// What lands in both places is `text`, byte for byte.
     #[test]
     fn what_is_written_is_the_text_byte_for_byte_in_both_places() {
         let (state, backup) = (temp_dir("recover-state"), temp_dir("recover-backup"));

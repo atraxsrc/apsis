@@ -282,7 +282,7 @@ fn acls_and_extended_attributes_are_kept() {
 
         let has_xattr = match rustix::fs::setxattr(
             &tool,
-            "user.apsis-test",
+            "user.apsis-tests",
             b"kept",
             rustix::fs::XattrFlags::empty(),
         ) {
@@ -321,7 +321,7 @@ fn acls_and_extended_attributes_are_kept() {
         let first = localhost(&lab, FIRST);
         if has_xattr {
             assert_eq!(
-                xattr(&first.join("usr/bin/tool"), "user.apsis-test").as_deref(),
+                xattr(&first.join("usr/bin/tool"), "user.apsis-tests").as_deref(),
                 Some(&b"kept"[..]),
                 "{kind}"
             );
@@ -334,7 +334,7 @@ fn acls_and_extended_attributes_are_kept() {
             );
         }
         // A file with neither gets neither.
-        assert_eq!(xattr(&first.join("etc/changes"), "user.apsis-test"), None);
+        assert_eq!(xattr(&first.join("etc/changes"), "user.apsis-tests"), None);
         assert_eq!(xattr(&first.join("etc/changes"), ACL_XATTR), None, "{kind}");
 
         let text = fs::read_to_string(snapshot_dir(&lab, FIRST).join("info.json")).unwrap();
@@ -359,7 +359,7 @@ fn acls_and_extended_attributes_are_kept() {
         if has_xattr {
             rustix::fs::setxattr(
                 &tool,
-                "user.apsis-test",
+                "user.apsis-tests",
                 b"changed",
                 rustix::fs::XattrFlags::empty(),
             )
@@ -372,12 +372,12 @@ fn acls_and_extended_attributes_are_kept() {
                 "{kind}"
             );
             assert_eq!(
-                xattr(&third.join("usr/bin/tool"), "user.apsis-test").as_deref(),
+                xattr(&third.join("usr/bin/tool"), "user.apsis-tests").as_deref(),
                 Some(&b"changed"[..]),
                 "{kind}"
             );
             assert_eq!(
-                xattr(&second.join("usr/bin/tool"), "user.apsis-test").as_deref(),
+                xattr(&second.join("usr/bin/tool"), "user.apsis-tests").as_deref(),
                 Some(&b"kept"[..]),
                 "{kind}"
             );

@@ -84,7 +84,7 @@ ext4-dir := cargo-target-dir / 'native-ext4'
 ext4-image:
     mkdir -p {{ext4-dir}}/mnt
     truncate -s 128M {{ext4-dir}}/ext4.img
-    /usr/sbin/mkfs.ext4 -F -q -L apsis-test -E root_owner=$(id -u):$(id -g) {{ext4-dir}}/ext4.img
+    /usr/sbin/mkfs.ext4 -F -q -L apsis-tests -E root_owner=$(id -u):$(id -g) {{ext4-dir}}/ext4.img
     @echo "now: sudo mount -o loop,nosuid,nodev {{ext4-dir}}/ext4.img {{ext4-dir}}/mnt"
 
 # Runs the native backend's tests on the mounted ext4 image too

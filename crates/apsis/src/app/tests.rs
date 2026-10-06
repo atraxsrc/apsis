@@ -2318,8 +2318,8 @@ mod restore {
         assert_eq!(tone(Outcome::Done, ""), None);
     }
 
-    /// Fix 5: `problems` isn't shown as `done`. Its line says that some files
-    /// weren't restored when the helper names the log, and that a cleanup step failed for
+    /// `problems` isn't shown as `done`. Its line says that some files weren't
+    /// restored when the helper names the log, and that a cleanup step failed for
     /// anything else; the tooltip has the helper's own words, which name the log.
     #[test]
     fn problems_has_a_line_and_a_tooltip_of_its_own() {
