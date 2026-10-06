@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "apsis"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "apsis-core",
  "i18n-embed",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "apsis-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "futures-util",
  "jiff",
@@ -224,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "apsis-helper"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "apsis-core",
  "futures-util",

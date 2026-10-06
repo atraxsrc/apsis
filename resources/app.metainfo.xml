@@ -78,6 +78,17 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.6.1" date="2026-10-07">
+      <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.6.1</url>
+      <description>
+        <p>The panel popup is a ring.</p>
+        <ul>
+          <li>The ring shows how full the backup disk is, with the age of the last snapshot in its centre; while a snapshot or a restore's preparation runs, it shows the progress</li>
+          <li>The age turns the warning colour when a snapshot is overdue, and the ring when the disk is nearly full</li>
+          <li>The popup no longer lists snapshots or shows success messages; the window has both</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.6.0" date="2026-10-06">
       <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.6.0</url>
       <description>

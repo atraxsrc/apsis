@@ -22,7 +22,8 @@ it, so restoring the system does not touch your documents.
   beside the icon shows both at a glance.
 * The icon turns the warning colour when the last snapshot is older than you chose, or the
   disk is nearly full.
-* Click it for an overview and the newest snapshots. **Open Apsis** opens the window.
+* Click it to see how full the backup disk is and how old the last snapshot is.
+  **Open Apsis** opens the window.
 
 ![](docs/4.png)
 

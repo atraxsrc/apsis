@@ -1,3 +1,14 @@
+apsis (0.6.1-1) noble; urgency=medium
+
+  * New upstream release, see CHANGELOG.md: the panel popup is a ring that
+    shows how full the backup disk is, with the age of the last snapshot in
+    its centre, and a running snapshot's or restore preparation's progress.
+    The age turns the warning colour when a snapshot is overdue, the ring
+    when the disk is nearly full. The popup no longer lists snapshots or
+    shows success messages; errors still show.
+
+ -- atraxsrc <92285717+atraxsrc@users.noreply.github.com>  Wed, 07 Oct 2026 09:21:08 +1100
+
 apsis (0.6.0-1) noble; urgency=medium
 
   * New upstream release, see CHANGELOG.md: Restore now works on an

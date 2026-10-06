@@ -1,6 +1,6 @@
 .\" SPDX-License-Identifier: GPL-3.0-only
 .\" Man page for apsis, written directly in roff. Check with: man -l docs/apsis.1
-.TH APSIS 1 "2026-10-06" "apsis 0.6.0" "User Commands"
+.TH APSIS 1 "2026-10-07" "apsis 0.6.1" "User Commands"
 .\" No hyphenation: action names and paths must stay whole.
 .nh
 .SH NAME
@@ -37,8 +37,9 @@ Encrypted (LUKS) backup disks aren't supported yet.
 .PP
 Started by the COSMIC panel,
 .B apsis
-is a panel button whose popup shows the last snapshot, the backup disk and the newest
-snapshots, read\-only, with a button that opens the window.
+is a panel button whose popup shows, read\-only, a ring of how full the backup disk is with
+the age of the last snapshot in its centre (while a snapshot is made or a restore prepared,
+its progress), and a button that opens the window.
 Started anywhere else (the app launcher, a terminal), or with
 .BR \-\-window ,
 it opens the window: a toolbar (Create, Restore, Delete, Settings), the snapshot list, and a

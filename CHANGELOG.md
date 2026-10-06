@@ -4,6 +4,19 @@ All notable changes to Apsis are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] - 2026-10-07
+
+### Changed
+
+- **The panel popup is a ring.** The ring shows how full the backup disk is, with the
+  age of the last snapshot in its centre. While a snapshot or a restore's preparation
+  runs, the ring shows its progress. The exact disk figures are in the ring's tooltip.
+- The age turns the warning colour when a snapshot is overdue, and the ring when the
+  disk is nearly full, so the two are told apart at a glance.
+- The popup no longer lists snapshots or shows "Snapshot created"-style messages; the
+  window has both. Errors still show until the next action.
+- Nothing in the popup wraps or clips with a larger or monospace system font.
+
 ## [0.6.0] - 2026-10-06
 
 Restore now works on an encrypted Pop!_OS install: an LVM volume inside one LUKS
@@ -416,6 +429,7 @@ First release.
   password every time.
 - App and symbolic icons, AppStream metainfo, desktop entries, `just install` / `just uninstall`.
 
+[0.6.1]: https://github.com/atraxsrc/apsis/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/atraxsrc/apsis/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/atraxsrc/apsis/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/atraxsrc/apsis/compare/v0.4.1...v0.4.2
