@@ -62,7 +62,64 @@ if [ "$booted" = "$version" ]; then ok "running the kernel the ESP boots"; else 
 if [ -f /boot/efi/loader/entries/Pop_OS-current.conf ]; then ok "Pop_OS-current.conf"; else fail "no Pop_OS-current.conf"; fi
 if [ -f /boot/efi/loader/entries/Pop_OS-oldkern.conf ]; then ok "Pop_OS-oldkern.conf (untouched by a restore)"; else echo "note  no Pop_OS-oldkern.conf (one kernel installed)"; fi
 
-# 4. dpkg, the units, Pop's upgrade state.
+# 4. The ESP's initrd holds what unlocks the disk / sits on, and the entry's root= is /: the
+#    helper's check during the restore (crates/apsis-helper/src/unlock.rs), made again from here.
+#    lsinitramfs keeps a temporary copy under /var/tmp while it lists, and removes it.
+layers=$(lsblk -nso TYPE "$(findmnt -no SOURCE / 2>/dev/null)" 2>/dev/null || true)
+on_crypt=no; on_lvm=no
+for layer in $layers; do
+  case $layer in crypt) on_crypt=yes ;; lvm) on_lvm=yes ;; esac
+done
+if [ -z "$layers" ]; then
+  fail "couldn't read what / sits on (findmnt, lsblk): the initrd's unlock pieces aren't checked"
+elif [ "$on_crypt" = no ] && [ "$on_lvm" = no ]; then
+  echo "note  / is on a plain partition: the ESP's initrd needs no unlock pieces"
+elif listing=$(lsinitramfs -l "$esp/initrd.img" 2>/dev/null) && [ -n "$listing" ]; then
+  # As pieces() there: regular files only, by the end of the name; field 5 is the size.
+  set -- $(printf '%s\n' "$listing" | awk '
+    function is(path) { return $9 == path || substr($9, length($9) - length(path)) == "/" path }
+    $1 ~ /^-/ && NF >= 9 {
+      if (is("sbin/cryptsetup")) cryptsetup = 1
+      else if (is("sbin/lvm")) lvm = 1
+      else if (is("cryptroot/crypttab")) crypttab = ($5 ~ /^[0-9]+$/) ? $5 + 0 : 0
+    }
+    END { print cryptsetup + 0, lvm + 0, (crypttab == "" ? "none" : crypttab) }')
+  has_cryptsetup=${1:-0}; has_lvm=${2:-0}; crypttab=${3:-none}
+  if [ "$has_cryptsetup" = 1 ]; then ok "the ESP's initrd has cryptsetup"; elif [ "$on_crypt" = yes ]; then fail "the ESP's initrd has no cryptsetup (/ is on an encrypted disk)"; fi
+  if [ "$has_lvm" = 1 ]; then ok "the ESP's initrd has lvm"; elif [ "$on_lvm" = yes ]; then fail "the ESP's initrd has no lvm (/ is on LVM)"; fi
+  # The size only: the file names the encrypted device.
+  if [ "$crypttab" = none ]; then
+    if [ "$on_crypt" = yes ]; then fail "the ESP's initrd has no cryptroot/crypttab (/ is on an encrypted disk)"; fi
+  elif [ "$crypttab" = 0 ] && [ "$on_crypt" = yes ]; then
+    fail "the ESP's initrd has cryptroot/crypttab of 0 bytes: no entry to unlock (/ is on an encrypted disk)"
+  else
+    ok "the ESP's initrd has cryptroot/crypttab of $crypttab bytes"
+  fi
+else
+  fail "the ESP's initrd.img couldn't be listed (lsinitramfs -l): the unlock pieces aren't checked"
+fi
+entry=/boot/efi/loader/entries/Pop_OS-current.conf
+if [ -f "$entry" ]; then
+  # As root_option() there: the "options" lines, the first word that starts with root=.
+  root_option=$(awk '
+    { line = $0; sub(/^[ \t]+/, "", line) }
+    substr(line, 1, 7) == "options" {
+      n = split(substr(line, 8), words, " ")
+      for (i = 1; i <= n; i++) if (index(words[i], "root=") == 1) { print words[i]; exit }
+    }' "$entry" 2>/dev/null)
+  case $root_option in
+    root=UUID=*)
+      if [ -n "$root_uuid" ] && [ "$root_option" = "root=UUID=$root_uuid" ]; then
+        ok "root= in Pop_OS-current.conf is the UUID of /"
+      else
+        fail "root= in Pop_OS-current.conf isn't the UUID of /"
+      fi ;;
+    root=*) echo "note  root= in Pop_OS-current.conf isn't in UUID= form: not compared with /" ;;
+    *) fail "no root= option in Pop_OS-current.conf" ;;
+  esac
+fi
+
+# 5. dpkg, the units, Pop's upgrade state.
 if dpkg --audit >/dev/null 2>&1 && [ -z "$(dpkg --audit 2>/dev/null)" ]; then ok "dpkg --audit clean"; else fail "dpkg --audit:"; dpkg --audit 2>&1 | sed 's/^/        /'; fi
 failed=$(systemctl --failed --no-legend 2>/dev/null | wc -l)
 if [ "$failed" = 0 ]; then ok "0 failed units"; else fail "$failed failed units:"; systemctl --failed --no-legend | sed 's/^/        /'; fi
@@ -71,7 +128,7 @@ for u in acpid pop-upgrade; do
 done
 if [ -e /upgrade-attempted ] || [ -e /pop-upgrade ]; then fail "Pop's upgrade left /upgrade-attempted or /pop-upgrade"; else ok "no Pop upgrade leftovers"; fi
 
-# 5. The restore's own boot, if the previous boot was it.
+# 6. The restore's own boot, if the previous boot was it.
 echo "== journal of the previous boot, apsis-restore.service:"
 journalctl -b -1 --no-pager -u apsis-restore.service 2>/dev/null | sed 's/^/        /' || echo "        (no previous boot in the journal)"
 echo "== pop-upgrade-init in that boot (expect: skipped on ConditionPathExists=!/system-update/apsis-helper):"

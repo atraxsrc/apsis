@@ -1879,8 +1879,9 @@ No root (run by Claude):
   harness looks there.
 - A small read-only `tools/restore-check.sh`, run with sudo after each restore: ESP vs `/boot`
   hashes, modules for `uname -r`, `dpkg --audit`, `/system-update` gone, the unit's journal,
-  `result.json`. A VM harness (OVMF, a Pop!_OS install) isn't worth it for 0.5.0: it needs root
-  and KVM, and the risk is Pop's boot chain on real hardware, which apsis-test is.
+  `result.json`, and (0.6) the unlock pieces in the ESP's initrd and the entry's `root=`. A VM
+  harness (OVMF, a Pop!_OS install) isn't worth it for 0.5.0: it needs root and KVM, and the
+  risk is Pop's boot chain on real hardware, which apsis-test is.
 - **Check 11's files stay on apsis-test** (found 2026-10-03): `/opt/apsis-check.txt` (an ACL
   and a `user.*` attribute), `/opt/apsis-test-ids` (owner `54321:54322`) and
   `/opt/apsis-test-null` (a device node) are live and inside "6b baseline" and "baseline
