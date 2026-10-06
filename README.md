@@ -179,6 +179,9 @@ A restore asks every time.
   "Encrypt drive" (an LVM volume inside one LUKS partition), on the installation the
   snapshot was made of. Any other encrypted or LVM layout is refused. The disk's passphrase
   is asked twice: at the restart that runs the restore, and at the start after it.
+- **A snapshot made while Apsis 0.5.x was installed puts 0.5.x back**, and the dialog
+  doesn't say so: it names an older Apsis only below 0.5. On an encrypted system disk,
+  0.5.x then refuses to restore until Apsis 0.6.0 is installed again.
 - **A snapshot from another installation is refused**: it must have been taken of this
   system disk.
 - **A file changed in place with the same size and modification time** as in the snapshot

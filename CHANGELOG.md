@@ -42,6 +42,8 @@ the restore, and at the start after it.
   way this system disk is set up yet.", with a second line of its own: "It works on a plain
   partition and on Pop!_OS's standard encrypted install. Snapshots still work: their files
   are on the backup disk, under timeshift/snapshots."
+- The Restore dialog's two lines for a snapshot that holds an Apsis older than 0.5 no
+  longer name a version: "Install this version of Apsis again afterwards".
 - `apsis-helper`'s D-Bus interface (`Helper3`) and the polkit actions are as in 0.5.0.
 - For testing: `tools/restore-check.sh` also looks at the unlock pieces in the ESP's initrd
   and at the boot entry's `root=`, and `just deb-dev` packages a branch build under a
@@ -61,6 +63,9 @@ The README says more, under "Known limitations of restore" and "If a restore goe
   - the README's advice for a restore that ends "still boots the previous kernel".
 - A plain, unencrypted install passed the 0.5.0 gate. The rule that reads the disk's layout
   has changed since, and that install is now covered by unit tests only.
+- A snapshot made while Apsis 0.5.x was installed counts as the current version, so the
+  dialog says nothing about it. On an encrypted install, restoring it puts 0.5.x back, and
+  0.5.x refuses this disk layout until 0.6.0 is installed again.
 
 ## [0.5.0] - 2026-10-04
 

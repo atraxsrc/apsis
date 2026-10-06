@@ -520,8 +520,8 @@ says it, from the snapshot's `var/lib/dpkg/status`):
 |---|---|---|
 | this Apsis version | nothing to reconcile | nothing |
 | no Apsis | Apsis is gone: dpkg says not installed, and its files are gone. Left behind, owned by no package: `/etc/apsis/` and `/var/lib/apsis/restore/` (the result and log). Reinstalling Apsis picks them up and shows the result | "Apsis wasn't installed yet when this snapshot was made, so it will be gone after the restore. Install it again to see how the restore went." |
-| Apsis 0.4.x | the 0.4.x applet and helper. They read the protected config (v2 since 0.4.0) and don't know `/var/lib/apsis/`, so no result line until 0.5.0 is installed again | "This snapshot has Apsis 0.4.x. Install Apsis 0.5 again afterwards to restore again." |
-| Apsis 0.3.x or older | the old applet and helper, which refuse the protected v2 config ("version 2, this Apsis reads 1") | "This snapshot has an older Apsis (0.3.x) that can't read the current settings. Install Apsis 0.5 again afterwards." |
+| Apsis 0.4.x | the 0.4.x applet and helper. They read the protected config (v2 since 0.4.0) and don't know `/var/lib/apsis/`, so no result line until 0.5.0 is installed again | "This snapshot has Apsis 0.4.x. Install this version of Apsis again afterwards to restore again." |
+| Apsis 0.3.x or older | the old applet and helper, which refuse the protected v2 config ("version 2, this Apsis reads 1") | "This snapshot has an older Apsis (0.3.x) that can't read the current settings. Install this version of Apsis again afterwards." |
 
 The unit, the drop-in, the helper copy and `/system-update` are removed when the apply ends,
 whatever the outcome (6b.6 steps 8 and 9). `/etc/apsis/` and `/var/lib/apsis/restore/{result.json,
@@ -1169,10 +1169,10 @@ restore-old-format   Older format: this snapshot was made without ACLs and exten
                      attributes. A few system files may come back without them.
 restore-no-apsis     Apsis wasn't installed yet when this snapshot was made, so it will be
                      gone after the restore. Install it again to see how the restore went.
-restore-apsis-0.4    This snapshot has Apsis 0.4.0. Install Apsis 0.5 again afterwards to
-                     restore again.
+restore-apsis-0.4    This snapshot has Apsis 0.4.0. Install this version of Apsis again
+                     afterwards to restore again.
 restore-apsis-0.3    This snapshot has an older Apsis (0.3.1) that can't read the current
-                     settings. Install Apsis 0.5 again afterwards.
+                     settings. Install this version of Apsis again afterwards.
 ```
 
 | element | 0.4.0 pattern |
@@ -1324,8 +1324,8 @@ dashes, no rsync or paths on screen (the helper's own words only in tooltips).
 | dialog, no home in snapshot | `Home folders aren't in this snapshot, so they stay as they are.` |
 | dialog | `Older format: this snapshot was made without ACLs and extended attributes. A few system files may come back without them.` |
 | dialog | `Apsis wasn't installed yet when this snapshot was made, so it will be gone after the restore. Install it again to see how the restore went.` |
-| dialog | `This snapshot has Apsis {version}. Install Apsis 0.5 again afterwards to restore again.` |
-| dialog | `This snapshot has an older Apsis ({version}) that can't read the current settings. Install Apsis 0.5 again afterwards.` |
+| dialog | `This snapshot has Apsis {version}. Install this version of Apsis again afterwards to restore again.` |
+| dialog | `This snapshot has an older Apsis ({version}) that can't read the current settings. Install this version of Apsis again afterwards.` |
 | dialog muted | `Experimental · if it won't start, see "If a restore goes wrong" (README)` |
 | buttons | `Cancel`, `Restore` |
 | refusal title | `Can't restore this snapshot` |
