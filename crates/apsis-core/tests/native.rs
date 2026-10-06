@@ -1622,23 +1622,30 @@ fn fake_rsync(lab: &Lab, script: &str) -> OsString {
     search
 }
 
-/// Starts a create on another thread, waits until rsync is running, stops it; how long the
-/// stop took and what the create returned.
+/// A line of a stand-in rsync's script: it writes the marker `ready` beside the program. The
+/// script puts it after whatever must be in place before a stop may arrive (a trap, a child).
+const SAY_READY: &str = r#": > "${0%/*}/ready""#;
+
+/// Starts a create on another thread, waits until the stand-in rsync says it is ready (its
+/// [`SAY_READY`] line), stops it; how long the stop took and what the create returned.
 fn stop_while_copying(lab: &Lab, script: &str, grace: Duration) -> (Duration, Error) {
     let path = fake_rsync(lab, script);
     let cancel = Cancel::with_grace(grace);
     let backend = NativeRsync::new(config(lab, false), QuietRunner::new(path))
         .with_clock(clock())
         .with_cancel(Arc::clone(&cancel));
-    let staging = lab.repo.join("timeshift/apsis-staging");
+    let ready = lab.repo.parent().unwrap().join("bin/ready");
     let create = std::thread::spawn(move || backend.create("stopped").unwrap_err());
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !staging.join("2026-09-25_11-28-53/exclude.list").exists() {
-        assert!(std::time::Instant::now() < deadline, "rsync never started");
+    // The staging folder's `exclude.list` is no sign of it: that file is there before it is
+    // synced and before rsync is started, and a started script has not yet run its first line.
+    while !ready.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "rsync never said it was ready"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
-    // rsync has been started by now (the list is written right before).
-    std::thread::sleep(Duration::from_millis(300));
     let asked = std::time::Instant::now();
     cancel.request().unwrap();
     let error = create.join().unwrap();
@@ -1651,7 +1658,8 @@ fn stop_ends_rsyncs_whole_group_and_removes_its_copy() {
         let kind = lab.kind;
         populate(&lab.source);
         // A child in the same group, as rsync's receiver is: both must go.
-        let (took, error) = stop_while_copying(&lab, "sleep 60 & wait", Duration::from_secs(30));
+        let script = format!("sleep 60 &\n{SAY_READY}\nwait");
+        let (took, error) = stop_while_copying(&lab, &script, Duration::from_secs(30));
         assert!(matches!(error, Error::Stopped), "{kind}: {error:?}");
         assert!(
             took < Duration::from_secs(10),
@@ -1674,8 +1682,8 @@ fn stop_kills_what_ignores_sigterm_after_the_grace_period() {
         let kind = lab.kind;
         populate(&lab.source);
         let grace = Duration::from_millis(400);
-        let script = "trap '' TERM\nwhile :; do sleep 0.1; done";
-        let (took, error) = stop_while_copying(&lab, script, grace);
+        let script = format!("trap '' TERM\n{SAY_READY}\nwhile :; do sleep 0.1; done");
+        let (took, error) = stop_while_copying(&lab, &script, grace);
         assert!(matches!(error, Error::Stopped), "{kind}: {error:?}");
         assert!(took >= grace, "{kind}: ended before SIGKILL ({took:?})");
         assert!(took < Duration::from_secs(10), "{kind}: {took:?}");
