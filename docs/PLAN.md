@@ -2778,6 +2778,15 @@ anything unknown; no explicit `%F` handling in code.
    accounted for. Needed before an encrypted root can be accepted.
 3. Encrypted or LVM root, split `/boot`, `/usr`, `/var` (the 6b.7 refusals), each its own
    design.
+   **Update 2026-10-06: the encrypted root of a standard Pop!_OS install (LUKS, then LVM)
+   is released as 0.6.0.** The spike and the drill passed on apsis-test, then the release
+   gate on CI's .deb from the tag `v0.6.0` (on the release commit `6ec5d5e`), all 20 pass
+   words (DECISIONS "the 0.6.0 release gate passed"). Item 2's rebuild was not needed for
+   it and is not built: a snapshot whose crypttab differs from the live one is still
+   refused. LUKS without LVM, LVM without LUKS and the split layouts stay refused.
+   **Not shown by the gate, knowingly:** a forced `boot-kept` and the recovery (the drill
+   showed each once, on the dev build), the note's "in use" case, the by-hand lines after
+   a restore that changed the kernel, a plain, unencrypted install.
 
 ## Polish
 

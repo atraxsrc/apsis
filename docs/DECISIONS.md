@@ -7054,3 +7054,224 @@ restore with home) are run.
 the real `lsinitramfs`. The backup disk holds the three baselines only, 11G free. The
 markers are removed; `~/drill/` stays, its `session.txt` holds the laptop's UUIDs and
 does not leave it.
+
+## 2026-10-06 - the 0.6.0 release gate passed on CI's .deb (apsis-test), and v0.6.0 is published
+
+The gate for 0.6.0, on the .deb the Release workflow built from the tag `v0.6.0` (on the
+release commit `6ec5d5e`), installed on apsis-test over the release build `0.5.0-1`: the
+upgrade a user gets. Runbook `notes/gate-0.6-runbook.md` with `notes/gate-0.6-g.sh` (both
+untracked). One sitting on 2026-10-06, from about 19:37 to 21:40. Times below are the
+laptop's (UTC+11).
+
+**Where this entry's facts come from.** I ran every step on apsis-test, as the guide led
+it. The script's masked logs (`gate6-*.txt`) are kept outside the repo; Claude Code read
+them on my say-so and drafted this entry from them. What the logs do not hold (the
+windows, the main machine's steps before M7, the slips) is my own record, and says so.
+Neither AI ran anything on the laptop.
+
+**Verdict: passed.** The pass file holds all 20 words in the runbook's order: `P1-LOOKED`,
+`SCRIPT-THERE`, `PRE-OK`, `DISK-START`, `DEB-FILE`, `DEB-THERE`, `REFUSED`, `T1-DONE`,
+`INSTALLED`, `LOOKED`, `BASE-MADE`, `RULE-OK`, `T1-DELETED`, `MARKED`, `READY-READ`,
+`SAME-OK`, `SAME-SHOWN`, `UPGRADED`, `ACROSS-OK`, `Z-CLOSED`. The close shows the three
+baselines with exactly P3's free space. No step of Apsis failed; three lines of the
+runbook were off (below). After it I published the draft: `v0.6.0` is released.
+
+### Part 1, P1 to P3: the laptop before anything was pushed or tagged
+
+P1, with no script: `apsis 0.5.0-1 install ok installed`, kernel `7.0.11-76070011-generic`,
+`crypt lvm disk part` under the root, the helper `inactive`, no rsync, no `/system-update`,
+none of the old test folders, 337 updates waiting, 6 of them named `linux-`, `+1100`.
+**Slip 1 (my record):** P1's pass check looked for `lvm crypt`; this `lsblk` prints `crypt
+lvm disk part`, so the check failed on a laptop that was right. The guide gave me a line
+that looks for each word on its own, and that passed.
+
+P2: the script and `restore-check.sh` were on the laptop by their hashes (short sha256
+`d06d2dc26b1512e9` and `02c78688d3cf5167`).
+
+P3, `pre`: the drill's layout again. A `crypto_LUKS` partition, `cryptdata` (crypt,
+`LVM2_member`), `data-root` (lvm, ext4) at `/`; the crypttab line `cryptdata UUID=<uuid>
+none luks`; one `root=` word in the boot entry; the three pieces in `/boot/initrd.img`:
+`cryptroot/crypttab` 62 bytes, `usr/sbin/cryptsetup` 231320, `usr/sbin/lvm` 3156712. The
+two installed binaries had the 0.5.0 gate's sha256 (`6699c133...`, `e49007b9...`): the
+release build. The job lock was free, the unit `static`, no timer. The state folder held
+the drill's last restore (`result.json`: `done`, "drill base", home kept). The config had
+`include_home = true`. 1736 packages; 337 updates with six kernel packages among them;
+`dpkg --audit` clean; no failed unit; `PRE-OK`.
+
+**Slip 3 (my record, and `pre`'s `lsblk` shows it):** the backup disk was already plugged
+in and the desktop had mounted it. The runbook assumes it is plugged in at this step. I
+unmounted it before opening Apsis. The window then (my record): the three baselines, 11G
+free, the status line `System restored to 2026-10-06 09:31` (the drill's last restore).
+`disk start`: 3 snapshots, 12031221760 of 30120226816 bytes free (11.20 GiB of 28.1).
+
+### Part 2, M1 to M7 and P4: the release, on the main machine
+
+The logs hold M7 and P4 only; the rest is my record.
+
+- **CI's first run on `main` for `6ec5d5e` was red.** One test,
+  `stop_kills_what_ignores_sigterm_after_the_grace_period`, with `plain: ended before
+  SIGKILL (241.959855ms)`. I re-ran the failed job and it was green. Then I tagged. The
+  test waited a fixed 300 ms for its stand-in rsync and assumed the stand-in had set its
+  trap by then; nothing in Apsis was wrong. Its fix came after the release, test code
+  only (`7bfc68c`), so the tag does not have it.
+- **Slip 2:** M5's check line failed with `Needed a single revision`, after the tag was
+  made: `git rev-parse --short` takes one name. I checked with `git rev-parse
+  'v0.6.0^{commit}' main | cut -c1-7`, which printed `6ec5d5e` twice.
+- M7: the draft's `apsis_0.6.0-1_amd64.deb`, sha256
+  `6107e16f2e9a5eaa04e7f4f2281593b2d9b56a570b923c6b3c7429759493f31b`; inside it
+  `/usr/bin/apsis` `b6dc583b...` and `/usr/libexec/apsis-helper` `7a0f613b...`; `Version:
+  0.6.0-1`. P4: the same three hashes on the laptop, `DEB-THERE`.
+
+### Part 3, U1 to U4: the upgrade, refused while a job runs, then installed
+
+U1: the create "gate t1" started at 20:06:27 on `0.5.0-1`. `apt install` of the .deb at
+20:06:54, while it ran: the old package's pre-removal script said `apsis: an Apsis job is
+running; try again when it has finished` (exit status 75), dpkg tried the new package's
+script, which said the same, and apt ended with exit 100. After it: still `0.5.0-1 install
+ok installed`, `dpkg --audit` clean, the job lock still held, rsync still running.
+`REFUSED`.
+
+U2: "gate t1" went on to its end at 20:40:24, 33 minutes. `T1-DONE`.
+
+U3, at 20:42:12 with no job running: `Unpacking apsis (0.6.0-1) over (0.5.0-1)`, apt exit
+0, no line from the package's own scripts, `0.6.0-1 install ok installed`, the two
+binaries' hashes the .deb's, the audit clean, the unit `static`, no link, the state folder
+untouched (the same four files with the drill's times). `INSTALLED`.
+
+U4: `RestoreResult` asked over ssh answered `Call failed: not authorised` (the runbook
+allowed a polkit refusal, to be recorded). `LOOKED` is in the pass file; what the window
+showed at U4 is not in the logs and not written down for this entry.
+
+### Part 4, B1, R1, B2: the base snapshot and the rule
+
+B1: "gate base" (`2026-10-06_20-45-29`) was made with `0.6.0-1` installed, 20:45:29 to
+20:47:18. R1: the helper's line was `check-restore "2026-10-06_20-45-29" ...: ok; home
+yes, root yes, current format, apsis current`, and the confirm dialog opened as the
+runbook expects (my record). So the released build's rule lets the encrypted laptop
+through. B2: "gate t1" deleted; `disk mid`: 4 snapshots, 1699512320 bytes free (1.58 GiB),
+9853 MiB less than at the start.
+
+### Part 5, S1 to S5: a restore on the same kernel
+
+S1: the markers, `/etc/apsis-gate-marker` and a file in my home folder.
+
+S2, read at "Ready to restore": the plan was ready and no link was in place yet; snapshot
+"gate base", home `keep`, the safety snapshot `2026-10-06_20-55-43`. The note's command
+lines: the unlock line with `cryptdata`, `vgchange -ay`, the mounts, two rsync commands
+(the base, then the safety snapshot), the chroot lines. The note in the state folder was
+byte for byte the one on the backup disk (`NOTE-EQUALS-RECOVER`).
+
+S3 and S4: the restore boot ran from 20:58:37 to 20:59:38; the copy took 37 seconds
+(`rsync exited 0`, attempt 1 of 3). The journal's line, whole: `apsis-helper: unlock
+check: the initrd before has cryptsetup, lvm, cryptroot/crypttab of 62 bytes; after,
+cryptsetup, lvm, cryptroot/crypttab of 62 bytes; root= is the same`. Then `the restore
+ended: done` and `apply-restore ended: Finished(Done)`. `pop-upgrade-init` was skipped in
+that boot on its condition. The next boot began at 20:59:53: `SUMS-SAME`, 7.0.11 running
+and on the ESP, the three pieces in the ESP's initrd, `restore-check.sh` with 0 FAIL lines
+(its four 0.6 lines among the ok ones: cryptsetup, lvm, `cryptroot/crypttab` of 62 bytes,
+`root=` is the UUID of `/`), no failed unit. The system marker was gone and the home file
+kept. The kept filter and note were the prepared ones by hash. `SAME-OK`.
+
+S5 (my record): the window had five rows and the status line `System restored to
+2026-10-06 20:45`. `RestoreResult` over ssh said `Call failed: not authorised` again.
+`SAME-SHOWN`.
+
+### Part 6, K1 to K3: the updates, then the base back across the kernel update
+
+The guide offered to skip K (the runbook's "Stop here if you like"). I chose to run it.
+
+K1: the 337 updates and a restart. Kernel `7.1.5-76070105-generic` running, `/boot`
+linking to it, both kernels' files in `/boot`, 0 updates waiting, 1744 packages (1736
+before), Apsis still `0.6.0-1`. `UPGRADED` at 21:26.
+
+K2: the restore of "gate base" with the safety snapshot unticked (`safety_snapshot` is
+`null` in the result), home kept. The restore boot ran from 21:28:29 to 21:34:19; the copy
+took 5 minutes 25 seconds (`rsync exited 0`, attempt 1 of 3). The `unlock check:` line
+had the same words as in S4, then `removed kernel 7.1.5-76070105-generic: not in the
+snapshot` and `the restore ended: done`.
+
+K3: the next boot began at 21:34:35. 7.0.11 running and on the ESP; `/boot` holds only
+7.0.11's files; `SUMS-SAME`; the three pieces; `restore-check.sh` with 0 FAIL lines;
+`pop-upgrade-init` skipped in the restore boot; 337 updates waiting again and 1736
+packages, as at P3; the kept note has one rsync command (no safety snapshot).
+`ACROSS-OK`. The window (my record): the same status line, `System restored to 2026-10-06
+20:45`, and a tooltip ending `Safety snapshot: none.` The runbook had that ending as a
+prediction from `apsis.ftl`; it is seen now.
+
+**The passphrase.** I did not note it separately. The laptop cannot start without it (the
+crypttab line has no key file), so it was typed at both restarts of each restore.
+
+### Part 7, Z1 and Z2: the close
+
+The gate's rows were deleted. `close`: `0.6.0-1` with the .deb's two hashes, no link, no
+`/pop-upgrade` or `/upgrade-attempted`, no timer, no rsync, the system marker gone, the
+kernel and the package count of P3, 337 updates waiting, `SUMS-SAME` against `pre`, no
+failed unit. `disk close`: 3 snapshots, 12031221760 bytes free, 0 MiB against the start.
+`Z-CLOSED`.
+
+**What this shows.** On the standard encrypted install, with the build CI made from the
+tag: the upgrade from `0.5.0-1` is refused while a job runs and is clean after it; the
+rule lets the laptop through; a restore on the same kernel and a restore back across a
+kernel update both end `done` with the unlock pieces in the ESP's initrd and the same
+`root=`, and the laptop starts with its passphrase after each; the backup disk ends as it
+started.
+
+**Not shown.** The runbook's "Not in this gate" list, which is the CHANGELOG's 0.6.0
+Known limits:
+
+- a forced `boot-kept` (the drill's Part 4 showed it on the dev build);
+- the recovery (the drill's Part 5 ran the note's lines there once);
+- the note's "in use" case;
+- the by-hand lines after a restore that changed the kernel;
+- a plain, unencrypted install.
+
+And, from the logs themselves:
+
+- a restore with the home folders on the release build: both restores kept home (the
+  drill's Part 3 restored them on the dev build);
+- `RestoreResult`'s answer on 0.6.0: it was refused over ssh both times, so the window's
+  status line is the only witness of it;
+- the window at U4;
+- any other laptop, any other layout.
+
+### Open items
+
+1. **Every `result.json` has outcome `done` with a message no window shows:** `the
+   previous kernel's boot files: the initrd on the ESP isn't the one /boot links to`. It
+   is in S's result, in K's, and already in the drill's last one that `pre` printed. The
+   code adds it when its check of the ESP's previous-kernel pair fails
+   (`Previous::Wrong` in `restore/apply.rs`) and keeps the outcome. Not a failure of the
+   gate. Open: what on this laptop makes that check fail, and whether a `done` result
+   should carry a message nobody is shown.
+2. `RestoreResult` over ssh is `not authorised`. The runbook allowed for it; why, and
+   whether a check line can ask another way, is not looked into.
+3. The runbook's three slips (P1's order, M5's rev-parse, P3 and a disk already plugged
+   in) are named in a note at the top of the untracked runbook. Its steps are left as run.
+4. By the runbook's reading, the backup disk's `timeshift/apsis-restore-RECOVER.txt`
+   still names "gate base", which is deleted (the 0.5.0 gate's finding 13). The close
+   did not look at the file.
+
+### What I decided
+
+- 2026-10-06: the gate passed, so I published the draft. 0.6.0 is released.
+- I ran K although the guide offered to skip it.
+
+### AI help at a glance
+
+- I sat at the laptop for every step, ran the main machine's steps by hand, typed the
+  passphrase at each restart, read the windows and the dialog.
+- The guide (a second Claude chat) led the sitting step by step, gave me the P1 line that
+  looks for each word on its own, and offered to skip K. It ran nothing.
+- Claude Code, on the main machine, wrote the runbook and the script before the sitting,
+  and afterwards read the logs I named, drafted this entry and fixed the test (`7bfc68c`).
+  It ran nothing on apsis-test.
+
+### Left on apsis-test
+
+`0.6.0-1`, CI's file, which is now the released one. Kernel 7.0.11 running and on the ESP,
+337 updates waiting again, 1736 packages, no link, no timer, no failed unit. The system
+files are "gate base"'s, my home folder kept. The state folder holds K2's `result.json`,
+the kept filter and note, and a 10 MB `rsync-log`; the window goes on showing `System
+restored to 2026-10-06 20:45` until the next restore. The backup disk holds the three
+baselines, 12031221760 bytes free. The close log does not say whether `~/apsis-gate/` is
+still there; removing it is mine to do.
