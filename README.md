@@ -117,7 +117,8 @@ Your snapshots stay on the backup disk.
 
 ## Known limitations of restore
 
-- Experimental, for Pop!_OS 24.04 with systemd-boot only. It has run on one laptop so far.
+- Experimental, for Pop!_OS 24.04 with systemd-boot only.
+  Restore is new: a report of how it went on your hardware, good or bad, helps.
 - An encrypted system disk works in Pop!_OS's "Encrypt drive" layout only. Its passphrase
   is asked twice: at the restart that runs the restore, and at the start after it.
 - The live `/etc/fstab` and `/etc/crypttab` are kept, not the snapshot's. The boot files

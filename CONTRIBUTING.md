@@ -14,8 +14,7 @@ said, with the log lines around it:
 Logs hold disk UUIDs, your user name and your computer's name: take out what you don't want
 public. [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) may already have the answer.
 
-A report of how Restore went on your hardware, good or bad, is especially useful: it has run
-on one laptop so far.
+Restore is new: a report of how it went on your hardware, good or bad, helps.
 
 ## Ideas and improvements
 

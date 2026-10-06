@@ -15,9 +15,8 @@ again at every preparation. When the restore is armed ("Restart now"), its copy 
 2's first mount line has run. If the two differ, follow `last-restore.note`. `RECOVER.txt` is
 on the disk that step 2 mounts, so the UUIDs for the mount lines come from `lsblk -f`.
 
-**Known limit:** these steps are untried after a restore that changed the kernel (the
-restore's filter keeps out the kernel that ran when it was prepared). When the system still
-starts from either boot entry, the way back is the window: restore the safety snapshot there.
+If the restore changed the kernel and the system still starts, restore the safety snapshot
+from the window instead.
 
 1. At power-on, hold Space for the systemd-boot menu and pick **Pop!_OS Recovery**, or boot
    a Pop!_OS live USB of the same version. The recovery opens an installer window: don't
@@ -42,9 +41,7 @@ starts from either boot entry, the way back is the window: restore the safety sn
 
    If `luksOpen` says the device is in use, the live system opened it under another name,
    which `lsblk` shows below the partition: `sudo vgchange -an`, then `sudo cryptsetup close
-   <that name>`, then the two lines again. **Known limit:** the two unlock lines have run
-   in a recovery once (2026-10-06, Pop!_OS's standard encrypted install, the same
-   installation); the "in use" case has not.
+   <that name>`, then the two lines again.
 
    Mount the system disk, its boot partition (ESP) and the backup disk, read-only:
 
