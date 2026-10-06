@@ -18,3 +18,14 @@
 .config/
 .local/
 /.claude/
+
+# internal working docs, kept locally, not published
+/CLAUDE.md
+/docs/PLAN.md
+/docs/DECISIONS.md
+/docs/PRIVACY.md
+/docs/APSIS-UI-PROMPT.md
+/docs/RELEASE.md
+/docs/UI.md
+/docs/TIMESHIFT-CLI.md
+/docs/ARCHITECTURE.md
