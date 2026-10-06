@@ -166,6 +166,7 @@ you don't want public. A security problem doesn't go in an issue: report it priv
   and `cargo test --locked --workspace`.
 - A report of how Restore went on your hardware, good or bad, is especially useful.
 - The window's texts are in `i18n/en/apsis.ftl`. English is the only language so far.
+- Bug reports, ideas, pull requests and security reports: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Name
 
