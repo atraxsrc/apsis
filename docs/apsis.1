@@ -1,6 +1,6 @@
 .\" SPDX-License-Identifier: GPL-3.0-only
 .\" Man page for apsis, written directly in roff. Check with: man -l docs/apsis.1
-.TH APSIS 1 "2026-10-04" "apsis 0.5.0" "User Commands"
+.TH APSIS 1 "2026-10-06" "apsis 0.6.0" "User Commands"
 .\" No hyphenation: action names and paths must stay whole.
 .nh
 .SH NAME
@@ -54,7 +54,8 @@ Apsis doesn't work without it.
 .B Restore
 (one snapshot selected; no keyboard shortcut) first asks the helper whether the snapshot fits
 this computer: the same installation (the snapshot's root filesystem UUID), UEFI, Pop!_OS with
-systemd\-boot (kernelstub), a plain ext4 system disk, no separate
+systemd\-boot (kernelstub), an ext4 system disk on a plain partition or on Pop!_OS's standard
+encrypted install (an LVM volume inside one LUKS partition), no separate
 .IR /boot ", " /usr " or " /var ,
 the snapshot's kernel files complete, no other system update waiting for a restart, no Pop!_OS
 release upgrade in progress, and the snapshot's

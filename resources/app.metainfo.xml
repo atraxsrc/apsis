@@ -26,8 +26,8 @@
     <p>
       Snapshots use Timeshift's on-disk layout, so snapshots Timeshift made keep working, but
       Apsis doesn't need or run Timeshift. Manual only: there is no schedule, and snapshots are
-      only deleted when you delete them. Restoring the whole system comes in a later version;
-      encrypted (LUKS) backup disks aren't supported.
+      only deleted when you delete them. Restoring the whole system is experimental (Pop!_OS
+      24.04 with systemd-boot); encrypted (LUKS) backup disks aren't supported.
     </p>
   </description>
   <icon type="stock">io.github.atraxsrc.Apsis</icon>
@@ -79,6 +79,18 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.6.0" date="2026-10-06">
+      <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.6.0</url>
+      <description>
+        <p>Restore now works on an encrypted Pop!_OS install (LUKS with LVM, the layout the installer's "Encrypt drive" makes). Restore stays experimental.</p>
+        <ul>
+          <li>Restore accepts a system disk on an LVM volume inside one LUKS partition, on the installation the snapshot was made of; other encrypted or LVM layouts are refused</li>
+          <li>After the boot files are refreshed, Apsis checks that they can still unlock the disk, and puts the old ones back if they can't</li>
+          <li>The recovery note on the backup disk starts with the lines that unlock the disk</li>
+          <li>Run on one laptop with that one layout; the known limits are in the changelog and the README</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.5.0" date="2026-10-04">
       <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.5.0</url>
       <description>

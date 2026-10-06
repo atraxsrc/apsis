@@ -4,6 +4,64 @@ All notable changes to Apsis are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-10-06
+
+Restore now works on an encrypted Pop!_OS install: LUKS with LVM, the layout the installer's
+"Encrypt drive" makes. Restore stays experimental, and for Pop!_OS 24.04 with systemd-boot
+only.
+
+What ran, on one laptop with that layout and the same installation: a restore on the same
+kernel, a restore back across a kernel update, a restore with the home folders, the boot
+files put back after a boot refresh that was made to fail, and the recovery note's lines
+run in Pop!_OS's recovery. The disk's passphrase is asked twice: at the restart that runs
+the restore, and at the start after it.
+
+### Added
+
+- **Restore on an encrypted system disk**, in one layout: `/` on an LVM volume inside one
+  LUKS partition, which the live `/etc/crypttab` opens by its UUID. That is what Pop!_OS's
+  installer makes with "Encrypt drive". As before, only a snapshot of this installation is
+  restored, the live `fstab` and `crypttab` are kept, and no initrd is rebuilt: the
+  snapshot's was built on this system.
+- **A check that the refreshed boot files can still unlock the disk.** On that layout, once
+  kernelstub has refreshed the boot files, the helper compares them with the ones from
+  before the restore: the boot entry's `root=` option must be the same, and the new initrd
+  must still hold what the old one held of `cryptsetup`, `lvm` and a non-empty
+  `cryptroot/crypttab`. If it doesn't, or an initrd can't be listed, the boot refresh has
+  failed and the old boot files are put back ("still boots the previous kernel"). The
+  journal has a line that starts `unlock check:`. On a plain partition none of this runs.
+- **The recovery note unlocks the disk first.** On an encrypted system disk,
+  `timeshift/apsis-restore-RECOVER.txt` and "If a restore goes wrong" in the README start
+  with the `cryptsetup luksOpen` line (this machine's UUID and the name from `/etc/crypttab`
+  filled in) and `vgchange -ay`, and say what to do when the live system has already opened
+  the disk under another name.
+
+### Changed
+
+- The refusal for a system disk set up in another way reads "Restore doesn't support the
+  way this system disk is set up yet.", with a second line of its own: "It works on a plain
+  partition and on Pop!_OS's standard encrypted install. Snapshots still work: their files
+  are on the backup disk, under timeshift/snapshots."
+- `apsis-helper`'s D-Bus interface (`Helper3`) and the polkit actions are as in 0.5.0.
+- For testing: `tools/restore-check.sh` also looks at the unlock pieces in the ESP's initrd
+  and at the boot entry's `root=`, and `just deb-dev` packages a branch build under a
+  version of its own.
+
+### Known limits
+
+The README says more, under "Known limitations of restore" and "If a restore goes wrong".
+
+- Run on one laptop, in one layout, on the same installation. Nothing else.
+- LUKS without LVM and LVM without LUKS are refused. That refusal has unit tests only.
+- Not seen on hardware:
+  - the unlock check's verdict on an initrd that lacks the pieces (the failure that was
+    forced stopped at listing the initrd, before the comparison);
+  - the recovery note's "in use" case, a disk the live system opened under another name;
+  - the by-hand recovery lines after a restore that changed the kernel;
+  - the README's advice for a restore that ends "still boots the previous kernel".
+- A plain, unencrypted install passed the 0.5.0 gate. The rule that reads the disk's layout
+  has changed since, and that install is now covered by unit tests only.
+
 ## [0.5.0] - 2026-10-04
 
 Restoring the whole system to a snapshot, at the next start. Experimental; Pop!_OS 24.04
@@ -381,6 +439,7 @@ First release.
   password every time.
 - App and symbolic icons, AppStream metainfo, desktop entries, `just install` / `just uninstall`.
 
+[0.6.0]: https://github.com/atraxsrc/apsis/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/atraxsrc/apsis/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/atraxsrc/apsis/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/atraxsrc/apsis/compare/v0.4.0...v0.4.1

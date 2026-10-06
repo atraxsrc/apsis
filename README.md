@@ -25,12 +25,14 @@ creates, lists and deletes snapshots and holds the settings.
 Timeshift works fine on COSMIC. Apsis is a native alternative, and Timeshift can still read its
 snapshots.
 
-> **Status:** 0.5.0. Apsis takes rsync snapshots itself and doesn't need
+> **Status:** 0.6.0. Apsis takes rsync snapshots itself and doesn't need
 > Timeshift. It uses Timeshift's layout on the backup disk, so snapshots Timeshift made keep
 > working in Apsis. Manual only: there is no schedule, and a snapshot
-> is only deleted when you delete it. **Restoring the whole system is new in 0.5.0 and
-> experimental**: it works on Pop!_OS with systemd-boot, and the restore runs at the next
-> start, outside the desktop. Read "If a restore goes wrong" below before you rely on it.
+> is only deleted when you delete it. **Restoring the whole system is experimental** (since
+> 0.5.0): it works on Pop!_OS with systemd-boot, and the restore runs at the next start,
+> outside the desktop. **Restoring an encrypted install is new in 0.6.0**: the layout
+> Pop!_OS's installer makes with "Encrypt drive", run on one laptop so far. Read "If a
+> restore goes wrong" below before you rely on it.
 
 ## What it does
 
@@ -150,7 +152,8 @@ Apsis won't delete it; it needs removing by hand, as root.
 
 4. **Restore the system** (0.5.0, experimental): select one snapshot, **Restore**. Apsis checks
    that the snapshot fits this computer (same installation, UEFI, Pop!_OS with systemd-boot,
-   a plain ext4 system disk) and shows the choices: keep your home folders as they are now
+   an ext4 system disk on a plain partition or on Pop!_OS's standard encrypted install) and
+   shows the choices: keep your home folders as they are now
    (default) or restore them too, and take a safety snapshot first (on by default). The safety
    snapshot is the way back: the system as it was right before the restore, listed as "Safety
    snapshot, before restoring <date>", costing only the files that differ from the newest
