@@ -1683,7 +1683,8 @@ another name (a file manager's `luks-<uuid>`) would get an initrd that can't unl
 paragraph after says what to do when the device is already open under another name. The
 note then also holds that name, and says so; a name or UUID that isn't a plain word is
 refused before any note is written (`root-device`). A second "Known limit" line says the
-unlock lines are untried in a recovery, until the drill on apsis-test has typed them.
+unlock lines have run in a recovery once and the "in use" case has not (the drill on
+apsis-test, 2026-10-06).
 
 1. At power-on, hold Space for the systemd-boot menu and pick **Pop!_OS Recovery**, or boot a
    Pop!_OS live USB of the same version (the recovery opens an installer window; its install

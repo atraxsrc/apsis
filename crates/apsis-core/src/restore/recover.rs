@@ -122,7 +122,8 @@ pub fn text(
         (
             "It holds only this machine's disk UUIDs, its encrypted disk's mapping name\n\
              and snapshot names.",
-            "\nKnown limit: the unlock lines in step 2 are untried in a recovery so far.",
+            "\nKnown limit: step 2's unlock lines have run in a recovery once, on Pop!_OS's\n\
+             standard encrypted install; the \"in use\" case under them is untried.",
             "first mount line",
         )
     } else {
@@ -322,7 +323,7 @@ mod tests {
             only_here.iter().all(|line| !line.contains("rsync")),
             "{only_here:#?}"
         );
-        assert!(note.contains("Known limit: the unlock lines"));
+        assert!(note.contains("Known limit: step 2's unlock lines"));
         assert!(!plain.contains("cryptsetup") && !plain.contains("vgchange"));
         assert!(note.is_ascii() && !note.contains('@'));
     }

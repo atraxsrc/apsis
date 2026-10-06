@@ -245,8 +245,9 @@ starts from either boot entry, the way back is the window: restore the safety sn
 
    If `luksOpen` says the device is in use, the live system opened it under another name,
    which `lsblk` shows below the partition: `sudo vgchange -an`, then `sudo cryptsetup close
-   <that name>`, then the two lines again. **Known limit:** these unlock lines are untried
-   in a recovery so far.
+   <that name>`, then the two lines again. **Known limit:** the two unlock lines have run
+   in a recovery once (2026-10-06, Pop!_OS's standard encrypted install, the same
+   installation); the "in use" case has not.
 
    Mount the system disk, its boot partition (ESP) and the backup disk, read-only:
 

@@ -8,7 +8,8 @@ If this note and last-restore.note (step 2) differ, follow last-restore.note.
 A restore never touches the recovery partition or the Pop_OS-oldkern entry;
 step 2 rebuilds that entry's initrd and rewrites its files on the ESP.
 Known limit: these lines are untried after a restore that changed the kernel.
-Known limit: the unlock lines in step 2 are untried in a recovery so far.
+Known limit: step 2's unlock lines have run in a recovery once, on Pop!_OS's
+standard encrypted install; the "in use" case under them is untried.
 
 1. At power-on, hold Space for the systemd-boot menu and pick Pop!_OS Recovery,
    or boot a Pop!_OS live USB of the same version.
