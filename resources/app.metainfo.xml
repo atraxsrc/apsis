@@ -63,19 +63,19 @@
   <screenshots>
     <screenshot type="default">
       <caption>The window: the snapshot list, the last snapshot and the backup disk</caption>
-      <image type="source" width="733" height="528">https://raw.githubusercontent.com/atraxsrc/apsis/0da47b99312103bac2f07c8b4ce9232179203cff/docs/1.png</image>
+      <image type="source" width="733" height="528">https://raw.githubusercontent.com/atraxsrc/apsis/d3998ee2f7846b5e44db008b2148e8136f803ecd/docs/1.png</image>
     </screenshot>
     <screenshot>
       <caption>The panel popup: a read-only overview</caption>
-      <image type="source" width="359" height="342">https://raw.githubusercontent.com/atraxsrc/apsis/0da47b99312103bac2f07c8b4ce9232179203cff/docs/4.png</image>
+      <image type="source" width="359" height="342">https://raw.githubusercontent.com/atraxsrc/apsis/d3998ee2f7846b5e44db008b2148e8136f803ecd/docs/4.png</image>
     </screenshot>
     <screenshot>
       <caption>Settings: the disk where snapshots are saved</caption>
-      <image type="source" width="733" height="528">https://raw.githubusercontent.com/atraxsrc/apsis/0da47b99312103bac2f07c8b4ce9232179203cff/docs/2.png</image>
+      <image type="source" width="733" height="528">https://raw.githubusercontent.com/atraxsrc/apsis/d3998ee2f7846b5e44db008b2148e8136f803ecd/docs/2.png</image>
     </screenshot>
     <screenshot>
       <caption>Settings: include /root and /home; the system is always included</caption>
-      <image type="source" width="733" height="528">https://raw.githubusercontent.com/atraxsrc/apsis/0da47b99312103bac2f07c8b4ce9232179203cff/docs/3.png</image>
+      <image type="source" width="733" height="528">https://raw.githubusercontent.com/atraxsrc/apsis/d3998ee2f7846b5e44db008b2148e8136f803ecd/docs/3.png</image>
     </screenshot>
   </screenshots>
   <releases>
