@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! `timeshift/apsis-restore-RECOVER.txt` on the backup disk (PLAN 6b.11): the README's "If a
+//! `timeshift/apsis-restore-RECOVER.txt` on the backup disk: the README's "If a
 //! restore goes wrong" steps with this machine's UUIDs and the snapshots' names filled in,
 //! written while preparing. Two complete commands, one to restore the same snapshot again
 //! and one to go back to the safety snapshot, so nobody edits a line in the recovery. It
@@ -17,8 +17,8 @@ use super::refusal::Unlocking;
 /// The note's name, in the backup disk's `timeshift/` folder next to `snapshots/`.
 pub const FILE: &str = "apsis-restore-RECOVER.txt";
 
-/// The note's working copy in the state folder, beside the filter and with its lifetime
-/// (PLAN 6b.5): the same text as on the backup disk.
+/// The note's working copy in the state folder, beside the filter and with its lifetime:
+/// the same text as on the backup disk.
 pub const NOTE_FILE: &str = "restore.note";
 
 /// The copy of [`NOTE_FILE`] that an arm keeps: the note of the last restore that was armed.

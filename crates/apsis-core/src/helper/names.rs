@@ -46,7 +46,7 @@ pub const METHOD_READ_CONFIG: &str = "ReadConfig";
 /// still reads `expected` (empty: there's none yet). See [`super::WireConfig`].
 pub const METHOD_WRITE_CONFIG: &str = "WriteConfig";
 /// `CheckRestore(s snapshot) -> (b ok, s refusal, b has_home, b has_root, b old_format,
-/// s apsis_note)` (0.5.0): the 6b.7 checks for the Restore dialog, on the shared read-only
+/// s apsis_note)` (0.5.0): the refusal checks for the Restore dialog, on the shared read-only
 /// mount. A read, like `List`. `refusal` is a stable word per refusal, decoded by core.
 pub const METHOD_CHECK_RESTORE: &str = "CheckRestore";
 /// `Restore(s snapshot, b restore_home, b safety_snapshot)` (0.5.0): prepares a full-system

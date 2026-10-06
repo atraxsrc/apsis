@@ -245,7 +245,7 @@ fn prepare<R: Runner>(runner: &R) -> Result<(NativeConfig, Device)> {
 }
 
 /// [`prepare`], with Apsis's config changed by `adjust` first (the safety snapshot of a
-/// restore that restores home takes `/home` whatever the Include setting says, PLAN 6b.4).
+/// restore that restores home takes `/home` whatever the Include setting says).
 fn prepare_with<R: Runner>(
     runner: &R,
     adjust: impl FnOnce(&mut Config),
@@ -286,8 +286,8 @@ pub fn open<R: Runner + Clone>(
     Ok((backend(config, log), mounted))
 }
 
-/// The native backend on the backup device, mounted read-write for a restore's preparation
-/// (PLAN 6b.4): the dry runs read it, the safety snapshot and the recovery note write it.
+/// The native backend on the backup device, mounted read-write for a restore's preparation:
+/// the dry runs read it, the safety snapshot and the recovery note write it.
 /// With `include_home`, the safety snapshot takes `/home` whatever the Include setting says.
 ///
 /// # Errors
@@ -334,7 +334,7 @@ fn mount<R: Runner + Clone>(
 }
 
 /// Mounts the filesystem `uuid` at `mount_point` until the guard drops: the apply's read-only
-/// mount of the backup disk in the offline boot (PLAN 6b.6 step 2), where there's no config
+/// mount of the backup disk in the offline boot, where there's no config
 /// to read the device from, only the plan's UUID.
 ///
 /// # Errors

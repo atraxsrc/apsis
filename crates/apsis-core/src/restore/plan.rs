@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! `request.json`: the plan of a prepared restore (PLAN 6b.9).
+//! `request.json`: the plan of a prepared restore.
 //!
 //! Written when the preparation ends ("ready"), read at "Restart now" and by the apply in
 //! the next boot. Format and rules: [`super::file`].
@@ -15,7 +15,7 @@ use super::recover;
 
 pub const FILE: &str = "request.json";
 
-/// The preparation's working files beside the plan (PLAN 6b.5): the filter and the recovery
+/// The preparation's working files beside the plan: the filter and the recovery
 /// note. They're removed where the plan is, and never with the arm's files alone: the arm
 /// copies them, and the apply reads the filter in every attempt.
 pub const WORKING_FILES: [&str; 2] = [filter::FILE, recover::NOTE_FILE];
@@ -27,17 +27,17 @@ pub const KEPT: [(&str, &str); 2] = [
     (recover::NOTE_FILE, recover::LAST_NOTE_FILE),
 ];
 
-/// How long a plan may wait on the ready prompt (PLAN 6b.5): 30 minutes.
+/// How long a plan may wait on the ready prompt: 30 minutes.
 pub const MAX_AGE_SECS: i64 = 30 * 60;
 
 /// How far ahead of the clock `prepared_at` may be before the plan's age counts as unknown.
 pub const MAX_FUTURE_SECS: i64 = 2 * 60;
 
-/// `RestartToRestore`'s refusal (as `InvalidInput`) for a plan older than [`MAX_AGE_SECS`]
-/// (PLAN 6b.5): the window says "The preparation is too old. Start the restore again."
+/// `RestartToRestore`'s refusal (as `InvalidInput`) for a plan older than [`MAX_AGE_SECS`]:
+/// the window says "The preparation is too old. Start the restore again."
 pub const TOO_OLD: &str = "the preparation is too old";
 /// `RestartToRestore`'s and `CancelRestore`'s refusal (as `InvalidInput`) when the helper has
-/// no plan for the snapshot (PLAN 6b.9): "The preparation is gone. Start the restore again."
+/// no plan for the snapshot: "The preparation is gone. Start the restore again."
 pub const GONE: &str = "the preparation is gone";
 
 const KEYS: [&str; 12] = [
@@ -503,7 +503,7 @@ mod tests {
         );
     }
 
-    /// PLAN 6b.3: a kept `/home` is never entered, so it has no partition to check.
+    /// A kept `/home` is never entered, so it has no partition to check.
     #[test]
     fn a_separate_home_with_home_kept_is_refused() {
         let text = with_separate_home()
@@ -590,7 +590,7 @@ mod tests {
         assert!(matches!(Plan::load(&dir), Err(FileError::Io(_))));
     }
 
-    /// PLAN 6b.5: a plan left on the ready prompt for more than 30 minutes is too old.
+    /// A plan left on the ready prompt for more than 30 minutes is too old.
     #[test]
     fn a_plan_is_too_old_after_thirty_minutes() {
         let plan = plan();

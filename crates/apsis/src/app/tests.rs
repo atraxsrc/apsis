@@ -1584,7 +1584,7 @@ fn screenshots() {
     }
 }
 
-// ---- Restore (0.5.0, PLAN 6b.8 and 6b.12) ----
+// ---- Restore (0.5.0) ----
 
 mod restore {
     use apsis_core::restore::apsis::InSnapshot;
@@ -2454,7 +2454,7 @@ mod restore {
         assert_eq!(tone(Outcome::NotStarted, WHY), None);
     }
 
-    /// Every restore state the window can show, by name (PLAN 6b.8's preview states).
+    /// Every restore state the window can show, by name.
     fn states() -> Vec<(&'static str, AppModel)> {
         let checked = |check: Check| {
             let mut app = window();
@@ -2607,7 +2607,7 @@ mod restore {
         ]
     }
 
-    /// Every restore state at 0.4.0's default and smallest window (PLAN 6b.12): each dialog,
+    /// Every restore state at 0.4.0's default and smallest window: each dialog,
     /// buttons included, is at most the window's height minus 16 px (it's centred over the
     /// whole window, header included), and the page under it fits. With `APSIS_SCREENSHOTS`
     /// set, each is also written as `restore-<state>-<w>x<h>.rgba` (as `screenshots` writes

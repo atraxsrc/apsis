@@ -34,7 +34,7 @@ const SIGN_WIDTH: f32 = 12.0;
 /// Height of the disk and progress bars.
 const BAR_GIRTH: f32 = 8.0;
 /// What the restore dialog needs besides its scrolling body: its padding, title, the muted
-/// line, the gaps and the button row, plus a margin to the window's edges (PLAN 6b.8). The
+/// line, the gaps and the button row, plus a margin to the window's edges. The
 /// body scrolls within the window's height minus this, so the buttons always show.
 const DIALOG_CHROME: f32 = 216.0;
 
@@ -250,7 +250,7 @@ impl AppModel {
                 .leading_icon(icon::from_name("list-add-symbolic"))
                 .on_press_maybe(self.can_create().then_some(Message::CreateClicked))
                 .into(),
-            // Restore (PLAN 6b.8): no tooltip, no key.
+            // Restore: no tooltip, no key.
             widget::button::standard(fl!("restore"))
                 .leading_icon(icon::from_name("document-revert-symbolic"))
                 .on_press_maybe(self.can_restore().then_some(Message::RestoreClicked))
@@ -733,7 +733,7 @@ impl AppModel {
                     widget::button::standard(fl!("keep-going")).on_press(Message::DialogCancel),
                 )
                 .into(),
-            // Two answers; nothing is armed until Restart now (PLAN 6b.5). Esc cancels.
+            // Two answers; nothing is armed until Restart now. Esc cancels.
             // The date and comment first: the last place to see which row this is (owner,
             // 2026-10-02, after check 1 restored a safety snapshot by mistake).
             Dialog::Ready { snapshot } => widget::dialog()
@@ -761,7 +761,7 @@ impl AppModel {
         })
     }
 
-    /// The one restore dialog (PLAN 6b.8): the title, a muted line, and a body that scrolls
+    /// The one restore dialog: the title, a muted line, and a body that scrolls
     /// within the window so the buttons always show. The radios are the Location tab's
     /// pattern, the checkbox the Include tab's.
     fn restore_dialog(
@@ -851,7 +851,7 @@ impl AppModel {
             .into()
     }
 
-    /// The last restore's result (PLAN 6b.8, "After login"): plain for done and not-started,
+    /// The last restore's result: plain for done and not-started,
     /// else the colour on the phrase only (`result_phrase`), the full text in a tooltip, and
     /// Restore again after a failure.
     fn restore_result_line(&self) -> Option<Element<'_, Message>> {
@@ -1180,7 +1180,7 @@ fn notes(lines: &[String]) -> Element<'_, Message> {
 
 /// Secondary text: the theme's text colour, faded.
 /// `before`, then `phrase` in `role`'s colour, then `after` in the normal text colour, the
-/// last part wrapping instead of being cut off (PLAN 6b.8's result lines).
+/// last part wrapping instead of being cut off.
 fn phrase_line<'a>(
     before: String,
     phrase: String,

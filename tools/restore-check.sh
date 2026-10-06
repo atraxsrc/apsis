@@ -1,5 +1,5 @@
 #!/bin/sh
-# Apsis: read-only checks after a full-system restore (PLAN 6b.12, "Harness on apsis-test").
+# Apsis: read-only checks after a full-system restore.
 # Run as root on the restored machine: sudo tools/restore-check.sh
 # Prints what it finds; changes nothing. Each "FAIL" line is something to look at.
 set -u

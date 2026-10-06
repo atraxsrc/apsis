@@ -680,7 +680,7 @@ mod tests {
         );
     }
 
-    /// A restore the helper refused (PLAN 6b.7) travels as the refusal's word, so the applet
+    /// A restore the helper refused travels as the refusal's word, so the applet
     /// shows the right dialog.
     #[test]
     fn a_refused_restore_survives_the_bus() {

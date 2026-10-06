@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! What the restore's plan and state files share (PLAN 6b.9): where they are, their version,
+//! What the restore's plan and state files share: where they are, their version,
 //! how they're written and how they're read back.
 //!
 //! Each file is one JSON object with `"version"` first. A file is taken whole or not at all:
@@ -360,7 +360,7 @@ pub(super) mod tests {
         assert_eq!(names, ["a.json"]);
     }
 
-    /// The arm's copies (PLAN 6b.5): byte for byte, for the owner only, over what was
+    /// The arm's copies: byte for byte, for the owner only, over what was
     /// there, with no temporary file left.
     #[test]
     fn copies_are_byte_for_byte_and_replace_their_targets() {
@@ -531,7 +531,7 @@ pub(super) mod tests {
         assert!(open_nofollow(&dir.join("real.json")).is_ok());
     }
 
-    /// PLAN 6b.2: the folder with `request.json`, `state.json` and `result.json` is under a
+    /// The folder with `request.json`, `state.json` and `result.json` is under a
     /// protected path.
     #[test]
     fn the_state_folder_is_on_the_protect_list() {

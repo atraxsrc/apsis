@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! `CheckRestore`'s reads (PLAN 6b.7, 6b.9): what the live system and the snapshot look like,
+//! `CheckRestore`'s reads: what the live system and the snapshot look like,
 //! read into text and names for core's pure checks, and the dialog built from them.
 
 use std::fs::{self, File};
@@ -191,7 +191,7 @@ impl SnapshotFiles {
     }
 }
 
-/// The dialog for `snapshot` on `live` (PLAN 6b.7's order, then the lines that aren't
+/// The dialog for `snapshot` on `live` (the refusals in order, then the lines that aren't
 /// refusals).
 #[must_use]
 pub fn dialog(live: &Live, snapshot: &SnapshotFiles) -> Dialog {

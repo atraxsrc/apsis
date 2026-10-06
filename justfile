@@ -23,7 +23,7 @@ icon-symbolic-dst := icons-dir / 'symbolic' / 'apps' / appid + '-symbolic.svg'
 # time stamp, so the file is the same on every build (lintian checks this).
 man-dst := base-dir / 'share' / 'man' / 'man1' / name + '.1.gz'
 
-# Privileged helper (Phase 4): the binary, D-Bus activation and bus policy, systemd unit, and
+# Privileged helper: the binary, D-Bus activation and bus policy, systemd unit, and
 # polkit actions. `libexec-path` is where the helper lives at run time (written into the
 # activation file and unit); the *-dst paths include rootdir.
 helper := 'apsis-helper'
@@ -76,7 +76,7 @@ check *args:
 # Runs a clippy check with JSON message format
 check-json: (check '--message-format=json')
 
-# Native backend (Phase 5): a 128 MB ext4 image for its tests, made without root. The user
+# Native backend: a 128 MB ext4 image for its tests, made without root. The user
 # mounts it (the one step needing root), then `just test-ext4` runs the tests on it.
 ext4-dir := cargo-target-dir / 'native-ext4'
 

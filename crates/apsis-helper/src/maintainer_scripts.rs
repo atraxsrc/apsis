@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The .deb's maintainer scripts (`resources/deb/`), run and not only read (PLAN 6b.9; fix 1
+//! The .deb's maintainer scripts (`resources/deb/`), run and not only read (fix 1
 //! and 1b).
 //!
 //! Each script names its paths once, as variables at its top. A test runs a copy in which
@@ -716,7 +716,7 @@ fn postrm_remove_removes_apsis_link_and_the_unit_files() {
     }
 }
 
-/// `postrm purge` (PLAN 6b.13 step 3 item 10): what `remove` removes, and the config and
+/// `postrm purge`: what `remove` removes, and the config and
 /// the restore's state folder too. `/system-update` only when it's Apsis's link. Snapshots
 /// are never touched.
 #[test]

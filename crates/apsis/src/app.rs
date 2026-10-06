@@ -3,7 +3,7 @@
 //! Apsis's UI: the panel button (icon, optional label, tooltip, right-click menu), its
 //! read-only popup, and the window (`apsis --window`), laid out like Timeshift's: a toolbar,
 //! the snapshot list and a status area, with the settings as tabs. Standard libcosmic widgets
-//! and COSMIC theme colours only (`docs/APSIS-UI-PROMPT.md`).
+//! and COSMIC theme colours only.
 //!
 //! State and updates are here; drawing is in `view`.
 
@@ -252,7 +252,7 @@ pub struct AppModel {
     own_job_ended: bool,
     /// `CheckRestore` is running for this snapshot (the dialog opens when it answers).
     checking: Option<String>,
-    /// This window's restore plan waits at the ready prompt (PLAN 6b.5): the helper refuses
+    /// This window's restore plan waits at the ready prompt: the helper refuses
     /// writes until "Restart now" or "Cancel restore".
     ready: Option<String>,
     /// `CancelRestore` / `RestartToRestore` is on its way to the helper.
@@ -260,7 +260,7 @@ pub struct AppModel {
     restarting: bool,
     /// The last restore's outcome (`RestoreResult`), shown on the status line after login.
     restore_result: Option<RestoreResult>,
-    /// The window's height, for the restore dialog's scrolling body (PLAN 6b.8).
+    /// The window's height, for the restore dialog's scrolling body.
     window_height: f32,
 }
 
@@ -364,7 +364,7 @@ pub enum CliError {
         left: Vec<String>,
         reason: Box<CliError>,
     },
-    /// The helper refused a full-system restore (PLAN 6b.7). Nothing ran, or (from "Restart
+    /// The helper refused a full-system restore. Nothing ran, or (from "Restart
     /// now") the plan was dropped.
     RestoreRefused(Refusal),
     /// The helper refused a delete because a restore is armed and waits for the restart.
@@ -416,7 +416,7 @@ pub enum Operation {
     /// Several, as one job in the helper (`DeleteMany`), in list order; it stops at the first
     /// failure and says what was deleted.
     DeleteMany(Vec<String>),
-    /// A full-system restore's preparation (PLAN 6b.4): ends "ready" at the prompt.
+    /// A full-system restore's preparation: ends "ready" at the prompt.
     Restore {
         snapshot: String,
         restore_home: bool,
@@ -468,7 +468,7 @@ pub enum Dialog {
     AddPattern { text: String, error: Option<String> },
     /// Leaving the settings with unsaved changes.
     Unsaved,
-    /// Restore `snapshot` (PLAN 6b.8): what `CheckRestore` said, and the two choices.
+    /// Restore `snapshot`: what `CheckRestore` said, and the two choices.
     Restore {
         snapshot: String,
         check: Check,
@@ -502,7 +502,7 @@ impl Dialog {
     }
 
     /// The restore dialog's extra lines, in order: no home in the snapshot, the old format,
-    /// which Apsis the snapshot holds (PLAN 6b.8).
+    /// which Apsis the snapshot holds.
     fn extra_lines(&self) -> Vec<String> {
         let Self::Restore { check, .. } = self else {
             return Vec::new();
@@ -548,7 +548,7 @@ impl Dialog {
     }
 }
 
-/// Each refusal's two lines (PLAN 6b.8's string table).
+/// Each refusal's two lines.
 fn refusal_lines(refusal: &Refusal) -> (String, String) {
     let size = apsis_core::status::size;
     match refusal {
@@ -635,7 +635,7 @@ enum Tone {
     Error,
 }
 
-/// A result line in three parts (PLAN 6b.8): `phrase` carries the colour, `before` and
+/// A result line in three parts: `phrase` carries the colour, `before` and
 /// `after` are plain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResultPhrase {
@@ -758,7 +758,7 @@ pub enum Message {
     Connected(Link),
     /// The connection to the system bus ended: the job subscription's stream closed.
     BusLost,
-    /// Toolbar: Restore (PLAN 6b.8). Asks the helper's `CheckRestore` first.
+    /// Toolbar: Restore. Asks the helper's `CheckRestore` first.
     RestoreClicked,
     /// `CheckRestore` answered for this snapshot.
     Checked(String, Result<Check, CliError>),
@@ -1165,7 +1165,7 @@ impl AppModel {
                 _ => {}
             },
             Message::DialogConfirm => return self.confirm_dialog(),
-            // Closing the ready prompt is Cancel restore (PLAN 6b.5).
+            // Closing the ready prompt is Cancel restore.
             Message::DialogCancel if matches!(self.dialog, Some(Dialog::Ready { .. })) => {
                 return self.cancel_restore();
             }
@@ -1509,7 +1509,7 @@ impl AppModel {
             && !self.restarting
     }
 
-    /// Whether Restore can start (PLAN 6b.8): as for create, with exactly one snapshot (not a
+    /// Whether Restore can start: as for create, with exactly one snapshot (not a
     /// leftover) selected.
     fn can_restore(&self) -> bool {
         let selected = self.selected_names();
@@ -1563,7 +1563,7 @@ impl AppModel {
         }
     }
 
-    /// "Restart now": the helper re-checks, arms and restarts (PLAN 6b.5).
+    /// "Restart now": the helper re-checks, arms and restarts.
     fn restart_now(&mut self) -> Task<cosmic::Action<Message>> {
         let Some(Dialog::Ready { snapshot }) = self.dialog.take() else {
             return Task::none();
@@ -1628,7 +1628,7 @@ impl AppModel {
         self.start_list()
     }
 
-    /// After a failed restore: the normal dialog for the same snapshot (PLAN 6b.10).
+    /// After a failed restore: the normal dialog for the same snapshot.
     fn restore_again(&mut self) -> Task<cosmic::Action<Message>> {
         let Some(name) = self
             .restore_result
@@ -1719,7 +1719,7 @@ impl AppModel {
         })
     }
 
-    /// The last restore's line for the status area (PLAN 6b.8, "After login") and its tooltip.
+    /// The last restore's line for the status area and its tooltip.
     fn result_text(&self) -> Option<(String, String)> {
         let result = self.restore_result.as_ref()?;
         let ResultState::Ended(outcome) = result.state else {
@@ -1771,7 +1771,7 @@ impl AppModel {
         Some((line, tooltip))
     }
 
-    /// `Preparing restore · …` and how far (PLAN 6b.8): this window's preparation, its ready
+    /// `Preparing restore · …` and how far: this window's preparation, its ready
     /// plan, or another window's restore job.
     fn restore_progress(&self) -> (String, Option<f32>) {
         if self.ready.is_some() {
@@ -1998,7 +1998,7 @@ impl AppModel {
     }
 
     /// The job to show in the status area: this window's, or another's create, delete or
-    /// restore (a ready plan elsewhere holds the toolbar too, PLAN 6b.9).
+    /// restore (a ready plan elsewhere holds the toolbar too).
     fn active_job(&self) -> Option<&Job> {
         self.job
             .as_ref()
@@ -2214,7 +2214,7 @@ impl AppModel {
     }
 
     /// This window's restore preparation ended: ready at the prompt, refused, stopped or
-    /// failed (PLAN 6b.5, 6b.8). The list is refreshed for the safety snapshot, which a
+    /// failed. The list is refreshed for the safety snapshot, which a
     /// ready plan doesn't block (reads go through).
     fn on_restore_finished(
         &mut self,
@@ -2710,7 +2710,7 @@ fn read_restore_result(link: Link) -> Task<cosmic::Action<Message>> {
     })
 }
 
-/// The lines for a plan the helper no longer has, or has had too long (PLAN 6b.5, 6b.9);
+/// The lines for a plan the helper no longer has, or has had too long;
 /// anything else is `fallback`.
 fn plan_error_text(error: &CliError, fallback: &str) -> String {
     match error {

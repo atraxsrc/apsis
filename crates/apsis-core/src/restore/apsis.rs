@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Which Apsis a snapshot holds (PLAN 6b.2).
+//! Which Apsis a snapshot holds.
 //!
 //! Apsis's packaged files aren't protected: they come back as the snapshot has them, together
 //! with the snapshot's dpkg database. So after a restore the installed Apsis is the
@@ -10,8 +10,7 @@
 /// The package's name in dpkg's database.
 const PACKAGE: &str = "apsis";
 
-/// What a restore leaves of Apsis. Each but [`InSnapshot::Current`] has a dialog line (PLAN
-/// 6b.8's table).
+/// What a restore leaves of Apsis. Each but [`InSnapshot::Current`] has a dialog line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InSnapshot {
     /// An Apsis that restores (0.5 or later): nothing to say.

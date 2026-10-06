@@ -141,7 +141,7 @@ impl Helper {
     }
 
     /// Whether `snapshot` can be restored on this computer, and what the Restore dialog says
-    /// (PLAN 6b.7, 6b.9; polkit: `list`, no password). A read like `List`: it shares the
+    /// (polkit: `list`, no password). A read like `List`: it shares the
     /// read-only mount, is never a job, and is refused `Busy` while a write runs or waits.
     /// `snapshot` must be a snapshot name the fresh list has (not a leftover).
     async fn check_restore(
@@ -183,7 +183,7 @@ impl Helper {
         Ok(dialog::to_wire(&result?))
     }
 
-    /// Prepares a full-system restore of `snapshot` (PLAN 6b.4, 6b.9; polkit: `restore`,
+    /// Prepares a full-system restore of `snapshot` (polkit: `restore`,
     /// asked every time) and returns; `Finished("restore", ok, ..)` follows, `ok` meaning the
     /// plan is ready at the prompt. The checks again, both dry runs and the space checks, the
     /// safety snapshot (with `/home` when `restore_home`), the plan files, the recovery note.
@@ -268,7 +268,7 @@ impl Helper {
         )
     }
 
-    /// "Restart now" (PLAN 6b.5, 6b.9): re-checks the ready plan for `snapshot` (its age,
+    /// "Restart now": re-checks the ready plan for `snapshot` (its age,
     /// the space on each destination, the ESP's space and boot files, both update-link names,
     /// a Pop!_OS upgrade), arms the next boot (unit, wants link, drop-in, helper copy,
     /// `state.json`, sync, then `/system-update` last; before any of it the plan's filter and
@@ -321,7 +321,7 @@ impl Helper {
                 if outcome.is_err() {
                     // Nothing may stay armed after a refusal: a link, or what an arm that
                     // was cut short wrote, goes here. The plan's own end, and its line in
-                    // the journal, is `remove_plan`'s below (PLAN 6b.5).
+                    // the journal, is `remove_plan`'s below.
                     match arm::disarm(&arm::Paths::system()) {
                         Ok(removed) => {
                             let of_the_arm: Vec<&str> = removed
@@ -374,7 +374,7 @@ impl Helper {
         Ok(result?)
     }
 
-    /// "Cancel restore" at the ready prompt (PLAN 6b.5, 6b.9): removes the plan (nothing is
+    /// "Cancel restore" at the ready prompt: removes the plan (nothing is
     /// armed yet; a finished safety snapshot stays) and the job ends `stopped`. No password
     /// for the uid that prepared the plan; polkit `restore` for anyone else. With no plan:
     /// `InvalidInput` with [`plan::GONE`]. The plan is taken as "Restart now" takes it, so
@@ -412,7 +412,7 @@ impl Helper {
         Ok(result?)
     }
 
-    /// How the restore stands (PLAN 6b.9; polkit: `list`, no password): `ready` while a plan
+    /// How the restore stands (polkit: `list`, no password): `ready` while a plan
     /// waits at the prompt, else the last `result.json`'s outcome, snapshot, message, time,
     /// home choice and safety snapshot (`""` and `0` for a `null` snapshot or time, `""` for
     /// no safety snapshot), else nothing. A read of a file, never a job and never refused.
@@ -905,8 +905,8 @@ impl Helper {
     }
 }
 
-/// The live re-checks of "Restart now" (PLAN 6b.4, 6b.5, 6b.7) and the arm (PLAN 6b.5's
-/// order, then the disarm timer). The plan on disk must be `snapshot`'s and fresh.
+/// The live re-checks of "Restart now" and the arm (in its order, then the disarm timer).
+/// The plan on disk must be `snapshot`'s and fresh.
 fn check_and_arm(snapshot: &str, mount: &Arc<SharedMount<DirectRunner>>) -> apsis_core::Result<()> {
     let paths = arm::Paths::system();
     let refused = |refusal: Refusal| Error::RestoreRefused(refusal.to_wire());
@@ -1037,7 +1037,7 @@ async fn reboot(connection: &Connection) -> apsis_core::Result<()> {
         .map_err(|e| Error::Helper(format!("logind refused the restart: {e}")))
 }
 
-/// Ends a ready plan that isn't going to be restarted with (PLAN 6b.5, 6b.9): its files in
+/// Ends a ready plan that isn't going to be restarted with: its files in
 /// the state folder go (the last `result.json` stays), the journal says `why`, and the job
 /// ends `stopped`, announced before this returns. `ready` holds the plan in its slot and
 /// the job lock on disk until then, so no write and no package script gets in while the
@@ -1072,8 +1072,8 @@ async fn remove_plan_with(
 }
 
 /// Watches the bus for the connection that prepared the ready plan leaving it (the window
-/// closed, crashed or logged out without answering the prompt): the plan is removed at once
-/// (PLAN 6b.9). Runs as long as the helper does.
+/// closed, crashed or logged out without answering the prompt): the plan is removed at once.
+/// Runs as long as the helper does.
 pub async fn watch_starters(connection: Connection, state: Arc<State>) {
     let Ok(bus) = DBusProxy::new(&connection).await else {
         log("couldn't watch the bus for the plan's window; a plan outlives a closed window");

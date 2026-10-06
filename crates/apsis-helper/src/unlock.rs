@@ -5,8 +5,7 @@
 //! `refusal::is_restorable_root` lets an encrypted Pop!_OS install through).
 //!
 //! The refreshed ESP must find and unlock `/` the way the ESP that booted this system did.
-//! What fails it fails the boot refresh, so the apply puts the boot files back (PLAN 6b.6
-//! step 6).
+//! What fails it fails the boot refresh, so the apply puts the boot files back.
 //!
 //! The same installation only. `/etc/fstab` and `/etc/crypttab` aren't copied (the filter's
 //! `DISKS`), a snapshot of another root UUID or with another crypttab is refused before

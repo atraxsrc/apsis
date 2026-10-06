@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The boot files on the ESP (PLAN 6b.6, steps 4 and 6): their backup before the boot
+//! The boot files on the ESP: their backup before the boot
 //! refresh, the check after it, and putting them back when the check fails.
 //!
 //! kernelstub boots the kernel and initrd from copies on the ESP. After the copy, the boot
@@ -37,7 +37,7 @@ const TEMP_SUFFIX: &str = ".apsis-tmp";
 /// FAT rounds each file up to its clusters.
 const ESP_MARGIN: u64 = 16 << 20;
 
-/// The files of the ESP that the boot refresh rewrites (PLAN 6b.6 step 4), in [`SET`]'s
+/// The files of the ESP that the boot refresh rewrites, in [`SET`]'s
 /// order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootFile {
@@ -86,7 +86,7 @@ const fn row(file: BootFile, folder: Folder, name: &'static str, required: bool)
 /// `initrd.img-previous`). The previous pair and the oldkern entry aren't there on a machine
 /// with one kernel installed.
 ///
-/// Never here (PLAN 6b.6 step 4): `loader/entries/Recovery-*`, `loader/loader.conf`,
+/// Never here: `loader/entries/Recovery-*`, `loader/loader.conf`,
 /// `loader/random-seed`, `loader/entries.srel`, `EFI/BOOT/`, `EFI/systemd/`.
 const SET: [Row; BootFile::COUNT] = [
     row(BootFile::Kernel, Folder::Kernels, "vmlinuz.efi", true),
@@ -346,7 +346,7 @@ fn entry(map: &Map<String, Value>, file: BootFile) -> Result<Option<Entry>, File
     .map_err(|error: FileError| error.within(&format!("{name:?}")))
 }
 
-/// Copies the boot files from the ESP to `state_dir/esp-backup/` (PLAN 6b.6 step 4): each
+/// Copies the boot files from the ESP to `state_dir/esp-backup/`: each
 /// flushed and compared byte for byte with the original, then the manifest with each file's
 /// size and SHA-256, written last. A backup that fails leaves no folder behind.
 ///
@@ -430,7 +430,7 @@ pub fn verify(state_dir: &Path) -> Result<Manifest, EspError> {
     Ok(manifest)
 }
 
-/// Puts the backed-up files back on the ESP (PLAN 6b.6 step 6, "boot files failed"). The
+/// Puts the backed-up files back on the ESP. The
 /// whole backup is verified first, so a damaged file is never written. Then each file is
 /// written to a temporary name in its folder, flushed, renamed over the ESP's, and compared
 /// byte for byte with the backup. A file that wasn't backed up is left alone.
@@ -531,7 +531,7 @@ pub fn clear_temporaries(esp: &Path, root_uuid: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Removes the backup (PLAN 6b.6 step 8). No backup is fine.
+/// Removes the backup. No backup is fine.
 ///
 /// # Errors
 ///
@@ -543,7 +543,7 @@ pub fn remove(state_dir: &Path) -> io::Result<()> {
     }
 }
 
-/// What the check found wrong with a kernel pair on the ESP (PLAN 6b.6 step 6): the current
+/// What the check found wrong with a kernel pair on the ESP: the current
 /// pair against `/boot/vmlinuz` and `/boot/initrd.img`, or the previous pair against
 /// `/boot/vmlinuz.old` and `/boot/initrd.img.old`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -625,7 +625,7 @@ pub struct Checked {
 /// against `/boot/vmlinuz.old` and `/boot/initrd.img.old`, and what's wrong with it is
 /// reported in [`Checked::previous`].
 ///
-/// `root` is the tree the ESP is checked against (PLAN 6b.6): the live system before arming
+/// `root` is the tree the ESP is checked against: the live system before arming
 /// ([`check_before_arming`]), and the restored tree after the boot refresh in the apply. In
 /// the apply, that both commands exited 0 is the caller's to check.
 ///
@@ -662,7 +662,7 @@ pub fn check(esp: &Path, root: &Path, root_uuid: &str) -> Result<Checked, CheckF
     Ok(Checked { version, previous })
 }
 
-/// [`check`] against the live system, before arming (PLAN 6b.7): rule 10 keeps the kernel
+/// [`check`] against the live system, before arming: rule 10 keeps the kernel
 /// the ESP boots, so the ESP must boot what `/boot` links to.
 ///
 /// # Errors
@@ -756,7 +756,7 @@ pub struct EspSizes {
 /// margin.
 ///
 /// Nothing of this is kept in `request.json`: the needs and the free space (a `statvfs` of
-/// the ESP) are both read live, when preparing and again at "Restart now" (PLAN 6b.4).
+/// the ESP) are both read live, when preparing and again at "Restart now".
 #[must_use]
 pub fn esp_needs(on_esp: EspSizes, restored: EspSizes) -> u64 {
     let none = BootSizes {
@@ -1137,7 +1137,7 @@ pub(in crate::restore) mod tests {
         assert_eq!(optional, PREVIOUS);
     }
 
-    /// PLAN 6b.6 step 4: the recovery entry and its folder, the loader's own files and the
+    /// The recovery entry and its folder, the loader's own files and the
     /// other loaders are never in the list.
     #[test]
     fn nothing_else_on_the_esp_is_in_the_list() {
@@ -1402,7 +1402,7 @@ pub(in crate::restore) mod tests {
         }
     }
 
-    /// Whether an earlier backup is kept or taken again is the caller's (PLAN 6b.10): a
+    /// Whether an earlier backup is kept or taken again is the caller's: a
     /// backup is never made over one.
     #[test]
     fn a_backup_is_never_made_over_an_earlier_one() {
@@ -1674,7 +1674,7 @@ pub(in crate::restore) mod tests {
         }
     }
 
-    /// PLAN 6b.7: before arming, the same check runs against the live system. A current pair
+    /// Before arming, the same check runs against the live system. A current pair
     /// that isn't `/boot`'s refuses; a previous pair that isn't doesn't.
     #[test]
     fn before_arming_a_previous_pair_that_differs_doesnt_refuse() {
@@ -1805,7 +1805,7 @@ pub(in crate::restore) mod tests {
         assert_eq!(check(&lab.esp, &lab.root, UUID), checked(NEW, good(OLD)));
     }
 
-    /// PLAN 6b.6 steps 4 to 6 for a snapshot from before a kernel update, with a boot
+    /// The boot backup, refresh and check for a snapshot from before a kernel update, with a boot
     /// refresh that goes wrong: the ESP gets back the kernel it booted, whose `/boot` files
     /// and modules the filter's rule 10 kept.
     #[test]
@@ -1864,7 +1864,7 @@ pub(in crate::restore) mod tests {
         assert_eq!(check(&lab.esp, &lab.root, UUID), checked(OLD, good(OLDER)));
     }
 
-    /// PLAN 6b.6 step 4: the recovery entry and folder, `loader.conf`, the random seed,
+    /// The recovery entry and folder, `loader.conf`, the random seed,
     /// `entries.srel`, `EFI/BOOT` and `EFI/systemd` are the same files after a put-back, not
     /// rewritten ones.
     #[test]
@@ -2103,7 +2103,7 @@ pub(in crate::restore) mod tests {
     };
     const REAL_FREE: u64 = 361 * MIB;
 
-    /// The two size readers for the live check at "Restart now" (PLAN 6b.4): the ESP's four
+    /// The two size readers for the live check at "Restart now": the ESP's four
     /// files, and a tree's `/boot` links (the snapshot's). One kernel: no previous pair.
     #[test]
     fn the_sizes_are_read_from_the_esp_and_from_a_boot_folder() {

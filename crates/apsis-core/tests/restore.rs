@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The restore's own rsync argv and filter (PLAN 6b.2, 6b.6 step 3) against a real rsync:
+//! The restore's own rsync argv and filter against a real rsync:
 //! from a temp "snapshot" tree onto a temp "live root" tree, as the tester, without root.
 //!
 //! The argv is [`argv::rsync`] and [`argv::rsync_dry_run`], the filter is [`filter::rules`],
@@ -9,8 +9,7 @@
 //! they work unchanged with a temp folder as `/`.
 //!
 //! Each test skips with a message if rsync isn't installed. What a run without root can't
-//! show is in the ignored tests at the end, each with its reason and its check on apsis-test
-//! (PLAN 6b.12).
+//! show is in the ignored tests at the end, each with its reason and its check on apsis-test.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -169,7 +168,7 @@ fn fill(lab: &Lab) {
     write(s, "etc/fstab", "the snapshot's fstab, of other disks\n");
     write(s, "etc/crypttab", "the snapshot's crypttab\n");
     write(s, "etc/apsis/config.toml", "the snapshot's Apsis config\n");
-    // A drop-in leaked into a snapshot (PLAN 6b.6): the live, protected one stays.
+    // A drop-in leaked into a snapshot: the live, protected one stays.
     write(
         s,
         "etc/systemd/system/pop-upgrade-init.service.d/50-apsis.conf",
@@ -193,7 +192,7 @@ fn fill(lab: &Lab) {
     link(s, "lib", "usr/lib");
     link(s, "etc/out", outside.join("canary"));
     kernel(s, OLD, "from the snapshot");
-    // Snapshots hold a full copy of the ESP (PLAN 6b.0), and may hold anything else.
+    // Snapshots hold a full copy of the ESP, and may hold anything else.
     write(
         s,
         "boot/efi/EFI/Pop_OS/vmlinuz.efi",
@@ -271,7 +270,7 @@ fn fill(lab: &Lab) {
         "state.json",
         "result.json",
         "apsis-helper",
-        // The note beside the filter and the pair an arm keeps (PLAN 6b.5). The filter
+        // The note beside the filter and the pair an arm keeps. The filter
         // itself is written by each run (`Lab::restore`).
         "restore.note",
         "last-restore.filter",
@@ -618,7 +617,7 @@ fn shape(root: &Path) -> BTreeMap<String, Shape> {
     found
 }
 
-/// The excluded paths that aren't on the protect list (PLAN 6b.2, rules 2 to 8).
+/// The excluded paths that aren't on the protect list.
 const EXCLUDED: [&str; 16] = [
     "boot/efi",
     "recovery",
@@ -678,7 +677,7 @@ fn everything_on_the_protect_list_is_untouched() {
         read(&lab.live, "var/lib/apsis/restore/request.json"),
         "request.json"
     );
-    // The four files of the filter's lifetime (PLAN 6b.5) are under the same rule: the
+    // The four files of the filter's lifetime are under the same rule: the
     // note and the kept pair are as they were, and the filter the run read is still there
     // though the snapshot has none.
     for name in ["restore.note", "last-restore.filter", "last-restore.note"] {
@@ -1217,8 +1216,8 @@ fn a_file_that_cant_be_read_exits_23_and_ends_with_problems() {
 /// Exit 23 is also what rsync gives when a whole folder of the snapshot can't be read, as
 /// when the backup disk goes away under it. From there on it deletes nothing ("IO error
 /// encountered -- skipping file deletion"), so the tree isn't the snapshot's: what came
-/// after the snapshot stays. Core takes 23 with that line as a copy that broke (PLAN 6b.6
-/// step 3): no boot refresh, and another attempt.
+/// after the snapshot stays. Core takes 23 with that line as a copy that broke: no boot
+/// refresh, and another attempt.
 #[test]
 fn a_folder_that_cant_be_read_exits_23_skips_deletions_and_is_a_copy_that_broke() {
     let Some(lab) = lab("exit-23-folder") else {
@@ -1586,7 +1585,7 @@ fn an_old_format_restore_doesnt_strip_live_xattrs() {
 //
 // These need root to set up (another owner, a device node, a file capability), and Claude
 // never runs anything as root. They're ignored here, with the reason, and each has its check
-// on apsis-test in PLAN 6b.12. `sudo cargo test -- --ignored` would run them; nobody is
+// on apsis-test. `sudo cargo test -- --ignored` would run them; nobody is
 // asked to.
 
 /// `--numeric-ids`: owners come back by number, whatever the user database says.

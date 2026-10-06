@@ -21,7 +21,7 @@ pub enum JobKind {
     Configure,
     /// A restore's preparation (checks, dry runs, the safety snapshot, the plan), and then the
     /// ready plan waiting at the prompt: `running` at 100% until the restart (`done`) or a
-    /// cancel (`stopped`). Not the apply itself, which runs offline (6b).
+    /// cancel (`stopped`). Not the apply itself, which runs offline.
     Restore,
 }
 

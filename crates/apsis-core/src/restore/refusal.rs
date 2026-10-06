@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Why a snapshot can't be restored on this computer (PLAN 6b.7).
+//! Why a snapshot can't be restored on this computer.
 //!
 //! Checked for the dialog, again when preparing, and again at apply. Everything here works on
 //! what the helper has already read (mountinfo, lsblk, `info.json`, a folder listing), so
 //! nothing is opened or run; the one exception is [`pop_upgrade_found`], an `lstat` of three
-//! names, which hands [`check_pending`] what it found. The space lines (6b.4) need the dry
+//! names, which hands [`check_pending`] what it found. The space lines need the dry
 //! runs, so they're checked after these, in [`super::space`]. Busy isn't here.
 
 use std::path::Path;
@@ -18,7 +18,7 @@ use crate::native::Info;
 use crate::settings::Device;
 use crate::usage::fstype_at;
 
-/// The first check that failed. The dialog's two lines for each are in PLAN 6b.8's table.
+/// The first check that failed. The dialog's two lines for each are in the applet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
     /// There's no `/sys/firmware/efi`.
@@ -53,11 +53,11 @@ pub enum Refusal {
     RestoreArmed,
     /// A Pop!_OS release upgrade is in progress or half done: one of [`POP_UPGRADE_NAMES`]
     /// exists ([`check_pending`]). Checked in the dialog, when preparing and before arming,
-    /// not at apply (PLAN 6b.6, "pop-upgrade-init").
+    /// not at apply.
     PopUpgradePending,
     /// The snapshot's `etc/crypttab` differs from the live one ([`crypttab_differs`]): the
     /// snapshot's initrd carries the entries its system needed at boot, and the apply doesn't
-    /// rebuild it (PLAN 6b.6 step 5; the rebuild is 0.5.x).
+    /// rebuild it (the rebuild is 0.5.x).
     CrypttabDiffers,
     /// The backup disk is short for the safety snapshot ([`super::space`]). Both in bytes.
     BackupSpace {
@@ -83,7 +83,7 @@ pub enum Refusal {
 }
 
 impl Refusal {
-    /// The refusal as `CheckRestore` carries it (PLAN 6b.9): one stable word per variant, the
+    /// The refusal as `CheckRestore` carries it: one stable word per variant, the
     /// space ones with their two numbers and the boot-files one with its failure's word after
     /// a `:`. Never empty, never with whitespace.
     #[must_use]
@@ -224,17 +224,17 @@ pub struct Snapshot<'a> {
     /// The names in its `usr/lib/modules`.
     pub modules: &'a [String],
     /// The text of its `etc/initramfs/post-update.d/zz-kernelstub`, if it has one. The apply's
-    /// boot refresh relies on the hook's `--preserve-live-mode` (PLAN 6b.6 step 5).
+    /// boot refresh relies on the hook's `--preserve-live-mode`.
     pub hook: Option<&'a str>,
     /// It has a `kernelstub` program.
     pub has_kernelstub: bool,
 }
 
 /// What the snapshot's kernelstub hook must contain for the boot refresh to keep the ESP's
-/// kernel (PLAN 6b.6 step 5).
+/// kernel.
 pub const HOOK_FLAG: &str = "--preserve-live-mode";
 
-/// Runs every check, in the order of PLAN 6b.7's table (the snapshot must be readable before
+/// Runs every check, in order (the snapshot must be readable before
 /// its UUID is).
 ///
 /// # Errors
@@ -432,7 +432,7 @@ pub fn check_arming(
 }
 
 /// The names Pop!_OS's release upgrade leaves at the root while it's in progress or half done
-/// (`pop-upgrade`'s `upgrade.sh`; PLAN 6b.6): the two it makes before the offline boot, and
+/// (`pop-upgrade`'s `upgrade.sh`): the two it makes before the offline boot, and
 /// the one it touches during it. Any of them present refuses arming. fwupd's history database
 /// and PackageKit's staged update are not among them, on purpose (owner, 2026-10-01).
 pub const POP_UPGRADE_NAMES: [&str; 3] = [
@@ -546,7 +546,7 @@ mod tests {
     const HOOK: &str = "#!/bin/sh\nexec kernelstub --verbose --preserve-live-mode\n";
 
     /// Every refusal has a word on the wire and comes back the same (`CheckRestore`'s
-    /// `refusal`, PLAN 6b.9); the numbers of the space ones ride along.
+    /// `refusal`); the numbers of the space ones ride along.
     #[test]
     fn every_refusal_survives_the_bus() {
         let all = [
@@ -1085,7 +1085,7 @@ cryptswap UUID=44444444-4444-4444-4444-444444444444 /dev/urandom swap,plain,offs
         }
     }
 
-    /// Only those three: a separate `/home` or a data disk is fine (PLAN 6b.4), and so is a
+    /// Only those three: a separate `/home` or a data disk is fine, and so is a
     /// mount below one of them.
     #[test]
     fn other_separate_mounts_arent_a_split_system() {
@@ -1305,7 +1305,7 @@ cryptswap UUID=44444444-4444-4444-4444-444444444444 /dev/urandom swap,plain,offs
         assert_eq!(case.check(), Ok(()));
     }
 
-    /// The hook flag rule (PLAN 6b.6 step 5): the snapshot's
+    /// The hook flag rule: the snapshot's
     /// `etc/initramfs/post-update.d/zz-kernelstub` must be there and contain
     /// `--preserve-live-mode`, or the boot refresh of the apply would rewrite the ESP for the
     /// snapshot's kernel. `update-initramfs` isn't needed: the apply doesn't run it.

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The restore's rsync command (PLAN 6b.6, step 3), as an argv run without a shell.
+//! The restore's rsync command, as an argv run without a shell.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -12,7 +12,7 @@ pub const LOCALE: (&str, &str) = ("LC_ALL", "C");
 /// rsync's `--log-file` in the state folder, named in the result when the copy had problems.
 pub const LOG_FILE: &str = "rsync-log";
 
-/// Options the restore never runs with, each for its own reason (PLAN 6b.6, 6b.10):
+/// Options the restore never runs with, each for its own reason:
 /// `--delete-excluded` would delete what the filter protects; `--ignore-errors` would delete
 /// even after a read error, when rsync can't know what the snapshot holds; `-L` and
 /// `--copy-links` would follow links; `--link-dest` and `-H` are for making snapshots.
@@ -48,7 +48,7 @@ pub fn rsync(
     build(localhost, target, filter, old_format, run)
 }
 
-/// The same copy as a dry run, for the space check before anything is written (PLAN 6b.4):
+/// The same copy as a dry run, for the space check before anything is written:
 /// the same flags and filter as [`rsync`], so `--stats` counts what the restore would copy.
 /// `--no-human-readable` makes the sizes plain byte counts ([`super::space::dry_run_size`]).
 /// Nothing is written, not even a log.
@@ -124,7 +124,7 @@ mod tests {
         )
     }
 
-    /// The dry run for the space check (PLAN 6b.4): the restore's own flags and filter, so it
+    /// The dry run for the space check: the restore's own flags and filter, so it
     /// counts what the restore would copy, with plain byte counts and nothing written, not
     /// even a log.
     #[test]
@@ -175,7 +175,7 @@ mod tests {
     }
 
     /// With `--ignore-errors` rsync deletes even after a read error, when it can't know what
-    /// the snapshot holds. Never, for the restore or its dry run (PLAN 6b.10).
+    /// the snapshot holds. Never, for the restore or its dry run.
     #[test]
     fn errors_are_never_ignored() {
         for old_format in [false, true] {

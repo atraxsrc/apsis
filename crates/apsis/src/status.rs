@@ -40,7 +40,7 @@ impl StatusView {
     }
 
     /// The panel tooltip: `last`, `next` and `disk` lines. `next` is always `manual only`: there
-    /// is no scheduler (see DECISIONS.md).
+    /// is no scheduler.
     #[must_use]
     pub fn tooltip(&self) -> String {
         match self {

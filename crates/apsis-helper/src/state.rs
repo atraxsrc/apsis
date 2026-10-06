@@ -12,12 +12,12 @@
 //! - **Reads aren't jobs.** A [`Reading`] announces nothing and never shows in `Job()`.
 //! - **The lock is released before the end is announced** ([`Running::end`]), so the refresh
 //!   the announcement sets off is never refused by the job it refreshes for.
-//! - **A ready restore plan isn't the lock** (6b.9). While a plan waits at the ready prompt
+//! - **A ready restore plan isn't the lock**. While a plan waits at the ready prompt
 //!   the helper keeps it next to the lock: writes and `Stop` get `Busy`, reads go through, and
 //!   `Job()` shows it as a running `restore` at 100%. It ends `stopped` (cancel, the disarm
 //!   timer, the starter leaving the bus, too old) or `done` (right before the restart). The
 //!   helper doesn't idle-exit while a plan is ready.
-//! - **The job lock on disk** (0.5.0, PLAN 6b.9). A write also holds an exclusive `flock` on
+//! - **The job lock on disk** (0.5.0). A write also holds an exclusive `flock` on
 //!   [`JOB_LOCK`] from its start to its end ([`JobLock`]). The package's `prerm` takes the
 //!   same lock without waiting: it refuses while a job runs, and while it holds the lock a
 //!   write is `Busy` before anything is announced. Reads hold none, and neither does a plan
@@ -70,7 +70,7 @@ impl Announced {
     }
 }
 
-/// The job lock on disk (PLAN 6b.9): the package's `prerm` takes it too, so the path is
+/// The job lock on disk: the package's `prerm` takes it too, so the path is
 /// spelled the same in `resources/deb/prerm`. On tmpfs: a restart clears it. Nobody removes
 /// it, and its being there means nothing; only the `flock` on it does.
 pub const JOB_LOCK: &str = "/run/apsis/job.lock";
@@ -171,7 +171,7 @@ struct ReadyPlan {
 }
 
 /// What's known about the ready plan: who may restart or cancel it without a password. Its
-/// age is `request.json`'s to say (`Plan::is_too_old`, PLAN 6b.5).
+/// age is `request.json`'s to say (`Plan::is_too_old`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadyInfo {
     pub snapshot: String,
@@ -430,7 +430,7 @@ impl State {
     /// marked where it is and the job lock on disk is taken, in one step. The caller arms
     /// with it or removes its files, then ends it with [`Ready::end`]. Until then the plan
     /// stays in its slot: every write is still `Busy`, reads go on, `Job()` still shows it,
-    /// and a package script is refused (PLAN 6b.9; the armed-gap audit's row 5). `None`: no
+    /// and a package script is refused (the armed-gap audit's row 5). `None`: no
     /// plan waits.
     ///
     /// # Errors
@@ -1263,7 +1263,7 @@ mod ready_tests {
     }
 }
 
-/// The job lock on disk (PLAN 6b.9; fix 1, row 5 and Q8 of 2026-10-04): what a package
+/// The job lock on disk (fix 1, row 5 and Q8 of 2026-10-04): what a package
 /// script's `flock -n` finds, and what the helper does while a script holds the lock.
 #[cfg(test)]
 mod lock_tests {
@@ -1394,7 +1394,7 @@ mod lock_tests {
     }
 
     /// Test 12. Held while the restore prepares, free once the plan is ready: an upgrade at
-    /// the prompt goes on (decided, PLAN 6b.9).
+    /// the prompt goes on (decided).
     #[tokio::test]
     async fn a_ready_plan_holds_no_file_lock() {
         let (state, _changes) = state();

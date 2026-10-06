@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! The rsync filter a restore runs with, saved as `/var/lib/apsis/restore/restore.filter` and
-//! passed with `--exclude-from` (PLAN 6b.2).
+//! passed with `--exclude-from`.
 //!
 //! rsync reads the rules top to bottom, the first match wins, and each is anchored at the
 //! transfer root (`/`). The restore never uses `--delete-excluded`, so an excluded path is
@@ -14,7 +14,7 @@ use crate::error::{Error, Result};
 use crate::usage::mounts_under;
 
 /// The filter's file in the state folder, `--exclude-from=` of the restore and its dry run.
-/// A working file of the preparation: it goes with the plan (PLAN 6b.5).
+/// A working file of the preparation: it goes with the plan.
 pub const FILE: &str = "restore.filter";
 
 /// The copy of [`FILE`] that an arm keeps: the filter of the last restore that was armed.
@@ -26,14 +26,14 @@ pub const PROTECTED: [&str; 6] = [
     "/system-update",
     "/etc/systemd/system/apsis-restore.service",
     "/etc/systemd/system/system-update.target.wants/apsis-restore.service",
-    // The pop-upgrade-init drop-in (PLAN 6b.6): written on arm, and kept through the copy so
+    // The pop-upgrade-init drop-in: written on arm, and kept through the copy so
     // a retry boot still has it after a snapshot without it was restored.
     "/etc/systemd/system/pop-upgrade-init.service.d/50-apsis.conf",
     "/var/lib/apsis/***",
     "/etc/apsis/***",
 ];
 
-/// What happens to `/home` (PLAN 6b.3).
+/// What happens to `/home`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Home {
     /// `/home` is fully excluded: nothing there is compared, written or deleted.
@@ -179,7 +179,7 @@ fn escape(path: &str) -> Result<String> {
     Ok(out)
 }
 
-/// The same `rules`, limited to what lands under `/home`, for the second dry run of PLAN 6b.4
+/// The same `rules`, limited to what lands under `/home`, for the second dry run
 /// (what a separate `/home` partition must have free): `/home` itself is let in first, the
 /// rules apply inside it as they do in the restore, and every other top-level name is left
 /// out last (rsync never enters an excluded folder). Only for a restore with home restored:
@@ -222,7 +222,7 @@ pub fn has_home(snapshot_excludes: &str) -> bool {
 }
 
 /// Whether a snapshot holds root's home: its `exclude.list` lets `/root` in (`+ /root/**`).
-/// Not a dialog choice (PLAN 6b.8): if the snapshot has it, it's restored with the system.
+/// Not a dialog choice: if the snapshot has it, it's restored with the system.
 #[must_use]
 pub fn has_root(snapshot_excludes: &str) -> bool {
     snapshot_excludes
@@ -365,7 +365,7 @@ mod tests {
         assert_eq!(list.last().unwrap(), "/home/*/**");
     }
 
-    /// PLAN 6b.2 rule 5 and 6b.3: a separate `/home` is another disk like any other when home
+    /// A separate `/home` is another disk like any other when home
     /// is kept, and is the one mount rsync goes into when home is restored.
     #[test]
     fn a_separate_home_is_entered_only_when_home_is_restored() {
@@ -410,7 +410,7 @@ mod tests {
     }
 
     /// A mount rule has no `/***`: that only matches a folder, and a file can be a mount
-    /// point too (checked with rsync 3.2.7, see DECISIONS.md).
+    /// point too (checked with rsync 3.2.7).
     #[test]
     fn a_mount_rule_is_the_plain_anchored_path() {
         let mountinfo = "24 1 8:1 / / rw - ext4 /dev/sdX1 rw\n\
@@ -508,7 +508,7 @@ mod tests {
         }
     }
 
-    /// The second dry run (PLAN 6b.4): the same rules, limited to what lands under `/home`.
+    /// The second dry run: the same rules, limited to what lands under `/home`.
     #[test]
     fn the_home_only_filter_keeps_the_rules_and_drops_the_rest_of_the_tree() {
         let rules = vec![
@@ -540,7 +540,7 @@ mod tests {
         assert_eq!(to_text(&list), "- /a/***\n/b\n");
     }
 
-    /// `/root` isn't a dialog choice (PLAN 6b.8), but `CheckRestore` says whether the
+    /// `/root` isn't a dialog choice, but `CheckRestore` says whether the
     /// snapshot has it, like `/home`: the README's "restored with the system if the snapshot
     /// has it".
     #[test]

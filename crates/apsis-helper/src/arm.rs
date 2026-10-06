@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Arming the next boot and undoing it (PLAN 6b.5, 6b.6): the plan's filter and note kept
+//! Arming the next boot and undoing it: the plan's filter and note kept
 //! as `last-restore.*` and rsync's log cleared, then the unit, its wants link, the drop-in,
 //! the helper copy and `state.json`, `sync`, then `/system-update` last; a disarm removes
 //! the link first. Leftovers without the link arm nothing and are cleaned.
@@ -80,7 +80,7 @@ pub fn is_armed(paths: &Paths) -> bool {
     fs::read_link(&paths.link).is_ok_and(|target| target == paths.state_dir)
 }
 
-/// Arms the next boot, in PLAN 6b.5's order: first the plan's filter and note are kept as
+/// Arms the next boot, in this order: first the plan's filter and note are kept as
 /// `last-restore.filter` and `last-restore.note` ([`keep_last`]) and rsync's log of the
 /// restore before is cleared; then the unit, its wants link, the drop-in, the helper copy
 /// (`helper_exe`, the packaged helper, copied so a restored snapshot can't take it away
@@ -111,7 +111,7 @@ pub fn arm(paths: &Paths, helper_exe: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Copies the plan's working files to the pair of the last arm (PLAN 6b.5):
+/// Copies the plan's working files to the pair of the last arm:
 /// `restore.filter` to `last-restore.filter` and `restore.note` to `last-restore.note`, with
 /// the state folder's writer. "Last restore" means "last arm": an arm that's disarmed has
 /// replaced the pair too.
@@ -147,7 +147,7 @@ fn remove_plan_files(paths: &Paths) -> io::Result<Vec<&'static str>> {
 ///
 /// The link's removal is flushed before anything else goes (its folder, then everything
 /// once, as the arm does): a power cut seconds after a disarm must not bring the link back
-/// over an arm that's still whole (PLAN 6b.5). The timer and the package script both come
+/// over an arm that's still whole. The timer and the package script both come
 /// through here.
 ///
 /// # Errors
@@ -174,7 +174,7 @@ fn disarm_with(
             unflushed = paths.link.parent().and_then(|folder| flush(folder).err());
             rustix::fs::sync();
         }
-        // Another tool's update: not Apsis's to touch (PLAN 6b.6 step 1).
+        // Another tool's update: not Apsis's to touch.
         _ => return Ok(removed),
     }
     removed.extend(remove_arm_files(paths)?);
@@ -189,7 +189,7 @@ fn disarm_with(
     }
 }
 
-/// Leftovers of an arm that was cut short, or of a disarm that was (PLAN 6b.5): without
+/// Leftovers of an arm that was cut short, or of a disarm that was: without
 /// Apsis's link they arm nothing, and go. With the link, it's an arm and stays whole. The plan
 /// (`request.json`) isn't touched: whether it's a leftover is the caller's to judge.
 ///
@@ -203,7 +203,7 @@ pub fn clean_leftovers(paths: &Paths) -> io::Result<Vec<&'static str>> {
     remove_arm_files(paths)
 }
 
-/// The helper's start (PLAN 6b.5, 6b.9): with Apsis's link, an arm about to be applied, kept
+/// The helper's start: with Apsis's link, an arm about to be applied, kept
 /// whole. Without it, the arm files are leftovers, and so is a plan (`request.json`) with its
 /// filter and note: the helper that held it ready is gone, and a window still at its prompt
 /// gets "the preparation is gone" from `RestartToRestore`.
@@ -258,7 +258,7 @@ pub fn remove_arm_files(paths: &Paths) -> io::Result<Vec<&'static str>> {
     Ok(removed)
 }
 
-/// `systemd-run` for the disarm timer (PLAN 6b.5): a transient timer in this boot, ten
+/// `systemd-run` for the disarm timer: a transient timer in this boot, ten
 /// minutes, whose service runs `helper_exe --disarm` and can't start once a shutdown is
 /// queued (`Conflicts=shutdown.target`). The packaged helper, not the copy: the copy goes
 /// with the arm.
@@ -470,7 +470,7 @@ mod tests {
         fs::read_to_string(paths.state_dir.join(name)).unwrap()
     }
 
-    /// Pull 1 (PLAN 6b.5): the arm keeps the filter and the note of the plan it arms as
+    /// Pull 1: the arm keeps the filter and the note of the plan it arms as
     /// `last-restore.filter` and `last-restore.note`, byte for byte and for root only, in
     /// place of an earlier arm's, and clears rsync's log. The working files stay: the apply
     /// reads the filter.
@@ -675,7 +675,7 @@ mod tests {
         fs::remove_dir_all(&root2).unwrap();
     }
 
-    /// The link's removal is flushed to disk (PLAN 6b.5): a power cut seconds after a
+    /// The link's removal is flushed to disk: a power cut seconds after a
     /// disarm must not bring the link back. If the flush fails, the rest is still removed
     /// and the error says what may not last and what was removed.
     #[test]
@@ -752,7 +752,7 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
-    /// The helper's start (PLAN 6b.5, 6b.9): a plan with no link is a leftover of a helper
+    /// The helper's start: a plan with no link is a leftover of a helper
     /// that died while it was ready, and goes with the other leftovers; an arm stays whole.
     #[test]
     fn at_start_a_plan_without_the_link_is_a_leftover() {
@@ -786,7 +786,7 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The disarm timer (PLAN 6b.5): transient, ten minutes, in this boot only, its service
+    /// The disarm timer: transient, ten minutes, in this boot only, its service
     /// can't run once a shutdown is queued, and it runs the packaged helper (the copy goes
     /// with the arm).
     #[test]

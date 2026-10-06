@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The apply: what `apsis-helper --apply-restore` does in the offline boot (PLAN 6b.6), as a
+//! The apply: what `apsis-helper --apply-restore` does in the offline boot, as a
 //! state machine over a [`Runner`].
 //!
 //! Everything that needs root or a real machine (the link, the backup disk, rsync, the boot
@@ -9,7 +9,7 @@
 //! each failure ends in. The plan, the state, the result and the ESP backup are read and
 //! written only through [`super::plan`], [`super::state`] and [`super::esp`].
 //!
-//! No clock is read to decide anything (PLAN 6b.6 step 1): [`Runner::now`] only dates the
+//! No clock is read to decide anything: [`Runner::now`] only dates the
 //! result.
 
 use std::fs;
@@ -23,7 +23,7 @@ use super::plan::{self, Plan};
 use super::state::{MAX_ATTEMPTS, MAX_BOOTS, Outcome, Report, State, Step};
 use crate::native::Info;
 
-/// The message of the report of last resort (PLAN 6b.10).
+/// The message of the report of last resort.
 pub const MINIMAL_MESSAGE: &str = "result could not be saved, see journal";
 
 /// rsync's log, named in a result with problems.
@@ -37,7 +37,7 @@ pub struct Paths<'a> {
     /// `/boot/efi`.
     pub esp: &'a Path,
     /// `/`: the tree pass 1 restores, and the one the ESP is checked against after the boot
-    /// refresh (PLAN 6b.6 step 6).
+    /// refresh.
     pub root: &'a Path,
 }
 
@@ -94,14 +94,13 @@ pub fn check_snapshot(plan: &Plan, found: &SnapshotFound) -> Result<(), String> 
     Err(format!("the snapshot on the backup disk {wrong}"))
 }
 
-/// What a copy's exit means (PLAN 6b.6 step 3).
+/// What a copy's exit means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopyEnd {
     /// Exit 0, or 24 (source files that vanished): the apply goes on. `problems` is exit 23
     /// by itself: some files couldn't be written or deleted.
     Ended { problems: bool },
-    /// Any other exit, or none, or exit 23 with the deletions skipped: the copy broke (PLAN
-    /// 6b.10).
+    /// Any other exit, or none, or exit 23 with the deletions skipped: the copy broke.
     Broke,
 }
 
@@ -151,7 +150,7 @@ impl Copied {
 
 /// What the apply needs done on the machine. The helper has the real one; the tests a fake.
 pub trait Runner {
-    /// `/system-update` is a link to the state folder (PLAN 6b.6 step 1). If it isn't, the
+    /// `/system-update` is a link to the state folder. If it isn't, the
     /// apply touches neither the link nor anything else but Apsis's own unit files.
     fn is_armed(&mut self) -> bool;
 
@@ -204,7 +203,7 @@ pub trait Runner {
     /// Why the files couldn't be removed.
     fn remove_protected_kernel(&mut self, plan: &Plan) -> Result<bool, String>;
 
-    /// Removes `/system-update`: the commit point (PLAN 6b.5). Only called when it's
+    /// Removes `/system-update`: the commit point. Only called when it's
     /// Apsis's ([`Runner::is_armed`]). A link that isn't there is fine.
     ///
     /// # Errors
@@ -221,7 +220,7 @@ pub trait Runner {
     ///
     /// # Errors
     ///
-    /// What couldn't be removed. Without the link it arms nothing (PLAN 6b.5).
+    /// What couldn't be removed. Without the link it arms nothing.
     fn remove_arm_files(&mut self) -> Result<(), String>;
 
     /// The clock, in Unix seconds, for the result's time. Never compared with anything.
@@ -271,9 +270,8 @@ impl End {
 }
 
 /// What `apsis-helper --apply-restore` exits with, from how the apply ended and whether
-/// [`Runner::restart`]'s call (`systemctl reboot --no-block`) went through (PLAN 6b.6, "a
-/// reboot call that fails"). The unit has `FailureAction=reboot`, so exit 1 is a restart by
-/// systemd:
+/// [`Runner::restart`]'s call (`systemctl reboot --no-block`) went through. The unit has
+/// `FailureAction=reboot`, so exit 1 is a restart by systemd:
 ///
 /// - [`End::Finished`] and [`End::GaveUp`]: the link is gone and `system-update-cleanup` is
 ///   skipped, so if the reboot call failed nothing else would restart: exit 1. With the call
@@ -575,8 +573,8 @@ fn give_up(paths: &Paths<'_>, runner: &mut impl Runner, state: State) -> End {
     End::GaveUp
 }
 
-/// The preparation's filter and note go once the restore is over and the link is gone
-/// (PLAN 6b.5): what the arm kept of them stays, as `last-restore.*`.
+/// The preparation's filter and note go once the restore is over and the link is gone:
+/// what the arm kept of them stays, as `last-restore.*`.
 fn remove_working_files(state_dir: &Path, runner: &mut impl Runner) {
     for name in plan::WORKING_FILES {
         match fs::remove_file(state_dir.join(name)) {
@@ -597,7 +595,7 @@ fn clear_temporaries(esp: &Path, plan: &Plan, runner: &mut impl Runner) {
 }
 
 /// A restore that stops before this boot's copy: it never started, unless an earlier boot's
-/// copy wrote something (PLAN 6b.10).
+/// copy wrote something.
 fn unstarted(state: State) -> Outcome {
     if state.written {
         Outcome::Failed
@@ -852,7 +850,7 @@ fn save_result(
     saved
 }
 
-/// The report of last resort (PLAN 6b.10), when the real one is refused: the same outcome,
+/// The report of last resort, when the real one is refused: the same outcome,
 /// [`MINIMAL_MESSAGE`], and no time unless the clock gave one. If that's refused too, it's
 /// the snapshot's name: only `failed` may lack it, so the bare report is `failed` and its
 /// message names the real outcome. Gives the outcome that's in the file.
@@ -1514,7 +1512,7 @@ mod tests {
         assert_eq!(fake.count_of("restart"), 1);
     }
 
-    /// PLAN 6b.10: the disk was pulled during a copy and is still missing.
+    /// The disk was pulled during a copy and is still missing.
     #[test]
     fn never_started_after_a_broken_copy_is_a_restore_that_didnt_finish() {
         let lab = armed("apply-not-started-written");
@@ -1879,7 +1877,7 @@ mod tests {
         assert_eq!(passed(&lab), restored_boot_files());
     }
 
-    /// PLAN 6b.6 step 3: which exits of pass 1 go on, and which are a copy that broke.
+    /// Which exits of pass 1 go on, and which are a copy that broke.
     #[test]
     fn a_copys_exit_says_whether_it_ended() {
         let copied = |exit, deletions_skipped| Copied {
@@ -2116,7 +2114,7 @@ mod tests {
         assert_eq!(boot(&mut fake), End::Finished(Outcome::Done));
     }
 
-    /// The files of the filter's lifetime (PLAN 6b.5), as an arm leaves them: the working
+    /// The files of the filter's lifetime, as an arm leaves them: the working
     /// pair, the pair the arm kept, and a log.
     const LIFETIME: [&str; 5] = [
         "restore.filter",

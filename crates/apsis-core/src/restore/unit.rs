@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The files the arm writes under `/etc/systemd/system/` (PLAN 6b.6): the restore unit, and
+//! The files the arm writes under `/etc/systemd/system/`: the restore unit, and
 //! the drop-in that keeps Pop!_OS's release upgrade from running in the restore's boot. The
 //! texts live here, byte for byte, so the helper writes exactly what the tests say.
 //!
@@ -24,7 +24,7 @@ pub const HELPER_COPY: &str = "/var/lib/apsis/restore/apsis-helper";
 /// restored a snapshot without it.
 pub const DROP_IN_PATH: &str = "/etc/systemd/system/pop-upgrade-init.service.d/50-apsis.conf";
 
-/// The unit's text (PLAN 6b.6). `StandardOutput=journal`, not `journal+console`: what the
+/// The unit's text. `StandardOutput=journal`, not `journal+console`: what the
 /// person sees goes through plymouth only. `FailureAction=reboot`, not `OnFailure=`. Never
 /// `KillMode=none`. No `Before=` or `Conflicts=` against the other offline-update units.
 #[must_use]
@@ -44,7 +44,7 @@ pub fn unit_text() -> &'static str {
      StandardOutput=journal\n"
 }
 
-/// The drop-in's text (PLAN 6b.6, "pop-upgrade-init"). The condition is a path through the
+/// The drop-in's text. The condition is a path through the
 /// link: `/system-update` is a symlink to `/var/lib/apsis/restore`, `ConditionPathExists=`
 /// follows it, so the path exists exactly while the link points at Apsis's folder, where the
 /// helper copy is. Nothing is made or removed to keep it true; the link is the one commit

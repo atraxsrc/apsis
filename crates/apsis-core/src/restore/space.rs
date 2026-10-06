@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Disk space for a restore (PLAN 6b.4), checked before anything is copied and again at
+//! Disk space for a restore, checked before anything is copied and again at
 //! "Restart now".
 //!
 //! The sizes come from rsync `--dry-run --stats`, the free space from `statvfs`; the helper
@@ -243,7 +243,7 @@ total size is 1,236,567  speedup is 6,908.20 (DRY RUN)
         assert_eq!(check_system(0, 0), Ok(()));
     }
 
-    /// PLAN 6b.4: what lands under a separate `/home` is checked against that partition, and
+    /// What lands under a separate `/home` is checked against that partition, and
     /// only the rest against `/`.
     #[test]
     fn a_separate_homes_part_comes_off_the_roots() {

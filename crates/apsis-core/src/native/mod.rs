@@ -3,8 +3,8 @@
 //! The native rsync backend: Timeshift's rsync snapshots without running `timeshift`.
 //!
 //! It reads and writes the same layout Timeshift does, so either tool can list, use and delete
-//! the other's snapshots. Everything copied from Timeshift's source is referenced in
-//! `docs/DECISIONS.md` (Phase 5) and at each place below. Under the backup device's mount:
+//! the other's snapshots. Everything copied from Timeshift's source is referenced
+//! at each place below. Under the backup device's mount:
 //!
 //! ```text
 //! timeshift/
@@ -763,7 +763,7 @@ impl Found {
     /// in `readdir` order). A leftover row that Delete removes; never the `--link-dest` base,
     /// never removed unasked. Whether Timeshift building a snapshot in place ever looks the
     /// same isn't known; it would be a row too, and Delete needs a click, a confirm and a
-    /// password (PLAN 6b.9, left knowingly).
+    /// password.
     fn half_deleted(&self) -> bool {
         parse_snapshot_name(&self.name).is_some()
             && self.deletable

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! `state.json` and `result.json`: how far an armed restore got, and how it ended (PLAN
-//! 6b.6, 6b.9, 6b.10).
+//! `state.json` and `result.json`: how far an armed restore got, and how it ended.
 //!
 //! `state.json` is written on arm and before each step of the apply that depends on it
 //! ([`super::apply`]); `result.json` when the apply ends, and it stays for the window to show
@@ -16,10 +15,10 @@ use super::filter::Home;
 pub const STATE_FILE: &str = "state.json";
 pub const RESULT_FILE: &str = "result.json";
 
-/// A copy that breaks is tried again at the next boot, this many times in all (PLAN 6b.10).
+/// A copy that breaks is tried again at the next boot, this many times in all.
 pub const MAX_ATTEMPTS: u32 = 3;
 
-/// The offline boots a restore may begin (PLAN 6b.10). A boot is counted before it does
+/// The offline boots a restore may begin. A boot is counted before it does
 /// anything else, so a helper that dies in each of them is stopped here: three copies, and
 /// two boots to spare for power cuts.
 pub const MAX_BOOTS: u32 = 5;
@@ -28,7 +27,7 @@ pub const MAX_BOOTS: u32 = 5;
 /// Written as JSON it stays far below the file limit, whatever the characters.
 pub const MAX_MESSAGE_BYTES: usize = 2048;
 
-/// Where an armed restore is (PLAN 6b.6). A boot after a power cut goes on from here.
+/// Where an armed restore is. A boot after a power cut goes on from here.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Step {
     /// Armed, and no copy has started.
@@ -152,7 +151,7 @@ impl State {
         if self.attempts > MAX_ATTEMPTS {
             return Err(attempts_out_of_range());
         }
-        // PLAN 6b.6 step 3 sets both before the copy starts.
+        // The apply sets both before the copy starts.
         let invalid = |reason: String| Err(FileError::Invalid(reason));
         match (self.attempts, self.written) {
             (0, true) => {
@@ -200,7 +199,7 @@ fn attempts_out_of_range() -> FileError {
     FileError::Invalid(format!("\"attempts\" isn't 0 to {MAX_ATTEMPTS}"))
 }
 
-/// How an armed restore ended. The words are the helper's `RestoreResult` states (PLAN 6b.9);
+/// How an armed restore ended. The words are the helper's `RestoreResult` states;
 /// its `ready` isn't one: that's a plan that isn't armed yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -380,7 +379,7 @@ fn cut(message: &str) -> Cow<'_, str> {
 /// outcome, else `""`; `safety_snapshot` is `""` if none was taken.
 pub type WireRestoreResult = (String, String, String, i64, String, String);
 
-/// Where the restore stands, as `RestoreResult` tells it (PLAN 6b.9).
+/// Where the restore stands, as `RestoreResult` tells it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResultState {
     /// No plan is ready and there's no result.
@@ -391,7 +390,7 @@ pub enum ResultState {
     Ended(Outcome),
 }
 
-/// What `RestoreResult` answers: the window asks when it opens (PLAN 6b.8).
+/// What `RestoreResult` answers: the window asks when it opens.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoreResult {
     pub state: ResultState,
@@ -500,7 +499,7 @@ impl RestoreResult {
 #[cfg(test)]
 mod tests {
 
-    /// `RestoreResult`'s answer (PLAN 6b.9): a ready plan, the last `result.json`, or nothing;
+    /// `RestoreResult`'s answer: a ready plan, the last `result.json`, or nothing;
     /// `""` and `0` stand for a `null` snapshot or time on the wire, and `""` for no home
     /// choice and no safety snapshot.
     #[test]
@@ -795,7 +794,7 @@ mod tests {
         }
     }
 
-    /// PLAN 6b.6 step 3 sets both before the copy, so a counted attempt has always written.
+    /// The apply sets both before the copy, so a counted attempt has always written.
     #[test]
     fn an_attempt_without_the_written_flag_is_refused() {
         assert_eq!(
@@ -886,7 +885,7 @@ mod tests {
         }
     }
 
-    /// PLAN 6b.10: the report of last resort. Only `failed` may lack the snapshot.
+    /// The report of last resort. Only `failed` may lack the snapshot.
     #[test]
     fn a_failed_result_may_have_no_snapshot_and_no_time() {
         let minimal = Report {
@@ -1000,7 +999,7 @@ mod tests {
         );
     }
 
-    /// The words of the helper's `RestoreResult` (PLAN 6b.9).
+    /// The words of the helper's `RestoreResult`.
     #[test]
     fn every_outcome_has_its_word_and_round_trips() {
         for (outcome, word) in [

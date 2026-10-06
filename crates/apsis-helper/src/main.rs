@@ -8,7 +8,7 @@
 //! `ReadConfig` and `WriteConfig`, and announces every job change with `JobChanged`; each
 //! method checks its own polkit action for the caller, checks its input again, and runs `rsync`, `lsblk`, `findmnt` and
 //! `mount` with a fixed argv, no shell. `WriteConfig` writes `/etc/apsis/config.toml`, nothing
-//! else. See `docs/ARCHITECTURE.md`.
+//! else. See SECURITY.md.
 
 mod apply;
 mod arm;
@@ -41,11 +41,11 @@ const IDLE: Duration = Duration::from_secs(60);
 async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--apply-restore") {
-        // The offline boot's entry point (PLAN 6b.6): no D-Bus.
+        // The offline boot's entry point: no D-Bus.
         return apply::apply_restore();
     }
     if args.iter().any(|a| a == "--disarm") {
-        // The disarm timer's service (PLAN 6b.5) and the package's prerm (6b.9): no D-Bus.
+        // The disarm timer's service and the package's prerm: no D-Bus.
         return match arm::disarm_system() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -64,7 +64,7 @@ async fn main() -> ExitCode {
 }
 
 async fn serve() -> zbus::Result<()> {
-    // Leftovers of an arm or a plan with no link arm nothing and go (PLAN 6b.5).
+    // Leftovers of an arm or a plan with no link arm nothing and go.
     match arm::clean_at_start(&arm::Paths::system()) {
         Ok(removed) if !removed.is_empty() => {
             eprintln!(
@@ -157,7 +157,7 @@ mod resource_tests {
                 "{id}"
             );
         }
-        // The restore asks every time, from any session (PLAN 6b.9): no `_keep`.
+        // The restore asks every time, from any session: no `_keep`.
         let restore = action(ACTION_RESTORE);
         for setting in ["allow_any", "allow_inactive", "allow_active"] {
             assert!(

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! What the Restore dialog needs to know about a snapshot (`CheckRestore`, PLAN 6b.7 to 6b.9):
-//! the first refusal, if any, in the order of 6b.7's table, and the lines that aren't
+//! What the Restore dialog needs to know about a snapshot (`CheckRestore`):
+//! the first refusal, if any, in the order of the checks, and the lines that aren't
 //! refusals (home files, `/root`, the old format, which Apsis the snapshot holds).
 //!
 //! Pure: the helper reads the files and runs the checks that need paths, and hands their
@@ -21,16 +21,16 @@ pub type WireCheckRestore = (bool, String, bool, bool, bool, String);
 /// What `CheckRestore` found: the Restore dialog's content, or the "Can't restore" one's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dialog {
-    /// The first refusal in 6b.7's order; `None` means the snapshot can be restored.
+    /// The first refusal in the checks' order; `None` means the snapshot can be restored.
     pub refusal: Option<Refusal>,
-    /// The snapshot holds home files, so the dialog offers the choice (6b.3).
+    /// The snapshot holds home files, so the dialog offers the choice.
     pub has_home: bool,
     /// The snapshot holds `/root` with content, so it's restored with the system (not a
     /// choice); otherwise the filter keeps the live `/root` whole.
     pub has_root: bool,
     /// Made without ACLs and extended attributes (0.4.1).
     pub old_format: bool,
-    /// Which Apsis the snapshot holds (6b.2).
+    /// Which Apsis the snapshot holds.
     pub apsis: InSnapshot,
 }
 
@@ -59,7 +59,7 @@ pub struct Inputs<'a> {
     pub dpkg_status: Option<&'a str>,
 }
 
-/// The dialog: the first refusal in 6b.7's order (the system and snapshot checks, the Pop!_OS
+/// The dialog: the first refusal in the checks' order (the system and snapshot checks, the Pop!_OS
 /// upgrade, the crypttab, the boot files), and the lines that aren't refusals.
 #[must_use]
 pub fn build(inputs: &Inputs<'_>) -> Dialog {
@@ -177,7 +177,7 @@ mod tests {
         assert!(!build(&inputs).has_root);
     }
 
-    /// 6b.7's order: the system and snapshot checks, the Pop!_OS upgrade, the crypttab, the
+    /// The checks' order: the system and snapshot checks, the Pop!_OS upgrade, the crypttab, the
     /// boot files. The first that fails is the refusal; the rest aren't consulted.
     #[test]
     fn the_first_refusal_in_the_tables_order_wins() {

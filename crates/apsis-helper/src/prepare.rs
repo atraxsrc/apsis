@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! `Restore`'s preparation (PLAN 6b.4, 6b.9, 6b.13 step 3 item 5): the checks again, both dry
+//! `Restore`'s preparation: the checks again, both dry
 //! runs and the space checks, the safety snapshot, the plan files in the state folder and the
 //! recovery note on the backup disk. Then the plan is ready ([`crate::state::Running::ready`]).
 
@@ -36,7 +36,7 @@ pub struct Request {
 }
 
 /// The safety snapshot's comment: "Safety snapshot, before restoring <the snapshot's date as
-/// the list shows it>" (PLAN 6b.4; the first words say what the row is, owner 2026-10-02).
+/// the list shows it>" (the first words say what the row is, owner 2026-10-02).
 #[must_use]
 pub fn safety_comment(snapshot: &str) -> String {
     let date = parse_snapshot_name(snapshot).map_or_else(
@@ -55,7 +55,7 @@ pub struct Needs {
     pub home: Option<u64>,
 }
 
-/// The space checks of PLAN 6b.4 for the partitions the restore writes to: `transfer` is the
+/// The space checks for the partitions the restore writes to: `transfer` is the
 /// restore's dry-run size, `under_home` the part of it under `/home` when `/home` is its own
 /// mount and restored (`home` is then its `statvfs`). `/` is checked first.
 ///
@@ -89,7 +89,7 @@ pub fn needs(
 /// if it's missing, and cleared of what an earlier preparation or arm left (the plan, its
 /// filter and note, `state.json`, the ESP backup, a helper copy). What the last restore
 /// left stays: `result.json` (`RestoreResult` reads it), rsync's log, and the filter and
-/// note its arm kept (`last-restore.*`). The log is cleared at the arm (PLAN 6b.5).
+/// note its arm kept (`last-restore.*`). The log is cleared at the arm.
 ///
 /// # Errors
 ///
@@ -130,8 +130,8 @@ const HOME_FILTER_FILE: &str = "restore-home.filter";
 /// after; the create writes its own copy in the staging folder.
 const SAFETY_EXCLUDE_FILE: &str = "safety.exclude";
 
-/// The whole preparation (PLAN 6b.4's order: the refusals, both dry runs and space, the
-/// safety snapshot, the plan). Runs under the write lock as the `restore` job; `cancel` stops
+/// The whole preparation (the refusals, both dry runs and space, the safety snapshot, the
+/// plan, in that order). Runs under the write lock as the `restore` job; `cancel` stops
 /// it between steps and inside rsync. On `Ok`, `request.json`, `restore.filter`,
 /// `restore.note` and the recovery note on the backup disk are written and the plan is ready
 /// for `RestartToRestore`. On `Err` (stopped, refused or failed) the filter and the note it
@@ -150,7 +150,7 @@ pub fn prepare(request: &Request, state: &Arc<State>, cancel: Arc<Cancel>) -> Re
 }
 
 /// A preparation's end: one that didn't get to "ready" leaves no filter and no note in
-/// `dir` (PLAN 6b.5; check 8 found a stopped one's filter in the place of the last
+/// `dir` (check 8 found a stopped one's filter in the place of the last
 /// restore's). A file that can't be removed is logged, and the preparation's own error
 /// stays the answer.
 ///

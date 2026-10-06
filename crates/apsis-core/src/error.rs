@@ -64,12 +64,12 @@ pub enum Error {
     /// folder). The text says why.
     #[error("{0}")]
     InvalidInput(String),
-    /// A full-system restore the helper refused (PLAN 6b.7): the refusal's word on the wire
+    /// A full-system restore the helper refused: the refusal's word on the wire
     /// (`restore::refusal::Refusal::to_wire`), which the applet decodes for its dialog.
     #[error("can't restore this snapshot: {0}")]
     RestoreRefused(String),
-    /// A delete the helper refused because a restore is armed and waits for the restart
-    /// (PLAN 6b.5): no snapshot goes while one, the armed plan's or its safety snapshot
+    /// A delete the helper refused because a restore is armed and waits for the restart:
+    /// no snapshot goes while one, the armed plan's or its safety snapshot
     /// among them. Nothing ran.
     #[error("a restore is armed and waits for the restart")]
     RestoreArmed,

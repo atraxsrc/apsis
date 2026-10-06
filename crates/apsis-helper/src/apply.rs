@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! `apsis-helper --apply-restore`: the offline entry point (PLAN 6b.6), and the real
+//! `apsis-helper --apply-restore`: the offline entry point, and the real
 //! [`apsis_core::restore::apply::Runner`] behind core's state machine. No D-Bus. rsync,
 //! udevadm, kernelstub, plymouth and systemctl run with a fixed argv and the helper's fixed
 //! `PATH`; what the person sees goes through plymouth.
@@ -28,10 +28,10 @@ use crate::unlock::{self, Boot};
 /// How many lines of rsync's standard error the result keeps.
 const STDERR_TAIL_LINES: usize = 20;
 
-/// What the boot screen says while the copy runs (PLAN 6b.5).
+/// What the boot screen says while the copy runs.
 const COPYING: &str = "Restoring the system. Don't turn off the computer.";
 
-/// `apsis-helper --apply-restore` (PLAN 6b.6): the apply for this boot, then the exit code
+/// `apsis-helper --apply-restore`: the apply for this boot, then the exit code
 /// the unit's `FailureAction=reboot` reads ([`apply::exit_code`]). A panic removes Apsis's
 /// link before the process dies, so a restart can't come straight back here.
 pub fn apply_restore() -> ExitCode {
@@ -238,7 +238,7 @@ pub fn udevadm_argv(uuid: &str) -> [String; 4] {
     ]
 }
 
-/// The boot refresh (PLAN 6b.6 step 5): exactly what Pop!_OS's hooks run. Used as it is
+/// The boot refresh: exactly what Pop!_OS's hooks run. Used as it is
 /// only when the restored tree has no `/boot/vmlinuz` or `/boot/initrd.img` link.
 #[must_use]
 pub fn kernelstub_argv() -> [String; 3] {
@@ -325,7 +325,7 @@ impl<R: Runner> apply::Runner for RealRunner<R> {
         )
         .map_err(|error| format!("the backup disk couldn't be mounted: {error}"))?;
         self.mounted = Some(mounted);
-        // The path checks and the refusals of 6b.7 once more, on what's there now.
+        // The path checks and the refusals once more, on what's there now.
         let files = SnapshotFiles::read(&self.snapshot_dir(plan));
         let mountinfo = fs::read_to_string(self.root.join("proc/self/mountinfo"))
             .or_else(|_| fs::read_to_string("/proc/self/mountinfo"))
@@ -339,7 +339,7 @@ impl<R: Runner> apply::Runner for RealRunner<R> {
             .devices
             .iter()
             .any(|device| device.uuid == live.root_uuid && device.kind == "part");
-        // A separate /home being restored must be the plan's partition, mounted (6b.6).
+        // A separate /home being restored must be the plan's partition, mounted.
         if let Some(home) = &plan.separate_home {
             if fstype_at(&mountinfo, Path::new("/home")).is_none() {
                 return Err(

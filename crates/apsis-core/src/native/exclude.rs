@@ -12,7 +12,7 @@
 //! user's part (see [`for_backup`]).
 //!
 //! 24.01.1 is the version this follows. 26.09.0 moves the user's filters to the front (so
-//! rsync sees them first) and runs the per-user step after they're copied; see DECISIONS.md.
+//! rsync sees them first) and runs the per-user step after they're copied.
 
 use std::fs;
 use std::path::Path;
@@ -170,7 +170,7 @@ fn passwd_users(passwd: &str) -> impl Iterator<Item = (&str, i64, &str)> {
 ///    an absolute path, its parent folders as `+ <dir>/` (the folder, not its contents): rsync
 ///    never looks inside an excluded folder, so `+ /home/user1/Videos/keep/***` with `/home`
 ///    left out needs `+ /home/`, `+ /home/user1/` and `+ /home/user1/Videos/` first. Not
-///    Timeshift's; see DECISIONS.md, 0.4.0.
+///    Timeshift's (0.4.0).
 /// 4. `+ /root/**` if `include_root`, `+ /home/**` if `include_home`.
 /// 5. The built-in `/root/**` and `/home/*/**`, then `/timeshift/*`.
 ///
