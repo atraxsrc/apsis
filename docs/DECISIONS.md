@@ -6882,3 +6882,175 @@ restore, so its updates should be pending again. The backup disk should hold the
 snapshots only ("baseline1", "6b baseline", "baseline 0.5.0", never touched): I deleted
 "luks spike" and Run A's safety snapshot after Run B, so any later test there starts with a
 fresh snapshot.
+
+## 2026-10-06 - the 0.6 drill passed on apsis-test: home restored, boot-kept forced, the note's lines run in the recovery
+
+Branch `luks-restore-spike` at `a3414c3`, nine commits ahead of main, not pushed. The dev
+build `0.5.0+dev1` (`just deb-dev`, sha256
+`c661e7d39099f79f699663801cd5b3a1b4845b471b103b26cebccbd5ba8bd562`) was installed on
+apsis-test only. The runbook is `notes/drill-runbook.md` with `notes/drill-d.sh` (both
+untracked), five parts chained by pass words. All five passed in one sitting; the pass
+file holds `LOG-READ`, `PRE-OK`, `RULE-OK`, `MARKED`, `HOME-OK`, `FAKE-IN`, `FAKE-OUT`
+(twice each, finding 4), `UPGRADED`, `KEPT-SEEN`, `ESP-BACK`, `KEPT-OK`, `MARK1`,
+`ARMED-FOR-DRILL`, `DRILL-OK`. The results are my sitting as the guide led it, from the
+script's masked logs, which I kept outside the repo and Claude Code read on my say-so.
+Nothing was run on apsis-test by either AI.
+
+### Part 1, `LOG-READ`: Run B copied the snapshot's initrd
+
+Run B's `rsync-log` (10 MB, 07:46:10 to 07:51:41) has three lines naming a kernel file in
+`boot/`: the two symlinks `initrd.img` and `vmlinuz` repointed to 7.0.11, and
+`>f.st...... boot/initrd.img-7.0.11-76070011-generic`. The `>f` means rsync sent the file,
+`s` and `t` that its size and time differed. So Run B's boot image came from the backup
+disk and was not the one the laptop already had. That closes the first open question of the
+2026-10-06 spike entry. There were no `*deleting` lines for the 7.1.5 files: the filter's
+rule 10 keeps the running kernel's files, so rsync never saw them (runbook finding 6).
+Verified: the state folder survived the later downgrade of the package (`PRE-OK` listed
+`rsync-log` and `result.json` still there).
+
+### Part 2, `RULE-OK`: the real rule reads the real laptop
+
+`pre` found the spike's layout: a `crypto_LUKS` partition, `cryptdata` (crypt,
+`LVM2_member`), `data-root` (lvm, ext4) at `/`, root `/dev/mapper/data-root`. The live
+`/etc/crypttab` line is `cryptdata UUID=<uuid> none luks`: the form the rule accepts, and
+the one the spike entry called unverified. The boot entry says `root=UUID=`. Kernel
+`7.0.11-76070011-generic`; the three pieces in `/boot/initrd.img`: `cryptroot/crypttab`
+62 bytes, `usr/sbin/cryptsetup` 231320, `usr/sbin/lvm` 3156712. The helper's hash was the
+one built here. 337 updates were waiting. The log also holds lsblk's JSON as the helper
+reads it, masked: the hand-written fixture can be replaced by it.
+
+"drill base" with "Every user's home folder" ticked took about 40 minutes and about 9.3G
+(11G free before, 1.7G after; the window's figures, the script's `space` found no mount).
+Restore on it opened the confirm dialog ("Restore the system?", the Home folders choice,
+the safety snapshot box), cancelled. So the rule let an encrypted Pop!_OS install through
+with no spike code, which the spike entry left to this dialog to settle.
+
+### Part 3, `HOME-OK`: a restore with the home folders
+
+Markers: `/etc/apsis-drill-m0`, cowsay installed, a new file in the home folder, a file
+that said `before` changed to `after`. Restore of "drill base" (`2026-10-06_09-31-52`)
+with "Restore them too" and the safety snapshot ticked (`2026-10-06_10-14-58`): about 3
+minutes, the unlock prompt and the passphrase at both restarts. Outcome `done`. The
+journal's new line, whole: `apsis-helper: unlock check: the initrd before has cryptsetup,
+lvm, cryptroot/crypttab of 62 bytes; after, cryptsetup, lvm, cryptroot/crypttab of 62
+bytes; root= is the same`. `SUMS-SAME` (crypttab, fstab, the `root=` option); the ESP
+boots 7.0.11 with the three pieces; no failed units; system marker gone, cowsay gone, the
+new home file gone, the changed file `before` again. Window: `System restored to
+2026-10-06 09:31`, tooltip with `Home folders were restored too.` Part 3's safety
+snapshot was deleted between parts.
+
+### Part 4, `KEPT-OK`: boot-kept forced across the kernel update, and the way back
+
+Nothing in the build forces it. A four-line stand-in for `/usr/bin/lsinitramfs` that exits
+1 was in place while "drill fake" (`2026-10-06_10-49-00`) was made, then the real one was
+put back (`FAKE-OUT`: dpkg's verify clean, the three pieces listed). The upgrade of Run B
+again: 337 packages, kernel `7.1.5-76070105-generic`, `UPGRADED` after the restart.
+
+K5, the restore of "drill fake" with the safety snapshot unticked, ended `boot-kept`. The
+journal: `apsis-helper: the boot refresh failed (lsinitramfs couldn't list
+/var/lib/apsis/restore/esp-backup/initrd.img: apsis drill: lsinitramfs stand-in, failing on
+purpose): putting the boot files back`, then `the restore ended: boot-kept: ... the boot
+files from before were put back` and `apply-restore ended: Finished(BootKept)`. After it
+the laptop ran 7.1.5 while `/boot` linked to 7.0.11; `ESP-BOOTS-7.1.5`; the ESP's initrd
+had the three pieces; `SUMS-SAME`; no failed units; the stand-in was in place, as the
+snapshot had it. The window, for the first time on hardware: `System restored · still
+boots the previous kernel · see README`, and the tooltip starting `Restored to <date>. The
+boot files couldn't be refreshed, so the computer keeps the ones it had and runs the kernel
+from before the restore.`, word for word as the code has them.
+
+K7, predicted from the code and now seen: Restore on "drill base" was refused with `Can't
+restore this snapshot`, `The boot files on this computer don't match the kernel it started
+with.` and `Install the latest kernel update, restart, then try again.`
+
+K8, by hand, the helper's own kernelstub call with 7.0.11's paths: `ESP-BACK`; kernelstub
+said `No old kernel found, skipping`. K9, the restore of "drill base" with the box
+unticked: outcome `done`, the `unlock check:` line with `root= is the same`, `removed
+kernel 7.1.5-76070105-generic: not in the snapshot`, 7.0.11 running and on the ESP, the
+real `lsinitramfs` back, no 7.1.5 file in `/boot`. "drill fake" was deleted between parts.
+
+### Part 5, `DRILL-OK`: the note's lines run in Pop's recovery
+
+Marker 1, then the restore of "drill base" with the safety snapshot ticked
+(`2026-10-06_11-31-44`), home kept: outcome `done`, marker 1 gone. The kept note had the
+unlock line, `vgchange -ay`, four mount lines, two rsync lines (a) and (b), the chroot
+lines. Marker 2 after it. So the safety snapshot held marker 1 and not marker 2.
+
+In the recovery (session recorded with `script`, 13 minutes), the lines came from my own
+USB stick, plugged in there to copy and paste them from. `command -v` found
+`cryptsetup`, `vgchange` and `rsync`; `lsblk -f` showed the `crypto_LUKS` partition with
+nothing under it and the backup disk unmounted. `luksOpen` asked for the passphrase;
+`vgchange -ay` said `1 logical volume(s) in volume group "data" now active`; `lsblk` then
+showed `cryptdata` and `data-root` under the partition. The four mount lines, rsync (b),
+the bind mounts, `update-initramfs -u -k all` (it rebuilt 7.0.11's initrd and ran
+kernelstub itself; no `cryptsetup: WARNING` or `ERROR` line), `kernelstub --verbose` and
+`rm -f /mnt/system-update` all went through. Before the restart: the chroot's
+`lsinitramfs` listed the three pieces with `cryptroot/crypttab` at 62 bytes, and the boot
+entry had one `root=UUID=`. A normal restart, the unlock prompt, the greeter.
+
+Verify: marker 1 back, marker 2 gone, the initrd built 14 minutes after marker 2 (the one
+made in the chroot), `ESP-BOOTS-7.0.11`, three pieces, `SUMS-SAME`, `system: running`, no
+failed units.
+
+**What this proves.** On the standard encrypted install, the same installation: a restore
+with the home folders works; the boot refresh's failure path puts the boot files back and
+the window and the next refusal say what they should; the recovery note's unlock and LVM
+lines, run as written, bring the disk up, and `update-initramfs` in the chroot builds an
+initrd that unlocks it, because the mapping was opened under the crypttab's name. The
+spike entry's three "never run on hardware" items (the put-back, the rescue lines, a
+restore with home) are run.
+
+**Not shown.**
+
+- The README's advice for the boot-kept state: K8 ran the helper's kernelstub line by hand
+  instead of following the README's steps.
+- The unlock check's own verdict on an initrd that lacks the pieces: the stand-in made the
+  listing fail, so the comparison never ran.
+- The note's "in use" paragraph (a disk the live system opened under another name).
+- The by-hand lines after a restore that changed the kernel: Part 5's restore kept 7.0.11.
+- Any other laptop, any other layout, LUKS without LVM, LVM without LUKS.
+- The sitting took the dev build down from `0.5.0+luksspike-1`; a fresh install of
+  `0.5.0+dev1` over the release build was not what ran.
+
+**Findings** (runbook and script, nothing in the build).
+
+1. D6's copy line used a shell glob for a file that did not exist yet, and failed. A `for`
+   loop over `/mnt/home/*/drill` worked.
+2. The script's `log` mode printed an empty line count: `wc` read the root-only file
+   without sudo.
+3. The journal tail of 70 lines in Part 3 did not reach back to `refreshing the boot
+   files`; the guide inferred it from the kernelstub lines that were there.
+4. K1 to K3 can be run out of order, and were: the stand-in in, out, then the create. That
+   "drill fake" was deleted and the three steps redone; the pass file took a second
+   `FAKE-IN` and `FAKE-OUT` without complaint. The surviving `fake` log reads
+   `ALREADY-FAKE` (10:47:59, before the 10:49 create): the stand-in was in place, and the
+   log of the run that printed `FAKE-IN` was overwritten.
+5. A safety snapshot needs its size plus 1 GiB free (`space::backup_needs`); the
+   runbook's "at least 1G" at D1 was too low and H2 had no number. 1.5G was the working
+   figure, with 1.6G to 1.7G free each time.
+6. L1 expected `*deleting` lines for the 7.1.5 files; rule 10 protects them, so there
+   were none, and `INITRD-COPIED` was the answer either way.
+7. Part 4's "Nothing in the build" had no proof line; "The way back" leaned on Part 5's
+   lines before they were proven; P3 did not record the "drill base" row's date and time.
+8. The note and the README say the unlock lines are untried in a recovery. They are tried
+   now: the lines change (a commit of its own).
+
+### What I decided
+
+- 2026-10-06: still one item at a time, each commit on my yes, nothing pushed until I say.
+
+### AI help at a glance
+
+- I sat at the laptop for all five parts, pasted the recovery's lines from my USB stick,
+  read the dialogs and the window, and wrote the results above in my own words.
+- The guide (a second Claude chat) gave me each step with its expected output, read short
+  greps of each log as I pasted them, and said when a pass word was missing. It ran nothing.
+- Claude Code, on the main machine, wrote the runbook, the script and the dev build's
+  recipe before the sitting, and afterwards read the logs I named and drafted this entry.
+  It ran nothing on apsis-test and installed nothing here.
+
+### Left on apsis-test
+
+`0.5.0+dev1` installed, kernel 7.0.11 running and on the ESP, 337 updates pending again,
+the real `lsinitramfs`. The backup disk holds the three baselines only, 11G free. The
+markers are removed; `~/drill/` stays, its `session.txt` holds the laptop's UUIDs and
+does not leave it.
