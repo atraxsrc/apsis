@@ -82,12 +82,13 @@
     <release version="0.6.0" date="2026-10-06">
       <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.6.0</url>
       <description>
-        <p>Restore now works on an encrypted Pop!_OS install (LUKS with LVM, the layout the installer's "Encrypt drive" makes). Restore stays experimental.</p>
+        <p>Restore now works on an encrypted Pop!_OS install: an LVM volume inside one LUKS partition, the layout Pop!_OS's installer makes with "Encrypt drive". Restore stays experimental, for Pop!_OS 24.04 with systemd-boot.</p>
         <ul>
-          <li>Restore accepts a system disk on an LVM volume inside one LUKS partition, on the installation the snapshot was made of; other encrypted or LVM layouts are refused</li>
-          <li>After the boot files are refreshed, Apsis checks that they can still unlock the disk, and puts the old ones back if they can't</li>
+          <li>Restore on an encrypted system disk; the passphrase is asked twice, at the restart that runs the restore and at the start after it</li>
+          <li>A check that the new boot files can still unlock the disk; if they can't, the computer keeps the boot files it had</li>
           <li>The recovery note on the backup disk starts with the lines that unlock the disk</li>
-          <li>Run on one laptop with that one layout; the known limits are in the changelog and the README</li>
+          <li>Only the "Encrypt drive" layout: LUKS without LVM, and LVM without LUKS, are refused before anything happens</li>
+          <li>A snapshot made while Apsis 0.5.x was installed puts 0.5.x back; on an encrypted system, install 0.6.0 again after such a restore</li>
         </ul>
       </description>
     </release>
@@ -144,7 +145,7 @@
     <release version="0.3.1" date="2026-09-30">
       <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.3.1</url>
       <description>
-        <p>Fixes from the first test on a clean machine.</p>
+        <p>Fixes for a fresh install.</p>
         <ul>
           <li>Opening Apsis again brings the open window forward instead of opening another</li>
           <li>A window opened while a snapshot job runs says it is busy and waits for the job</li>

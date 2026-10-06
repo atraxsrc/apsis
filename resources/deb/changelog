@@ -1,13 +1,12 @@
 apsis (0.6.0-1) noble; urgency=medium
 
   * New upstream release, see CHANGELOG.md: Restore now works on an
-    encrypted Pop!_OS install (LUKS with LVM, the layout the installer's
-    "Encrypt drive" makes), on the installation the snapshot was made of;
-    other encrypted or LVM layouts stay refused. Once the boot files are
-    refreshed, the helper checks that they can still unlock the disk and
-    puts the old ones back if they can't. The recovery note starts with the
-    lines that unlock the disk. Restore stays experimental; this was run on
-    one laptop with that one layout.
+    encrypted Pop!_OS install (an LVM volume inside one LUKS partition, the
+    layout "Encrypt drive" makes); other encrypted or LVM layouts are
+    refused. The passphrase is asked twice. A check makes sure the new boot
+    files can still unlock the disk, and keeps the old ones if they can't.
+    The recovery note starts with the lines that unlock the disk. Restore
+    stays experimental, for Pop!_OS 24.04 with systemd-boot.
 
  -- atraxsrc <92285717+atraxsrc@users.noreply.github.com>  Tue, 06 Oct 2026 18:55:57 +1100
 

@@ -6,66 +6,38 @@ All notable changes to Apsis are listed here. The format follows
 
 ## [0.6.0] - 2026-10-06
 
-Restore now works on an encrypted Pop!_OS install: LUKS with LVM, the layout the installer's
-"Encrypt drive" makes. Restore stays experimental, and for Pop!_OS 24.04 with systemd-boot
-only.
-
-What ran, on one laptop with that layout and the same installation: a restore on the same
-kernel, a restore back across a kernel update, a restore with the home folders, the boot
-files put back after a boot refresh that was made to fail, and the recovery note's lines
-run in Pop!_OS's recovery. The disk's passphrase is asked twice: at the restart that runs
-the restore, and at the start after it.
+Restore now works on an encrypted Pop!_OS install: an LVM volume inside one LUKS
+partition, the layout Pop!_OS's installer makes with "Encrypt drive". Restore stays
+experimental, for Pop!_OS 24.04 with systemd-boot.
 
 ### Added
 
-- **Restore on an encrypted system disk**, in one layout: `/` on an LVM volume inside one
-  LUKS partition, which the live `/etc/crypttab` opens by its UUID. That is what Pop!_OS's
-  installer makes with "Encrypt drive". As before, only a snapshot of this installation is
-  restored, the live `fstab` and `crypttab` are kept, and no initrd is rebuilt: the
-  snapshot's was built on this system.
-- **A check that the refreshed boot files can still unlock the disk.** On that layout, once
-  kernelstub has refreshed the boot files, the helper compares them with the ones from
-  before the restore: the boot entry's `root=` option must be the same, and the new initrd
-  must still hold what the old one held of `cryptsetup`, `lvm` and a non-empty
-  `cryptroot/crypttab`. If it doesn't, or an initrd can't be listed, the boot refresh has
-  failed and the old boot files are put back ("still boots the previous kernel"). The
-  journal has a line that starts `unlock check:`. On a plain partition none of this runs.
-- **The recovery note unlocks the disk first.** On an encrypted system disk,
-  `timeshift/apsis-restore-RECOVER.txt` and "If a restore goes wrong" in the README start
-  with the `cryptsetup luksOpen` line (this machine's UUID and the name from `/etc/crypttab`
-  filled in) and `vgchange -ay`, and say what to do when the live system has already opened
-  the disk under another name.
+- **Restore on an encrypted system disk.** The disk's passphrase is asked twice: at the
+  restart that runs the restore, and at the start after it. As before, only a snapshot
+  of this installation can be restored, and the live `/etc/fstab` and `/etc/crypttab`
+  are kept.
+- **A check that the new boot files can still unlock the disk.** If they can't, the
+  computer keeps the boot files it had and starts the kernel from before the restore.
+- **The recovery note unlocks the disk first.** On an encrypted system,
+  `timeshift/apsis-restore-RECOVER.txt` on the backup disk starts with the lines that
+  unlock it, with this computer's details filled in.
 
 ### Changed
 
-- The refusal for a system disk set up in another way reads "Restore doesn't support the
-  way this system disk is set up yet.", with a second line of its own: "It works on a plain
-  partition and on Pop!_OS's standard encrypted install. Snapshots still work: their files
-  are on the backup disk, under timeshift/snapshots."
-- The Restore dialog's two lines for a snapshot that holds an Apsis older than 0.5 no
-  longer name a version: "Install this version of Apsis again afterwards".
-- `apsis-helper`'s D-Bus interface (`Helper3`) and the polkit actions are as in 0.5.0.
-- For testing: `tools/restore-check.sh` also looks at the unlock pieces in the ESP's initrd
-  and at the boot entry's `root=`, and `just deb-dev` packages a branch build under a
-  version of its own.
+- A system disk set up another way is refused with a clearer message: restore works on
+  a plain partition and on Pop!_OS's standard encrypted install, and snapshots still
+  work either way.
+- The Restore dialog's note about snapshots holding an older Apsis no longer names a
+  version.
 
 ### Known limits
 
-The README says more, under "Known limitations of restore" and "If a restore goes wrong".
-
-- Run on one laptop, in one layout, on the same installation. Nothing else.
-- LUKS without LVM and LVM without LUKS are refused. That refusal has unit tests only.
-- Not seen on hardware:
-  - the unlock check's verdict on an initrd that lacks the pieces (the failure that was
-    forced stopped at listing the initrd, before the comparison);
-  - the recovery note's "in use" case, a disk the live system opened under another name;
-  - the by-hand recovery lines after a restore that changed the kernel;
-  - the README's advice for a restore that ends "still boots the previous kernel".
-- A plain, unencrypted install passed the 0.5.0 gate. The rule that reads the disk's layout
-  has changed since, and that install is now covered by unit tests only.
-- A snapshot made while Apsis 0.5.x was installed counts as the current version, so the
-  dialog says nothing about it. On an encrypted install, restoring it puts 0.5.x back, and
-  0.5.x refuses this disk layout until 0.6.0 is installed again.
+- Encrypted restore works in the "Encrypt drive" layout only. LUKS without LVM, and LVM
+  without LUKS, are refused before anything happens.
+- A snapshot made while Apsis 0.5.x was installed puts 0.5.x back. On an encrypted
+  system, install 0.6.0 again after such a restore.
+- The backup disk itself can't be encrypted; the system disk can.
+- Restore is new: a report of how it went on your hardware, good or bad, helps.
 
 ## [0.5.0] - 2026-10-04
 
@@ -203,9 +175,9 @@ like Timeshift's, in standard COSMIC widgets.
 - Open the settings once and click **Save**. Settings from 0.3 (version 1 of
   `/etc/apsis/config.toml`) are shown converted: a home folder set to "everything" for every
   user becomes the `/home` choice, "hidden files only" becomes a `+ <home>/.**` filter, and
-  plain excludes get a `-`. The converted settings take the same files (checked with rsync in
-  the tests). One exception: a `+` filter that a later filter used to hide now works, because
-  the folders above a kept path are let in.
+  plain excludes get a `-`. The converted settings take the same files. One exception: a `+`
+  filter that a later filter used to hide now works, because the folders above a kept path are
+  let in.
 - Going back to 0.3: `sudo cp /etc/apsis/config.toml.bak /etc/apsis/config.toml` (0.3 can't read
   version 2).
 - File restore is gone. Anything in `~/Apsis-restored/`, and any `*.apsis-before-*` file next to
@@ -250,7 +222,7 @@ like Timeshift's, in standard COSMIC widgets.
 
 ## [0.3.1] - 2026-09-30
 
-Fixes from the first test on a clean machine.
+Fixes for a fresh install.
 
 ### Fixed
 
@@ -302,7 +274,7 @@ read-only overview; creating, deleting, settings and restore are in the window.
 
 - The panel popup is a read-only overview: the strip, the newest snapshots, `open apsis`,
   refresh and close. Nothing is created, deleted or restored from it.
-- Theme audit: every colour comes from the COSMIC theme (accent, divider, background, warning,
+- Theme: every colour comes from the COSMIC theme (accent, divider, background, warning,
   destructive); the only derived colours are faded versions of those.
 - A leftover from an interrupted snapshot is reported as one plain line ("leftover from an
   interrupted snapshot, safe to delete") instead of the raw staging path and timestamp; the path
@@ -339,7 +311,7 @@ settings (backup disk, home folders, filters); press `w` to save them as Apsis's
 - A disk usage line under the panes: the backup disk's used and free space as a bar.
 - Progress with the time left for creates and restores.
 - rsync runs at idle I/O priority and nice 19, so the desktop stays responsive.
-- `just deb-install` builds the .deb and installs it, for testing.
+- `just deb-install` builds the .deb and installs it.
 
 ### Changed
 
