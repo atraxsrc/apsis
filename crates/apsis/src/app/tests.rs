@@ -1219,14 +1219,19 @@ fn the_misc_tab_saves_apsiss_own_settings_at_once() {
 }
 
 #[test]
-fn creating_shows_the_elapsed_time_until_there_is_a_percent() {
+fn creating_says_scanning_with_the_elapsed_time_until_there_is_a_percent() {
     let mut app = window();
     let started = Instant::now();
     app.running = Some(Operation::Create(String::new()));
     app.run_started = Some(started);
     let (text, fraction) = app.create_progress_at(started + Duration::from_secs(68));
+    assert!(text.contains("scanning files"), "{text}");
     assert!(text.contains("1m 08s"), "{text}");
     assert_eq!(fraction, None);
+    assert_eq!(
+        app.popup_job_line(&app.job_status().unwrap()),
+        "Creating snapshot · scanning files"
+    );
     // 0% is still no number.
     send(
         &mut app,
@@ -1324,7 +1329,7 @@ fn the_popup_fits_its_width() {
 }
 
 /// The popup in each state, with the default font, a wide one and a large one: it keeps its
-/// width, the line under the ring stays one line, and the buttons stay inside.
+/// width, the status line stays one line, and the button stays inside.
 #[test]
 fn the_popup_fits_with_a_large_font_in_every_state() {
     let mut states = Vec::new();
@@ -1378,71 +1383,37 @@ fn the_popup_fits_with_a_large_font_in_every_state() {
                 node.bounds()
             );
             let column = node.children();
-            // Header, ring, the line under it, (errors,) buttons.
-            let line = column[2].bounds();
+            // Header, the status line, the bar (or why there's none), (errors,) the button.
+            let line = column[1].bounds();
             assert!(
                 line.height < text_size * 2.0,
                 "{at}: the line wraps, {line:?}"
             );
-            let buttons = column.last().unwrap();
-            for button in buttons.children() {
-                let right = buttons.bounds().x + button.bounds().x + button.bounds().width;
-                assert!(
-                    right <= POPUP_WIDTH - 15.5,
-                    "{at}: a button sticks out to {right}"
-                );
-            }
+            let button = column.last().unwrap().bounds();
+            assert!(
+                button.x + button.width <= POPUP_WIDTH - 15.5,
+                "{at}: the button sticks out to {}",
+                button.x + button.width
+            );
         }
     }
 }
 
-/// Every line the ring's centre can show stays within 70% of its inner diameter, at the size
-/// it's drawn at. Measures real text, so only with `APSIS_LAYOUT_TEST=1`.
+/// The popup while a create runs: the window's percent without the time left, and the bar.
 #[test]
-fn the_ring_centre_never_reaches_the_track() {
-    use super::view::{RING_LARGE, RING_PLAIN, RING_TEXT_MAX, ring_text_size, text_width};
-    if std::env::var_os("APSIS_LAYOUT_TEST").is_none_or(|v| v != "1") {
-        eprintln!("layout test skipped; set APSIS_LAYOUT_TEST=1 to run it");
-        return;
-    }
-    let large = [
-        "just now",
-        "59m ago",
-        "23h ago",
-        "47h ago",
-        "334d ago",
-        "1000d ago",
-        "100%",
-    ];
-    let plain = [
-        fl!("ring-no-snapshot"),
-        fl!("ring-deleting"),
-        fl!("ring-creating"),
-        fl!("ring-preparing"),
-        fl!("ring-ready"),
-        fl!("stopping"),
-    ];
-    for (lines, sizes) in [
-        (large.map(str::to_owned).to_vec(), &RING_LARGE[..]),
-        (plain.to_vec(), &RING_PLAIN[..]),
-    ] {
-        for line in lines {
-            let size = ring_text_size(&line, sizes);
-            let width = text_width(&line, size, cosmic::font::bold());
-            assert!(
-                width <= RING_TEXT_MAX,
-                "{line} at {size}: {width} > {RING_TEXT_MAX}"
-            );
-        }
-    }
-    for caption in [
-        fl!("ring-last-snapshot"),
-        fl!("ring-creating-caption"),
-        fl!("ring-preparing-caption"),
-    ] {
-        let width = text_width(&caption, 12.0, cosmic::font::default());
-        assert!(width <= RING_TEXT_MAX, "{caption}: {width}");
-    }
+fn the_popup_shows_a_running_create_as_one_line() {
+    let mut app = model();
+    app.on_listed(Ok(fixture()));
+    app.running = Some(Operation::Create(String::new()));
+    app.job = Some(job(JobKind::Create, JobState::Running, NEWEST));
+    app.progress = Some(Progress {
+        percent: Some(42.0),
+        eta_seconds: Some(192),
+        text: String::new(),
+    });
+    let job = app.job_status().unwrap();
+    assert_eq!(app.popup_job_line(&job), "Creating snapshot · 42%");
+    assert!(job.text.contains("left"), "{}", job.text);
 }
 
 /// What a click in the middle of each part of `element`, laid out at `size`, sends: which
@@ -1744,8 +1715,8 @@ fn screenshots() {
         text: String::new(),
     });
     // The widest age's fit, as a made-up "11mo ago" (Apsis says `334d ago`).
-    let mut long = normal.status_view().ring(true);
-    long.age = "11mo ago".to_owned();
+    let mut long = normal.status_view().popup(true);
+    long.last = fl!("popup-last", age = "11mo ago");
     shoot(
         "popup-age-11mo",
         true,

@@ -102,6 +102,122 @@ fn parse_clock(text: &str) -> Option<u64> {
     (m < 60 && s < 60).then(|| h * 3600 + m * 60 + s)
 }
 
+/// rsync's file count at the end of a progress line: `to-chk=A/B` (A of B files still to check,
+/// the list complete) or `ir-chk=A/B` (the same while rsync is still scanning, so B grows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Checked {
+    pub left: u64,
+    pub total: u64,
+    /// `to-chk`: `total` is final.
+    pub complete: bool,
+}
+
+impl Checked {
+    /// Reads the count from a progress line's text; `None` when it has none.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let (complete, rest) = if let Some((_, rest)) = text.split_once("to-chk=") {
+            (true, rest)
+        } else {
+            (false, text.split_once("ir-chk=")?.1)
+        };
+        let (left, rest) = rest.split_once('/')?;
+        let total = rest.split(|c: char| !c.is_ascii_digit()).next()?;
+        let left: u64 = left.parse().ok()?;
+        let total: u64 = total.parse().ok()?;
+        (left <= total && total > 0).then_some(Self {
+            left,
+            total,
+            complete,
+        })
+    }
+
+    /// Share of the files checked, `0.0..=100.0`.
+    #[must_use]
+    pub fn percent(self) -> f64 {
+        #[allow(clippy::cast_precision_loss, reason = "a percent")]
+        let done = (self.total - self.left) as f64 / self.total as f64;
+        done * 100.0
+    }
+}
+
+/// Seconds of copying before a time left is shown: rsync's pace in the first seconds says
+/// little about the rest.
+pub const ETA_AFTER_SECONDS: u64 = 30;
+/// Percent done before a time left is shown.
+pub const ETA_AFTER_PERCENT: f64 = 5.0;
+
+/// Turns a create's rsync progress lines into progress that only goes forward.
+///
+/// rsync's own percent can't be shown as it is: with incremental recursion its total grows
+/// while it runs, so the percent jumps back (`rsync_argv` turns that off), and with
+/// `--link-dest` it counts only the bytes copied, so a snapshot of a mostly unchanged system
+/// ends at a few percent. So: nothing (`percent: None`, "scanning") until rsync's file list is
+/// complete (the first `to-chk`), then the larger of files checked and rsync's byte percent,
+/// never less than before. The time left is worked out here from the whole run's pace, and
+/// only once [`ETA_AFTER_SECONDS`] and [`ETA_AFTER_PERCENT`] have passed; rsync's figure
+/// follows the pace of the last few files.
+#[derive(Debug, Default)]
+pub struct CreateProgress {
+    /// When the file list was complete, and the percent then.
+    counting_since: Option<(Instant, f64)>,
+    /// The last files-checked percent seen.
+    files: f64,
+    /// The highest percent handed out.
+    shown: f64,
+}
+
+impl CreateProgress {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The progress to show for rsync's `line`, read at `now`.
+    pub fn update(&mut self, line: &Progress, now: Instant) -> Progress {
+        let checked = Checked::parse(&line.text);
+        // An `ir-chk` count (still scanning) has a total that will grow: not used.
+        if let Some(checked) = checked.filter(|c| c.complete) {
+            self.files = self.files.max(checked.percent());
+        }
+        let counting = checked.is_some_and(|c| c.complete) || self.counting_since.is_some();
+        if !counting {
+            return Progress {
+                percent: None,
+                eta_seconds: None,
+                text: line.text.clone(),
+            };
+        }
+        let bytes = line.percent.unwrap_or(0.0);
+        let percent = self.shown.max(self.files).max(bytes).min(100.0);
+        self.shown = percent;
+        let (since, at_start) = *self.counting_since.get_or_insert((now, percent));
+        let eta_seconds = if percent >= 100.0 {
+            Some(0)
+        } else {
+            let elapsed = now.saturating_duration_since(since).as_secs();
+            let done = percent - at_start;
+            (elapsed >= ETA_AFTER_SECONDS && percent >= ETA_AFTER_PERCENT && done > 0.0).then(
+                || {
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        clippy::cast_precision_loss,
+                        reason = "seconds, rounded"
+                    )]
+                    let eta = (elapsed as f64 * (100.0 - percent) / done).round() as u64;
+                    eta
+                },
+            )
+        };
+        Progress {
+            percent: Some(percent),
+            eta_seconds,
+            text: line.text.clone(),
+        }
+    }
+}
+
 /// Splits a byte stream into pieces ending at `\r` or `\n`, as a terminal would draw them.
 /// Invalid UTF-8 is replaced.
 #[derive(Debug, Default)]
@@ -219,6 +335,110 @@ mod tests {
         ] {
             assert_eq!(parse_rsync(other), None, "{other}");
         }
+    }
+
+    #[test]
+    fn checked_counts() {
+        let to = Checked::parse("1,000  2%  1.00kB/s  0:00:09 (xfr#5, to-chk=750/1000)").unwrap();
+        assert_eq!((to.left, to.total, to.complete), (750, 1000, true));
+        assert!((to.percent() - 25.0).abs() < 1e-9);
+        let ir = Checked::parse("1,000  2%  1.00kB/s  0:00:09 (xfr#5, ir-chk=10/40)").unwrap();
+        assert!(!ir.complete);
+        for other in [
+            "1,000  2%  1.00kB/s  0:00:09",
+            "x to-chk=5/0)",
+            "x to-chk=9/5)",
+            "x to-chk=/5)",
+        ] {
+            assert_eq!(Checked::parse(other), None, "{other}");
+        }
+    }
+
+    /// Feeds `lines` a second apart from `start`; the percents and times left handed out.
+    fn feed(lines: &[&str], start: Instant) -> Vec<(Option<f64>, Option<u64>)> {
+        let mut tracker = CreateProgress::new();
+        lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let progress = parse_rsync(line).unwrap();
+                let now = start + Duration::from_secs(u64::try_from(i).unwrap());
+                let out = tracker.update(&progress, now);
+                (out.percent, out.eta_seconds)
+            })
+            .collect()
+    }
+
+    /// Incremental recursion: rsync's percent jumps back while it scans. Nothing is shown
+    /// until the list is complete, and then only forward.
+    #[test]
+    fn scanning_until_the_file_list_is_complete_then_only_forward() {
+        let seen = feed(
+            &[
+                "  0   0%  0.00kB/s  0:00:00",
+                "  9  36%  1.00kB/s  0:00:09 (xfr#1, ir-chk=10/20)",
+                "  9   1%  1.00kB/s  0:00:09 (xfr#2, ir-chk=10/900)",
+                "  9  40%  1.00kB/s  0:00:09 (xfr#3, to-chk=500/1000)",
+                "  9  13%  1.00kB/s  0:00:09",
+                "  9  45%  1.00kB/s  0:00:09 (xfr#4, to-chk=600/1000)",
+                "  9  70%  1.00kB/s  0:00:09 (xfr#5, to-chk=0/1000)",
+            ],
+            Instant::now(),
+        );
+        let percents: Vec<_> = seen.iter().map(|s| s.0).collect();
+        assert_eq!(
+            percents,
+            [
+                None,
+                None,
+                None,
+                Some(50.0),
+                Some(50.0),
+                Some(50.0),
+                Some(100.0)
+            ]
+        );
+        assert_eq!(seen.last().unwrap().1, Some(0));
+    }
+
+    /// `--link-dest`: rsync's byte percent stays low (unchanged files aren't copied); the
+    /// files checked carry the run to 100%.
+    #[test]
+    fn link_dest_runs_end_at_100_percent() {
+        let seen = feed(
+            &[
+                "  9   0%  1.00kB/s  0:00:00 (xfr#1, to-chk=900/1000)",
+                "  9   1%  1.00kB/s  0:00:00 (xfr#2, to-chk=400/1000)",
+                "  9   2%  1.00kB/s  0:00:00 (xfr#3, to-chk=0/1000)",
+            ],
+            Instant::now(),
+        );
+        let percents: Vec<_> = seen.iter().map(|s| s.0).collect();
+        assert_eq!(percents, [Some(10.0), Some(60.0), Some(100.0)]);
+    }
+
+    /// No time left in the first seconds or the first percent; then the whole run's pace.
+    #[test]
+    fn time_left_only_once_it_means_something() {
+        let mut tracker = CreateProgress::new();
+        let start = Instant::now();
+        let at = |tracker: &mut CreateProgress, secs: u64, left: u64| {
+            let line = format!("  9   0%  1.00kB/s  0:00:01 (xfr#1, to-chk={left}/1000)");
+            tracker.update(
+                &parse_rsync(&line).unwrap(),
+                start + Duration::from_secs(secs),
+            )
+        };
+        assert_eq!(at(&mut tracker, 0, 1000).eta_seconds, None);
+        // 20% after 10 s: too early.
+        assert_eq!(at(&mut tracker, 10, 800).eta_seconds, None);
+        // 3% after 40 s would be too little done, but percent never goes back: still 20%.
+        let p = at(&mut tracker, 40, 970);
+        assert_eq!(p.percent, Some(20.0));
+        // 20% in 40 s: 160 s for the other 80%.
+        assert_eq!(p.eta_seconds, Some(160));
+        // rsync's own figure (0:00:01) isn't used.
+        assert_eq!(at(&mut tracker, 60, 500).eta_seconds, Some(60));
     }
 
     #[test]

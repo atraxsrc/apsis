@@ -739,7 +739,7 @@ fn dry_run_logs_the_plan_and_writes_nothing() {
         assert!(
             log.contains(&format!(
                 "run (argv, no shell): rsync -aii -A -X --numeric-ids --recursive --verbose --delete --force \
-                 --stats --sparse --delete-excluded --info=progress2 --link-dest={}/ --log-file={}/rsync-log \
+                 --stats --sparse --delete-excluded --info=progress2 --no-inc-recursive --link-dest={}/ --log-file={}/rsync-log \
                  --exclude-from={}/exclude.list {}/ {}/localhost/",
                 localhost(&lab, FIRST).display(),
                 staging.display(),

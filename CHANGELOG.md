@@ -4,6 +4,21 @@ All notable changes to Apsis are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Snapshot progress only goes forward.** The percent no longer jumps back and forth,
+  and a snapshot no longer ends at a few percent. rsync now lists every file before it
+  copies; until then the line says "scanning files". The time left shows only once it
+  means something.
+
+### Changed
+
+- **The popup is simpler.** One status line ("Last snapshot 1m ago", "Creating snapshot
+  · 42%") over the same bar the window has: the backup disk's use, or the snapshot's
+  progress while one runs. Refresh moved to the right-click menu only.
+
 ## [0.6.1] - 2026-10-07
 
 ### Changed

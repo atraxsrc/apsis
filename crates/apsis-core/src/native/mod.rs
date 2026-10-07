@@ -39,6 +39,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use jiff::Zoned;
 
@@ -48,7 +49,7 @@ pub use self::runner::QuietRunner;
 use crate::backend::Backend;
 use crate::error::{Error, Result};
 use crate::model::{Mode, Snapshot, SnapshotList, Tag, parse_snapshot_name};
-use crate::progress::{Progress, parse_rsync};
+use crate::progress::{CreateProgress, Progress, parse_rsync};
 use crate::runner::{Runner, validate_comment};
 use crate::usage::mounts_under;
 
@@ -354,11 +355,12 @@ impl<R: Runner> NativeRsync<R> {
     fn build(&self, plan: &CreatePlan) -> Result<()> {
         write_synced(&plan.staging.join(EXCLUDE_FILE), &plan.exclude)?;
         (self.log)(&format!("running {}", shell_words(&plan.argv)));
+        let mut tracker = CreateProgress::new();
         let output = self.runner.run_cancellable(
             &plan.argv,
             &mut |segment| {
                 parse_rsync(segment)
-                    .map(|progress| (self.progress)(progress))
+                    .map(|line| (self.progress)(tracker.update(&line, Instant::now())))
                     .is_some()
             },
             &self.cancel,
@@ -858,6 +860,11 @@ impl fmt::Display for CreatePlan {
 /// is `source` with a trailing `/` (Timeshift: `/`), the destination `<snapshot>/localhost/`. Apsis adds `--info=progress2` (whole-transfer percent
 /// and time left, on stdout, which Timeshift's log file doesn't get).
 ///
+/// Since 0.6.2 Apsis also adds `--no-inc-recursive`: rsync lists every file before it copies,
+/// so the progress has a total that doesn't grow while it runs (with incremental recursion
+/// the percent jumped back and forth). It costs the file list in memory (about 100 bytes a
+/// file) and a scan before the first percent; see [`CreateProgress`].
+///
 /// Since 0.4.1 Apsis also adds `-A -X --numeric-ids`: POSIX ACLs, extended attributes (file
 /// capabilities among them) and owners by number, so a restore has everything it needs.
 /// `-H` stays off, as in Timeshift: with `--link-dest` it costs a table of every
@@ -878,6 +885,7 @@ pub fn rsync_argv(source: &Path, snapshot: &Path, link_from: Option<&Path>) -> V
         "--sparse",
         "--delete-excluded",
         "--info=progress2",
+        "--no-inc-recursive",
     ]
     .iter()
     .map(OsString::from)
@@ -1007,6 +1015,7 @@ mod tests {
                 "--sparse",
                 "--delete-excluded",
                 "--info=progress2",
+                "--no-inc-recursive",
                 "--link-dest=/mnt/timeshift/snapshots/2026-09-24_10-00-00/localhost/",
                 &format!("--log-file={s}/rsync-log"),
                 &format!("--exclude-from={s}/exclude.list"),
@@ -1039,6 +1048,7 @@ mod tests {
                 "--sparse",
                 "--delete-excluded",
                 "--info=progress2",
+                "--no-inc-recursive",
                 "--link-dest=/s/w/",
                 "--exclude-from=/var/lib/apsis/restore/safety.exclude",
                 "/",

@@ -32,21 +32,15 @@ strip-disk-not-connected = not connected
 strip-disk-unknown = unknown
 strip-next-manual = manual only
 
-# Popup: the disk ring and the last snapshot in its centre
+# Popup: one status line and the bar (the backup disk, or the running job)
 open-apsis = Open Apsis
 refresh = Refresh
-ring-last-snapshot = last snapshot
-ring-no-snapshot = No snapshot
-ring-disk = { $device } · { $free } free of { $total }
-ring-disk-not-connected = Backup disk not connected
-ring-no-disk = No backup disk chosen
-ring-disk-unknown = Backup disk unknown
-ring-creating = Creating
-ring-creating-caption = creating
-ring-deleting = Deleting
-ring-preparing = Preparing
-ring-preparing-caption = preparing restore
-ring-ready = Ready to restore
+popup-last = Last snapshot { $age }
+popup-no-snapshot = No snapshot yet
+popup-disk-not-connected = Backup disk not connected
+popup-no-disk = No backup disk chosen
+popup-disk-unknown = Backup disk unknown
+popup-ready = Ready to restore
 
 # Toolbar and list
 create = Create
@@ -71,7 +65,8 @@ disk-removed = Backup disk removed
 progress-creating = Creating snapshot
 progress-percent = { $label } · { $percent }
 progress-percent-left = { $label } · { $percent } · { $time } left
-progress-working = { $label } · { $elapsed }
+progress-scanning = { $label } · scanning files · { $elapsed }
+progress-scanning-short = { $label } · scanning files
 deleting = Deleting { $name }…
 deleting-many = Deleting { $step } of { $count }: { $name }…
 stop = Stop
