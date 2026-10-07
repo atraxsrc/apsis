@@ -82,6 +82,17 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.6.2" date="2026-10-08">
+      <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.6.2</url>
+      <description>
+        <p>A snapshot's progress only goes forward.</p>
+        <ul>
+          <li>The percent no longer jumps back and forth, and a snapshot no longer ends at a few percent; it keeps moving through large unchanged parts of the system</li>
+          <li>Until rsync has listed every file, the progress says "scanning files"; the time left shows only once it means something</li>
+          <li>The panel popup is a status line over the window's bar: the backup disk's use, or the snapshot's progress while one runs</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.6.1" date="2026-10-07">
       <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.6.1</url>
       <description>

@@ -1,3 +1,14 @@
+apsis (0.6.2-1) noble; urgency=medium
+
+  * New upstream release, see CHANGELOG.md: a snapshot's progress only goes
+    forward. It no longer jumps back and forth or ends at a few percent, and
+    it keeps moving through large unchanged parts of the system. Until rsync
+    has listed every file it says "scanning files". The panel popup is a
+    status line over the window's bar: the backup disk's use, or the
+    snapshot's progress while one runs.
+
+ -- atraxsrc <92285717+atraxsrc@users.noreply.github.com>  Thu, 08 Oct 2026 08:24:50 +1100
+
 apsis (0.6.1-1) noble; urgency=medium
 
   * New upstream release, see CHANGELOG.md: the panel popup is a ring that

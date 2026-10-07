@@ -153,18 +153,48 @@ pub const ETA_AFTER_PERCENT: f64 = 5.0;
 /// while it runs, so the percent jumps back (`rsync_argv` turns that off), and with
 /// `--link-dest` it counts only the bytes copied, so a snapshot of a mostly unchanged system
 /// ends at a few percent. So: nothing (`percent: None`, "scanning") until rsync's file list is
-/// complete (the first `to-chk`), then the larger of files checked and rsync's byte percent,
-/// never less than before. The time left is worked out here from the whole run's pace, and
-/// only once [`ETA_AFTER_SECONDS`] and [`ETA_AFTER_PERCENT`] have passed; rsync's figure
-/// follows the pace of the last few files.
+/// complete (the first `to-chk`), then the largest of files checked, files listed and rsync's
+/// byte percent, never less than before. The time left is worked out here from the whole
+/// run's pace, and only once [`ETA_AFTER_SECONDS`] and [`ETA_AFTER_PERCENT`] have passed;
+/// rsync's figure follows the pace of the last few files.
+///
+/// Files checked (`to-chk`) only change on a progress line, and rsync prints one only after
+/// copying a file, so through a large unchanged area (`/usr`) that count stands still. With
+/// `-ii` rsync also prints an itemize line for every entry, unchanged ones too (`hf` for a
+/// file hard-linked by `--link-dest`; checked with rsync 3.2.7: one line per entry, as many as
+/// `to-chk`'s total). [`CreateProgress::listed`] counts those against that total, so the
+/// percent keeps moving. That share stops at [`LISTED_MAX_PERCENT`]: only rsync's own count
+/// ends a run.
 #[derive(Debug, Default)]
 pub struct CreateProgress {
     /// When the file list was complete, and the percent then.
     counting_since: Option<(Instant, f64)>,
     /// The last files-checked percent seen.
     files: f64,
+    /// Itemize lines seen, and `to-chk`'s total once known.
+    listed: u64,
+    total: Option<u64>,
     /// The highest percent handed out.
     shown: f64,
+}
+
+/// The highest percent the itemize lines alone can give.
+pub const LISTED_MAX_PERCENT: f64 = 99.0;
+/// How far the percent must move before an itemize line hands out progress: there's a line
+/// per file, and the progress goes to the helper.
+pub const LISTED_STEP_PERCENT: f64 = 0.1;
+
+/// Whether `segment` is one of rsync's `-i` itemize lines (`YXcstpoguax name`, e.g.
+/// `hf          usr/bin/ls` or `>f+++++++++ etc/hosts`): an entry rsync went through.
+/// `*deleting` lines (not counted in `to-chk`) and any other text are not.
+#[must_use]
+pub fn is_itemize(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    bytes.len() > 12
+        && b"<>ch.".contains(&bytes[0])
+        && b"fdLDS".contains(&bytes[1])
+        && bytes[2..11].iter().all(|b| b"cstpoguax.+ ?".contains(b))
+        && bytes[11] == b' '
 }
 
 impl CreateProgress {
@@ -179,6 +209,7 @@ impl CreateProgress {
         // An `ir-chk` count (still scanning) has a total that will grow: not used.
         if let Some(checked) = checked.filter(|c| c.complete) {
             self.files = self.files.max(checked.percent());
+            self.total = Some(checked.total);
         }
         let counting = checked.is_some_and(|c| c.complete) || self.counting_since.is_some();
         if !counting {
@@ -189,7 +220,45 @@ impl CreateProgress {
             };
         }
         let bytes = line.percent.unwrap_or(0.0);
-        let percent = self.shown.max(self.files).max(bytes).min(100.0);
+        let percent = self
+            .shown
+            .max(self.files)
+            .max(self.listed_percent())
+            .max(bytes)
+            .min(100.0);
+        self.emit(percent, now, &line.text)
+    }
+
+    /// Counts an rsync output line that isn't progress; when it's an itemize line
+    /// ([`is_itemize`]) that takes the percent [`LISTED_STEP_PERCENT`] or more past what was
+    /// last handed out, the
+    /// progress to show. `None` otherwise, and while scanning.
+    pub fn listed(&mut self, segment: &str, now: Instant) -> Option<Progress> {
+        if !is_itemize(segment) {
+            return None;
+        }
+        self.listed += 1;
+        self.counting_since?;
+        let percent = self.listed_percent();
+        // A hair under the step: a share like 100/1000 isn't exact in floating point.
+        if percent - self.shown < LISTED_STEP_PERCENT - 1e-9 {
+            return None;
+        }
+        Some(self.emit(percent, now, segment.trim()))
+    }
+
+    /// Itemize lines seen against `to-chk`'s total, up to [`LISTED_MAX_PERCENT`]; `0.0`
+    /// before the total is known.
+    fn listed_percent(&self) -> f64 {
+        self.total.map_or(0.0, |total| {
+            #[allow(clippy::cast_precision_loss, reason = "a percent")]
+            let share = self.listed as f64 / total as f64 * 100.0;
+            share.min(LISTED_MAX_PERCENT)
+        })
+    }
+
+    /// Hands out `percent` (already never less than before) with the time left at `now`.
+    fn emit(&mut self, percent: f64, now: Instant, text: &str) -> Progress {
         self.shown = percent;
         let (since, at_start) = *self.counting_since.get_or_insert((now, percent));
         let eta_seconds = if percent >= 100.0 {
@@ -213,7 +282,7 @@ impl CreateProgress {
         Progress {
             percent: Some(percent),
             eta_seconds,
-            text: line.text.clone(),
+            text: text.to_owned(),
         }
     }
 }
@@ -439,6 +508,98 @@ mod tests {
         assert_eq!(p.eta_seconds, Some(160));
         // rsync's own figure (0:00:01) isn't used.
         assert_eq!(at(&mut tracker, 60, 500).eta_seconds, Some(60));
+    }
+
+    #[test]
+    fn itemize_lines() {
+        for line in [
+            "hf          usr/bin/ls",
+            ">f+++++++++ etc/hosts",
+            ">f.st...... etc/fstab",
+            "cd+++++++++ adduser/",
+            "cd          ./",
+            ".d..t...... var/log/",
+            "hL          usr/lib/libz.so.1",
+            "cL+++++++++ bin -> usr/bin",
+            "cS+++++++++ run/socket",
+        ] {
+            assert!(is_itemize(line), "{line}");
+        }
+        for other in [
+            "*deleting   old/file",
+            "building file list ... done",
+            "created directory /run/timeshift/x/localhost",
+            "sent 5,006 bytes  received 1,234 bytes  12.48 bytes/sec",
+            "total size is 9,000  speedup is 1.44",
+            "Number of files: 2,833 (reg: 1,234, dir: 1,599)",
+            "hf          ",
+            "hf",
+            "",
+            "              8   0%    0.00kB/s    0:00:00 (xfr#1, to-chk=107/255)",
+        ] {
+            assert!(!is_itemize(other), "{other}");
+        }
+    }
+
+    /// A large unchanged area: after the first copied file no progress line comes for a long
+    /// time, but an itemize line comes for every file, so the percent keeps moving.
+    #[test]
+    fn itemize_lines_move_the_percent_through_unchanged_files() {
+        let start = Instant::now();
+        let mut tracker = CreateProgress::new();
+        let unchanged = |tracker: &mut CreateProgress, n: usize| {
+            (0..n)
+                .filter_map(|_| tracker.listed("hf          usr/share/x", start))
+                .map(|p| p.percent.unwrap())
+                .collect::<Vec<_>>()
+        };
+        // Before the first `to-chk` (the total isn't known): still scanning.
+        assert!(unchanged(&mut tracker, 99).is_empty());
+        assert_eq!(tracker.listed(">f+++++++++ etc/new", start), None);
+        // The first copied file: 100 of 1000 checked.
+        let line = parse_rsync("  9   0%  1.00kB/s  0:00:00 (xfr#1, to-chk=900/1000)").unwrap();
+        assert_eq!(tracker.update(&line, start).percent, Some(10.0));
+        // 500 unchanged files: up to 60%, in steps, only forward, not one per line.
+        let seen = unchanged(&mut tracker, 500);
+        assert!(seen.len() <= 500 && seen.len() >= 400, "{}", seen.len());
+        assert!(seen.windows(2).all(|w| w[1] > w[0]));
+        assert!((seen.last().unwrap() - 60.0).abs() < 1e-9);
+        // A late progress line with fewer files checked doesn't take it back.
+        let line = parse_rsync("  9   1%  1.00kB/s  0:00:00 (xfr#2, to-chk=850/1000)").unwrap();
+        assert_eq!(tracker.update(&line, start).percent, Some(60.0));
+        // More lines than the total (a count that doesn't match): held below 100%.
+        let seen = unchanged(&mut tracker, 2000);
+        assert!((seen.last().unwrap() - LISTED_MAX_PERCENT).abs() < 1e-9);
+        // Only rsync's own count ends the run.
+        let line = parse_rsync("  9   2%  1.00kB/s  0:00:09 (xfr#3, to-chk=0/1000)").unwrap();
+        let end = tracker.update(&line, start);
+        assert_eq!((end.percent, end.eta_seconds), (Some(100.0), Some(0)));
+        assert!(unchanged(&mut tracker, 10).is_empty());
+    }
+
+    /// The time left from itemize lines follows the same rules: the whole run's pace, only
+    /// after [`ETA_AFTER_SECONDS`].
+    #[test]
+    fn itemize_lines_give_a_time_left_from_the_whole_run() {
+        let start = Instant::now();
+        let mut tracker = CreateProgress::new();
+        let line = parse_rsync("  9   0%  1.00kB/s  0:00:00 (xfr#1, to-chk=1000/1000)").unwrap();
+        assert_eq!(tracker.update(&line, start).percent, Some(0.0));
+        let mut last = None;
+        for _ in 0..100 {
+            last = tracker
+                .listed("hf          a", start + Duration::from_secs(10))
+                .or(last);
+        }
+        assert_eq!(last.as_ref().unwrap().eta_seconds, None);
+        for _ in 0..100 {
+            last = tracker
+                .listed("hf          a", start + Duration::from_secs(40))
+                .or(last);
+        }
+        // 20% in 40 s: 160 s for the other 80%.
+        let last = last.unwrap();
+        assert_eq!((last.percent, last.eta_seconds), (Some(20.0), Some(160)));
     }
 
     #[test]

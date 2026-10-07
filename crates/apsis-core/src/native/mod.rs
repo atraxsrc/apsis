@@ -359,9 +359,14 @@ impl<R: Runner> NativeRsync<R> {
         let output = self.runner.run_cancellable(
             &plan.argv,
             &mut |segment| {
-                parse_rsync(segment)
-                    .map(|line| (self.progress)(tracker.update(&line, Instant::now())))
-                    .is_some()
+                if let Some(line) = parse_rsync(segment) {
+                    (self.progress)(tracker.update(&line, Instant::now()));
+                    return true;
+                }
+                if let Some(progress) = tracker.listed(segment, Instant::now()) {
+                    (self.progress)(progress);
+                }
+                false
             },
             &self.cancel,
         );

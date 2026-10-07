@@ -257,6 +257,47 @@ fn create_reports_rsync_progress_up_to_the_end() {
     }
 }
 
+/// A second snapshot of a mostly unchanged system: after the first copied file rsync prints
+/// no progress line until the end, but the percent still moves through the unchanged files
+/// (its itemize lines), only forward, up to 100%.
+#[test]
+fn create_progress_moves_through_unchanged_files() {
+    for lab in labs("progress-unchanged") {
+        let kind = lab.kind;
+        populate(&lab.source);
+        // Sorted first: the file list's total is known from the first copy on.
+        write(&lab.source.join("aaa/changes"), "version 1\n");
+        for i in 0..3000 {
+            write(
+                &lab.source.join(format!("usr/share/many/f{i:04}")),
+                "same\n",
+            );
+        }
+        let seen: Arc<Mutex<Vec<apsis_core::Progress>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        let (backend, _) = backend(&lab, false);
+        let backend = backend.with_progress(move |p| sink.lock().unwrap().push(p));
+        backend.create("first").unwrap();
+        // Another size: same size and second would pass rsync's quick check unchanged.
+        write(&lab.source.join("aaa/changes"), "version 2, longer\n");
+        seen.lock().unwrap().clear();
+        backend.create("second").unwrap();
+        let percents: Vec<f64> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.percent)
+            .collect();
+        assert_eq!(percents.last(), Some(&100.0), "{kind}: {percents:?}");
+        assert!(
+            percents.windows(2).all(|w| w[1] >= w[0]),
+            "{kind}: {percents:?}"
+        );
+        let between = percents.iter().filter(|&&p| p > 5.0 && p < 95.0).count();
+        assert!(between >= 50, "{kind}: {between} in {percents:?}");
+    }
+}
+
 /// An extended attribute of `path`, or `None` if it has none by that name.
 fn xattr(path: &Path, name: &str) -> Option<Vec<u8>> {
     let mut buffer = [0_u8; 256];

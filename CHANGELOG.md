@@ -4,14 +4,15 @@ All notable changes to Apsis are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.6.2] - 2026-10-08
 
 ### Fixed
 
 - **Snapshot progress only goes forward.** The percent no longer jumps back and forth,
   and a snapshot no longer ends at a few percent. rsync now lists every file before it
-  copies; until then the line says "scanning files". The time left shows only once it
-  means something.
+  copies; until then the line says "scanning files". The percent keeps moving through
+  large unchanged parts of the system too, instead of standing still and then jumping.
+  The time left shows only once it means something.
 
 ### Changed
 
@@ -444,6 +445,7 @@ First release.
   password every time.
 - App and symbolic icons, AppStream metainfo, desktop entries, `just install` / `just uninstall`.
 
+[0.6.2]: https://github.com/atraxsrc/apsis/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/atraxsrc/apsis/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/atraxsrc/apsis/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/atraxsrc/apsis/compare/v0.4.2...v0.5.0
