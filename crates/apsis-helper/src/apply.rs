@@ -23,6 +23,7 @@ use crate::arm;
 use crate::check::{self, Live, SnapshotFiles};
 use crate::native::{self, Access, MOUNT_POINT, Mounted};
 use crate::runner::{DirectRunner, SAFE_PATH};
+use crate::settings;
 use crate::unlock::{self, Boot};
 
 /// How many lines of rsync's standard error the result keeps.
@@ -317,6 +318,13 @@ impl<R: Runner> apply::Runner for RealRunner<R> {
                 plan.backup_uuid
             ));
         }
+        // Before the mount, as for every other mount of the disk: a second device with its
+        // UUID could be the one `/dev/disk/by-uuid` leads to, and its tree would go over `/`.
+        // Read on its own: `Live` below reads `mountinfo` with the disk mounted.
+        let devices = settings::lsblk(&DirectRunner)
+            .and_then(|json| apsis_core::settings::parse_lsblk(&json))
+            .map_err(|error| format!("the disks couldn't be listed: {error}"))?;
+        native::only_one_with(&devices, &plan.backup_uuid).map_err(|error| error.to_string())?;
         let mounted = native::mount_by_uuid(
             &DirectRunner,
             &plan.backup_uuid,
