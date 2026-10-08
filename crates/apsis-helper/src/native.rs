@@ -77,24 +77,37 @@ pub fn config(
     Ok((config, device))
 }
 
-/// The backup device Apsis's config names, as lsblk shows it: connected, and one Apsis mounts
-/// itself (unencrypted, a Linux filesystem).
+/// The backup device Apsis's config names, as lsblk shows it: connected, the only device with
+/// that UUID, and one Apsis mounts itself (unencrypted, a Linux filesystem).
+///
+/// A filesystem UUID is a label anyone can copy onto a stick (`tune2fs -U`), and
+/// `/dev/disk/by-uuid` then points at whichever of the two udev saw last. With two devices
+/// carrying it, Apsis can't tell which is the backup disk, so it mounts neither.
 ///
 /// # Errors
 ///
-/// No backup device, the device not connected, encrypted or not a Linux filesystem.
+/// No backup device, the device not connected, more than one device with its UUID, encrypted
+/// or not a Linux filesystem.
 pub fn backup_device(apsis: &Config, lsblk_json: &str) -> Result<Device> {
     let uuid = apsis.backup_device_uuid.clone();
     if uuid.is_empty() {
         return Err(Error::NoSnapshotDevice);
     }
-    let devices = settings::parse_lsblk(lsblk_json)?;
-    let device = devices
+    let mut found: Vec<Device> = settings::parse_lsblk(lsblk_json)?
         .into_iter()
-        .find(|d| d.uuid == uuid)
-        .ok_or_else(|| Error::DeviceNotFound {
-            device: uuid.clone(),
-        })?;
+        .filter(|d| d.uuid == uuid)
+        .collect();
+    if found.len() > 1 {
+        let paths: Vec<String> = found.iter().map(Device::path).collect();
+        return Err(Error::Native(format!(
+            "{} have the same filesystem UUID as the backup device, so Apsis can't tell which \
+             one is the backup disk and uses none; unplug the one that isn't",
+            paths.join(" and ")
+        )));
+    }
+    let device = found.pop().ok_or_else(|| Error::DeviceNotFound {
+        device: uuid.clone(),
+    })?;
     if !device.selectable() {
         return Err(Error::Native(format!(
             "the backup device ({}, {}) is encrypted or not a Linux filesystem; encrypted \
@@ -428,6 +441,34 @@ mod tests {
             matches!(result, Err(Error::Native(ref m)) if m.contains("aren't supported yet")),
             "{result:?}"
         );
+    }
+
+    #[test]
+    fn a_second_device_with_the_backup_uuid_is_refused() {
+        let open = |lsblk: &str| {
+            config(
+                &apsis(BACKUP_UUID),
+                lsblk,
+                ROOT_UUID,
+                String::new(),
+                "",
+                &[],
+            )
+        };
+        // `sdd1` given the backup device's UUID: a stick that copied it.
+        let result = open(&LSBLK.replace("44444444-4444-4444-4444-444444444444", BACKUP_UUID));
+        assert!(
+            matches!(result, Err(Error::Native(ref m))
+                if m.starts_with("/dev/sdb1 and /dev/sdd1 have the same filesystem UUID")),
+            "{result:?}"
+        );
+        // Another device's UUID copied is no concern of the backup device's.
+        let (_, device) = open(&LSBLK.replace(
+            "44444444-4444-4444-4444-444444444444",
+            "11111111-1111-1111-1111-111111111111",
+        ))
+        .unwrap();
+        assert_eq!(device.path(), "/dev/sdb1");
     }
 
     /// Records every argv; `mount` and `umount` succeed, nothing else is asked of it.
