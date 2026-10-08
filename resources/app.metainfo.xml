@@ -82,6 +82,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.6.3" date="2026-10-08">
+      <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.6.3</url>
+      <description>
+        <p>A copied disk label can't stand in for the backup disk.</p>
+        <ul>
+          <li>When two devices carry the backup disk's filesystem UUID, Apsis uses neither and names both</li>
+          <li>A restore waiting for its restart refuses the same way, with nothing changed</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.6.2" date="2026-10-08">
       <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.6.2</url>
       <description>

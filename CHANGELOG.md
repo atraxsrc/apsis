@@ -4,6 +4,15 @@ All notable changes to Apsis are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.3] - 2026-10-08
+
+### Security
+
+- **A copied disk label can't stand in for the backup disk.** Apsis finds the backup disk
+  by its filesystem UUID, which anyone can copy onto a USB stick. When two devices carry
+  it, Apsis now uses neither: lists, snapshots, deletes and restores refuse and name both
+  devices. A restore waiting for its restart ends "didn't start" with nothing changed.
+
 ## [0.6.2] - 2026-10-08
 
 ### Fixed
@@ -445,6 +454,7 @@ First release.
   password every time.
 - App and symbolic icons, AppStream metainfo, desktop entries, `just install` / `just uninstall`.
 
+[0.6.3]: https://github.com/atraxsrc/apsis/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/atraxsrc/apsis/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/atraxsrc/apsis/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/atraxsrc/apsis/compare/v0.5.0...v0.6.0
