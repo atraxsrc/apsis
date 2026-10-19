@@ -650,6 +650,13 @@ fn date_of(name: &str) -> String {
         .unwrap_or_else(|| name.to_owned())
 }
 
+/// A warning strip over the list: one line, and at most one button.
+#[derive(Debug, Clone)]
+pub struct Banner {
+    pub text: String,
+    pub action: Option<(String, Message)>,
+}
+
 /// The list area without rows: the icon, one line, at most one button.
 #[derive(Debug, Clone)]
 pub struct EmptyState {
@@ -1946,6 +1953,78 @@ impl AppModel {
                 )
             }
         })
+    }
+
+    /// The banners over the list at `now`: the backup disk not connected, the reminder due,
+    /// the disk nearly full. Not connected has no space to warn about.
+    pub(super) fn banners_at(&self, now: jiff::civil::DateTime) -> Vec<Banner> {
+        let not_connected = || Banner {
+            text: fl!("banner-not-connected"),
+            action: None,
+        };
+        let status = match self.status_view_at(now) {
+            StatusView::Loaded(status) => status,
+            StatusView::Failed
+                if matches!(
+                    self.listing,
+                    Listing::Failed(CliError::DeviceNotFound { .. })
+                ) =>
+            {
+                return vec![not_connected()];
+            }
+            StatusView::Failed | StatusView::Unloaded => return Vec::new(),
+        };
+        let mut banners = Vec::new();
+        if matches!(status.disk, apsis_core::DiskStatus::NotMounted) {
+            banners.push(not_connected());
+        }
+        let create = || {
+            self.can_create()
+                .then(|| (fl!("create-snapshot"), Message::CreateClicked))
+        };
+        match (status.last, status.due()) {
+            (Some(age), apsis_core::Due::Overdue { days }) => banners.push(Banner {
+                text: fl!(
+                    "banner-overdue",
+                    age = fmt::age_long(age),
+                    days = days.to_string()
+                ),
+                action: create(),
+            }),
+            (None, apsis_core::Due::Never { days }) => banners.push(Banner {
+                text: fl!("banner-never", days = days.to_string()),
+                action: create(),
+            }),
+            _ => {}
+        }
+        if let apsis_core::DiskStatus::Mounted { usage, .. } = &status.disk
+            && status.disk_warning()
+        {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "0 to 100"
+            )]
+            let pct = (usage.free_fraction() * 100.0).round() as u8;
+            banners.push(Banner {
+                text: fl!(
+                    "banner-low",
+                    free = fmt::size_short(usage.free),
+                    pct = pct.to_string()
+                ),
+                action: None,
+            });
+        }
+        banners
+    }
+
+    pub(super) fn banners(&self) -> Vec<Banner> {
+        self.banners_at(jiff::Zoned::now().datetime())
+    }
+
+    /// `Unsaved changes` while the settings differ from the file.
+    pub(super) fn unsaved_hint(&self) -> Option<String> {
+        matches!(&self.settings, SettingsLoad::Ready(v) if v.dirty()).then(|| fl!("unsaved-hint"))
     }
 
     /// `Delete`, or `Delete 2` with more than one row selected.

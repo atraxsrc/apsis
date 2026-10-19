@@ -310,15 +310,17 @@ impl AppModel {
                 .into(),
         ])
         .spacing(8);
-        widget::column::with_children(vec![
-            toolbar.into(),
+        let mut children: Vec<Element<'_, Message>> = vec![toolbar.into()];
+        children.extend(self.banners().into_iter().map(banner));
+        children.extend([
             self.list(),
             widget::divider::horizontal::default().into(),
             self.status_area(),
-        ])
-        .spacing(12)
-        .padding([8, 16, 16, 16])
-        .into()
+        ]);
+        widget::column::with_children(children)
+            .spacing(12)
+            .padding([8, 16, 16, 16])
+            .into()
     }
 
     /// The snapshot list: one two-line row per snapshot (the comment or the date over the
@@ -921,21 +923,27 @@ impl AppModel {
     fn settings_page(&self) -> Element<'_, Message> {
         let dirty = matches!(&self.settings, SettingsLoad::Ready(v) if v.dirty());
         let busy = self.saving_settings || self.running.is_some() || self.loading;
-        let bar = widget::row::with_children(vec![
+        let mut bar: Vec<Element<'_, Message>> = vec![
             widget::button::icon(icon::from_name("go-previous-symbolic"))
                 .on_press(Message::Back)
                 .into(),
             title4(fl!("settings")).into(),
             widget::space::horizontal().into(),
+        ];
+        if let Some(hint) = self.unsaved_hint() {
+            bar.push(caption(hint).class(theme::Text::Custom(dim_text)).into());
+        }
+        bar.extend([
             widget::button::standard(fl!("cancel"))
                 .on_press(Message::DialogDiscard)
                 .into(),
             widget::button::suggested(fl!("save"))
                 .on_press_maybe((dirty && !busy).then_some(Message::Save))
                 .into(),
-        ])
-        .spacing(8)
-        .align_y(Alignment::Center);
+        ]);
+        let bar = widget::row::with_children(bar)
+            .spacing(8)
+            .align_y(Alignment::Center);
         let mut children: Vec<Element<'_, Message>> = vec![
             bar.into(),
             widget::tab_bar::horizontal(&self.tabs)
@@ -967,9 +975,6 @@ impl AppModel {
             }
         };
         children.push(widget::scrollable(body).height(Length::Fill).into());
-        if let Some(line) = self.result_line() {
-            children.push(line);
-        }
         widget::column::with_children(children)
             .spacing(12)
             .padding([8, 16, 16, 16])
@@ -1227,6 +1232,28 @@ fn phrase_line<'a>(
     ])
     .spacing(4)
     .align_y(Alignment::Center)
+    .into()
+}
+
+/// A warning strip in the theme's warning colours: the text, and its button if it has one.
+fn banner<'a>(banner: super::Banner) -> Element<'a, Message> {
+    let mut row: Vec<Element<'a, Message>> = vec![
+        widget::text(banner.text)
+            .width(Length::Fill)
+            .wrapping(iced_text::Wrapping::Word)
+            .into(),
+    ];
+    if let Some((label, message)) = banner.action {
+        row.push(widget::button::standard(label).on_press(message).into());
+    }
+    widget::container(
+        widget::row::with_children(row)
+            .spacing(12)
+            .align_y(Alignment::Center),
+    )
+    .class(theme::Container::custom(widget::warning_container))
+    .padding(10)
+    .width(Length::Fill)
     .into()
 }
 

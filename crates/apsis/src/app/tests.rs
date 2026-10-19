@@ -44,6 +44,7 @@ fn unplugged() -> std::path::PathBuf {
 }
 
 const FIXTURE_UUID: &str = "00000000-0000-0000-0000-000000000000";
+const G: u64 = 1024 * 1024 * 1024;
 
 /// An applet with a main window and nothing open or listed.
 fn model() -> AppModel {
@@ -421,6 +422,58 @@ fn empty_states_have_one_line_and_at_most_one_button() {
     let state = app.empty_state().unwrap();
     assert!(state.error);
     assert!(matches!(state.action, Some((label, Message::Refresh)) if label == "Try again"));
+}
+
+#[test]
+fn banners_name_the_disk_the_reminder_and_low_space() {
+    let mut app = window();
+    app.config.remind_days = 7;
+    let now = apsis_core::parse_snapshot_name("2026-09-25_12-28-53").unwrap();
+    assert!(app.banners_at(now).is_empty());
+    let late = apsis_core::parse_snapshot_name("2026-10-05_11-28-53").unwrap();
+    let banners = app.banners_at(late);
+    assert_eq!(banners.len(), 1);
+    assert_eq!(
+        banners[0].text,
+        "Last snapshot was 10 days ago (reminder: 7 days)."
+    );
+    assert!(
+        matches!(&banners[0].action, Some((label, Message::CreateClicked)) if label == "Create snapshot")
+    );
+    let Listing::Loaded(list) = &mut app.listing else {
+        panic!()
+    };
+    list.usage = Some(DiskUsage {
+        total: 100 * G,
+        used: 96 * G,
+        free: 4 * G,
+    });
+    let banners = app.banners_at(now);
+    assert_eq!(banners.len(), 1);
+    assert_eq!(
+        banners[0].text,
+        "4G free on the backup disk (4%). Delete old snapshots."
+    );
+    assert!(banners[0].action.is_none());
+    app.disk_seen = Some(false);
+    let banners = app.banners_at(now);
+    assert_eq!(
+        banners.len(),
+        1,
+        "an unplugged disk has no space to warn about"
+    );
+    assert_eq!(
+        banners[0].text,
+        "Backup disk not connected. Plug it in to create or restore."
+    );
+}
+
+#[test]
+fn the_settings_page_hints_at_unsaved_changes() {
+    let mut app = in_settings();
+    assert_eq!(app.unsaved_hint(), None);
+    send(&mut app, Message::Include(Row::IncludeHome, true));
+    assert_eq!(app.unsaved_hint().as_deref(), Some("Unsaved changes"));
 }
 
 #[test]
@@ -1407,13 +1460,15 @@ fn the_window_and_every_settings_tab_fit_the_smallest_window() {
         "{:?}",
         node.bounds()
     );
-    // Toolbar, list, divider, status area: the list keeps some rows.
+    // Toolbar, the banners (low space here), list, divider, status area: the list keeps some
+    // rows.
     let parts = node.children()[0].children();
-    assert!(
-        parts[1].bounds().height >= 80.0,
-        "list {:?}",
-        parts[1].bounds()
-    );
+    // Low space always; the fixture's snapshot is overdue too once the clock passes it.
+    let banners = app.banners().len();
+    assert!((1..=2).contains(&banners), "{banners} banners");
+    assert_eq!(parts.len(), 4 + banners);
+    let list = &parts[1 + banners];
+    assert!(list.bounds().height >= 80.0, "list {:?}", list.bounds());
     let mut app = in_settings();
     for entity in app.tabs.iter().collect::<Vec<_>>() {
         app.tabs.activate(entity);

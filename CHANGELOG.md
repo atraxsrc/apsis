@@ -14,6 +14,10 @@ All notable changes to Apsis are listed here. The format follows
   button, and Delete says how many rows are selected ("Delete 2").
 - **Empty states.** Without snapshots the window shows the Apsis icon, one line and one
   button: "Create snapshot", or "Choose a backup disk" before a disk is set.
+- **Banners.** A disk that isn't connected, an overdue snapshot and a nearly full disk are
+  banners at the top of the window, each with its one button where one helps. The settings
+  page no longer shows the list's result line; it says "Unsaved changes" instead while
+  there are any.
 
 ## [0.6.3] - 2026-10-08
 

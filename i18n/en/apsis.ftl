@@ -64,6 +64,11 @@ failed-auth = Not allowed, or the password dialog was closed.
 busy-background = Busy: another snapshot job is running.
 disk-missing = Backup disk not connected ({ $id }). Plug it in.
 disk-removed = Backup disk removed
+banner-not-connected = Backup disk not connected. Plug it in to create or restore.
+banner-overdue = Last snapshot was { $age } (reminder: { $days } days).
+banner-never = No snapshot yet (reminder: { $days } days).
+banner-low = { $free } free on the backup disk ({ $pct }%). Delete old snapshots.
+unsaved-hint = Unsaved changes
 
 # Jobs
 progress-creating = Creating snapshot
