@@ -19,6 +19,12 @@ pub fn when_long(created: DateTime) -> String {
     created.strftime("%a %-d %b %Y, %H:%M").to_string()
 }
 
+/// `7 Oct, 10:16`: a date where there's little room (the popup).
+#[must_use]
+pub fn when_short(created: DateTime) -> String {
+    created.strftime("%-d %b, %H:%M").to_string()
+}
+
 /// `just now`, `5 minutes ago`, `22 hours ago` (under two days), `12 days ago`: an age in
 /// words, for the rows, the disk card and the dialogs.
 #[must_use]
@@ -115,6 +121,7 @@ mod tests {
     fn long_dates_read_like_a_calendar() {
         let at = date(2026, 10, 7).at(10, 16, 0, 0);
         assert_eq!(when_long(at), "Wed 7 Oct 2026, 10:16");
+        assert_eq!(when_short(at), "7 Oct, 10:16");
     }
 
     #[test]

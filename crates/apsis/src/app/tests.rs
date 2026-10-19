@@ -1621,6 +1621,35 @@ fn the_popup_fits_with_a_large_font_in_every_state() {
     }
 }
 
+#[test]
+fn the_popup_lists_the_two_newest_snapshots() {
+    let mut app = model();
+    assert!(app.popup_rows().is_empty());
+    app.on_listed(Ok(fixture()));
+    assert_eq!(
+        app.popup_rows(),
+        vec![
+            (
+                "before driver update".to_owned(),
+                "25 Sep, 11:28".to_owned()
+            ),
+            ("23 Sep, 08:33".to_owned(), String::new()),
+        ]
+    );
+}
+
+#[test]
+fn the_panel_icon_is_accent_while_a_job_runs() {
+    let mut app = model();
+    app.on_listed(Ok(fixture()));
+    assert!(!app.busy_icon());
+    app.job = Some(job(JobKind::Create, JobState::Running, NEWEST));
+    assert!(app.busy_icon());
+    app.job = None;
+    app.running = Some(Operation::Create(String::new()));
+    assert!(app.busy_icon());
+}
+
 /// The popup while a create runs: the window's percent without the time left, and the bar.
 #[test]
 fn the_popup_shows_a_running_create_as_one_line() {

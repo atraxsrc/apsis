@@ -37,6 +37,7 @@ popup-disk-not-connected = Backup disk not connected
 popup-no-disk = No backup disk chosen
 popup-disk-unknown = Backup disk unknown
 popup-ready = Ready to restore
+popup-free-of = { $free } free of { $total }
 
 # Toolbar and list
 create = Create

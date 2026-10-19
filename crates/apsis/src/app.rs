@@ -2143,6 +2143,27 @@ impl AppModel {
         }
     }
 
+    /// The popup's rows: the two newest snapshots, the comment (or the short date) and the
+    /// short date (empty when the title already is the date).
+    pub(super) fn popup_rows(&self) -> Vec<(String, String)> {
+        self.snapshots()
+            .iter()
+            .take(2)
+            .map(|snapshot| {
+                let date = fmt::when_short(snapshot.created);
+                match &snapshot.comment {
+                    Some(comment) => (comment.clone(), date),
+                    None => (date, String::new()),
+                }
+            })
+            .collect()
+    }
+
+    /// The panel icon takes the accent colour: a job runs (here or elsewhere).
+    pub(super) fn busy_icon(&self) -> bool {
+        self.active_job().is_some() || self.running.is_some()
+    }
+
     /// Closes the restore details drawer.
     fn close_details(&mut self) {
         self.details = false;

@@ -29,6 +29,9 @@ All notable changes to Apsis are listed here. The format follows
   destructive, or a plain line when all went well) with a Details button that opens a side
   panel: the snapshot, the home folders, the safety snapshot and what happened, which used
   to be a tooltip.
+- **The popup shows more.** The free space under the bar ("17G free of 28G") and the two
+  newest snapshots. The panel icon takes the accent colour while a snapshot, delete or
+  restore preparation runs.
 
 ## [0.6.3] - 2026-10-08
 

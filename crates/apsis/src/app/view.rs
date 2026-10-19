@@ -45,7 +45,7 @@ impl AppModel {
         let severity = status.severity();
         let button = if self.config.show_label && self.core.applet.is_horizontal() {
             self.label_button(&status)
-        } else if severity == Severity::None {
+        } else if severity == Severity::None && !self.busy_icon() {
             self.core.applet.icon_button_from_handle(self.icon.clone())
         } else {
             self.core
@@ -66,10 +66,12 @@ impl AppModel {
             .into()
     }
 
-    /// The panel icon, coloured by the theme's warning or destructive role.
+    /// The panel icon, coloured by the theme's warning or destructive role; the accent while
+    /// a job runs.
     fn panel_icon(&self, severity: Severity) -> icon::Icon {
         let (width, height) = self.core.applet.suggested_size(true);
         let class: fn(&Theme) -> iced_svg::Style = match severity {
+            Severity::None if self.busy_icon() => accent_svg,
             Severity::None => plain_svg,
             Severity::Warning => warning_svg,
             Severity::Critical => critical_svg,
@@ -187,6 +189,32 @@ impl AppModel {
                 (None, _) if !status.disk.is_empty() => children.push(dim(status.disk.clone())),
                 (None, _) => {}
             }
+            if let Some(free_of) = &status.free_of {
+                children.push(
+                    caption(free_of.clone())
+                        .class(theme::Text::Custom(dim_text))
+                        .into(),
+                );
+            }
+        }
+        let rows: Vec<Element<'_, Message>> = self
+            .popup_rows()
+            .into_iter()
+            .map(|(title, date)| {
+                widget::row::with_children(vec![
+                    caption(title)
+                        .class(theme::Text::Custom(dim_text))
+                        .width(Length::Fill)
+                        .wrapping(iced_text::Wrapping::None)
+                        .into(),
+                    caption(date).class(theme::Text::Custom(dim_text)).into(),
+                ])
+                .spacing(12)
+                .into()
+            })
+            .collect();
+        if !rows.is_empty() {
+            children.push(widget::column::with_children(rows).spacing(4).into());
         }
         children.extend(self.popup_errors());
         children.push(
@@ -1383,6 +1411,13 @@ fn faded_svg(theme: &Theme) -> iced_svg::Style {
     let on = theme.cosmic().background(theme.transparent).on;
     iced_svg::Style {
         color: Some(Color::from(on).scale_alpha(0.35)),
+    }
+}
+
+/// The panel icon while a job runs.
+fn accent_svg(theme: &Theme) -> iced_svg::Style {
+    iced_svg::Style {
+        color: Some(theme.cosmic().accent_color().into()),
     }
 }
 

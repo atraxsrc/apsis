@@ -69,6 +69,7 @@ impl StatusView {
             usage: None,
             disk: fl!("popup-disk-not-connected"),
             figures: None,
+            free_of: None,
         };
         let status = match self {
             Self::Unloaded => {
@@ -97,6 +98,11 @@ impl StatusView {
             DiskStatus::Mounted { device, usage } => {
                 popup.usage = Some(*usage);
                 popup.disk = String::new();
+                popup.free_of = Some(fl!(
+                    "popup-free-of",
+                    free = fmt::size_short(usage.free),
+                    total = fmt::size_short(usage.total)
+                ));
                 popup.figures = Some(format!(
                     "{}  {} / {} · {}",
                     fmt::device_name(device),
@@ -131,6 +137,8 @@ pub struct PopupStatus {
     pub disk: String,
     /// The full figures, for the bar's tooltip: `sda  15G / 28G · 58% used · 11G free`.
     pub figures: Option<String>,
+    /// `11G free of 28G`, under the bar.
+    pub free_of: Option<String>,
 }
 
 /// `12h ago`, or `just now`.
@@ -329,6 +337,13 @@ mod tests {
             Some("sdx1  372G / 596G · 63% used · 224G free")
         );
         assert_eq!(popup.usage.map(|u| u.free), Some(224 * G));
+    }
+
+    #[test]
+    fn popup_says_free_of_total() {
+        let popup = loaded(Some(12), Some(7), disk(372 * G, 224 * G)).popup(true);
+        assert_eq!(popup.free_of.as_deref(), Some("224G free of 596G"));
+        assert_eq!(StatusView::Failed.popup(true).free_of, None);
     }
 
     #[test]
