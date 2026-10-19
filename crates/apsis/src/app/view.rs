@@ -366,57 +366,69 @@ impl AppModel {
         let now = jiff::Zoned::now().datetime();
         let mut column = widget::list_column();
         for (index, row) in rows.iter().enumerate() {
-            let Some((title, subtitle)) = self.row_text(index, now) else {
-                continue;
-            };
-            let leftover = matches!(row, RowItem::Leftover(_));
-            let title: Element<'_, Message> = if leftover {
-                dim(title)
-            } else {
-                body(title).wrapping(iced_text::Wrapping::Word).into()
-            };
-            let lines = widget::column::with_children(vec![
-                title,
-                caption(subtitle)
-                    .class(theme::Text::Custom(dim_text))
-                    .wrapping(iced_text::Wrapping::Word)
-                    .into(),
-            ])
-            .spacing(2)
-            .width(Length::Fill);
-            let content: Element<'_, Message> = if leftover {
-                widget::row::with_children(vec![
-                    lines.into(),
-                    widget::button::standard(fl!("remove"))
-                        .on_press_maybe(
-                            self.can_create()
-                                .then(|| Message::RemoveLeftover(row.name().to_owned())),
-                        )
-                        .into(),
-                ])
-                .spacing(12)
-                .align_y(Alignment::Center)
-                .into()
-            } else {
-                lines.into()
-            };
-            // Right click: the same actions as the toolbar, for this row.
-            let items: Vec<menu::Item<super::RowAction, String>> = self
-                .row_menu(index)
-                .into_iter()
-                .map(|(label, action)| menu::Item::Button(label, None, action))
-                .collect();
-            let content = widget::context_menu(
-                content,
-                Some(menu::items(&std::collections::HashMap::new(), items)),
-            );
             column = column.add(
-                widget::list::button(content)
+                widget::list::button(self.row_view(index, now))
                     .selected(self.selection.contains(row.name()))
                     .on_press(Message::RowClicked(index)),
             );
         }
         widget::scrollable(column).height(Length::Fill).into()
+    }
+
+    /// One row's content at `now`: the two lines (`row_text`), a leftover's Remove button,
+    /// and the right-click menu (`row_menu`) around it. Empty past the last row.
+    pub(super) fn row_view(
+        &self,
+        index: usize,
+        now: jiff::civil::DateTime,
+    ) -> Element<'_, Message> {
+        let rows = self.rows();
+        let (Some(row), Some((title, subtitle))) = (rows.get(index), self.row_text(index, now))
+        else {
+            return widget::space::horizontal().into();
+        };
+        let leftover = matches!(row, RowItem::Leftover(_));
+        let title: Element<'_, Message> = if leftover {
+            dim(title)
+        } else {
+            body(title).wrapping(iced_text::Wrapping::Word).into()
+        };
+        let lines = widget::column::with_children(vec![
+            title,
+            caption(subtitle)
+                .class(theme::Text::Custom(dim_text))
+                .wrapping(iced_text::Wrapping::Word)
+                .into(),
+        ])
+        .spacing(2)
+        .width(Length::Fill);
+        let content: Element<'_, Message> = if leftover {
+            widget::row::with_children(vec![
+                lines.into(),
+                widget::button::standard(fl!("remove"))
+                    .on_press_maybe(
+                        self.can_create()
+                            .then(|| Message::RemoveLeftover(row.name().to_owned())),
+                    )
+                    .into(),
+            ])
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .into()
+        } else {
+            lines.into()
+        };
+        // Right click: the same actions as the toolbar, for this row.
+        let items: Vec<menu::Item<super::RowAction, String>> = self
+            .row_menu(index)
+            .into_iter()
+            .map(|(label, action)| menu::Item::Button(label, None, action))
+            .collect();
+        widget::context_menu(
+            content,
+            Some(menu::items(&std::collections::HashMap::new(), items)),
+        )
+        .into()
     }
 
     /// The list area without rows: the orbit icon faded, one line, at most one button

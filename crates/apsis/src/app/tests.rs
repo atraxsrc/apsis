@@ -465,6 +465,17 @@ fn banners_name_the_disk_the_reminder_and_low_space() {
         banners[0].text,
         "Backup disk not connected. Plug it in to create or restore."
     );
+    // Without a cached list the empty state says it; no banner on top of that.
+    app.on_listed(Err(CliError::DeviceNotFound {
+        device: FIXTURE_UUID.to_owned(),
+    }));
+    assert!(app.banners_at(now).is_empty());
+    assert!(
+        app.empty_state()
+            .unwrap()
+            .line
+            .starts_with("Backup disk not connected")
+    );
 }
 
 #[test]
@@ -505,6 +516,18 @@ fn the_disk_card_names_the_disk_its_free_space_and_the_last_snapshot() {
     list.device = None;
     app.on_listed(Ok(list));
     assert_eq!(app.disk_card_at(now).last, "No backup disk chosen");
+    // A failed list: only a missing disk reads "Not connected"; the empty state names the
+    // other failures, so the card says nothing.
+    app.on_listed(Err(CliError::DeviceNotFound {
+        device: FIXTURE_UUID.to_owned(),
+    }));
+    assert_eq!(app.disk_card_at(now).last, "Not connected");
+    app.on_listed(Err(CliError::NoHelper));
+    let card = app.disk_card_at(now);
+    assert_eq!(
+        (card.title.as_str(), card.last.as_str()),
+        ("Backup disk", "")
+    );
 }
 
 #[test]
@@ -575,6 +598,16 @@ fn row_actions_select_the_row_and_open_the_dialog() {
     assert_eq!(app.row_menu(0).len(), 3);
     send(&mut app, Message::RowAction(RowAction::CopyDate(0)));
     assert_eq!(selected(&app), vec![NEWEST.to_owned()]);
+    // Copy date works on a leftover too: its date is in its name.
+    assert_eq!(
+        app.copy_date_text(5).as_deref(),
+        Some("Sat 26 Sep 2026, 14:02")
+    );
+    assert_eq!(
+        app.copy_date_text(0).as_deref(),
+        Some("Fri 25 Sep 2026, 11:28")
+    );
+    assert_eq!(app.copy_date_text(6), None);
 }
 
 #[test]
@@ -1562,8 +1595,25 @@ fn the_window_and_every_settings_tab_fit_the_smallest_window() {
         used: 950_000_000_000,
         free: 50_203_837_440,
     });
-    // A long comment wraps inside the row instead of widening the window.
+    // A long comment wraps inside the row instead of widening the window: the row grows
+    // in height, never in width.
+    let now = apsis_core::parse_snapshot_name("2026-09-28_11-28-53").unwrap();
+    let row_width = Size::new(608.0, 1000.0);
+    let Some(short) = layout(app.row_view(0, now), row_width) else {
+        return;
+    };
+    let Listing::Loaded(list) = &mut app.listing else {
+        panic!()
+    };
     list.snapshots[0].comment = Some("word ".repeat(40));
+    let long = layout(app.row_view(0, now), row_width).unwrap();
+    assert!(long.bounds().width <= 608.5, "{:?}", long.bounds());
+    assert!(
+        long.bounds().height >= short.bounds().height + 14.0,
+        "short {:?}, long {:?}",
+        short.bounds(),
+        long.bounds()
+    );
     app.running = Some(Operation::Create(String::new()));
     app.job = Some(job(JobKind::Create, JobState::Running, NEWEST));
     let Some(node) = layout(app.window_view(), WINDOW_MIN_SIZE) else {
@@ -2770,6 +2820,30 @@ mod restore {
         send(&mut app, Message::RestoreClicked);
         assert!(app.checking.is_some());
         assert!(!app.details && !app.core.window.show_context);
+        // Esc closes the drawer before it clears the selection.
+        app.checking = None;
+        send(&mut app, Message::ShowDetails);
+        send(&mut app, Message::Shortcut(Shortcut::Escape));
+        assert!(!app.details && !app.core.window.show_context);
+        assert_eq!(
+            selected(&app),
+            vec![NEWEST.to_owned()],
+            "the selection stays"
+        );
+        send(&mut app, Message::Shortcut(Shortcut::Escape));
+        assert!(selected(&app).is_empty());
+    }
+
+    #[test]
+    fn a_stopped_restore_is_a_toast() {
+        let mut app = window();
+        app.running = Some(restore_op());
+        send(
+            &mut app,
+            Message::Finished(restore_op(), Err(CliError::Stopped)),
+        );
+        assert_eq!(app.status, Some(Status::Info("Restore stopped".to_owned())));
+        assert_eq!(app.toast_count(), 1);
     }
 
     /// The line and the tooltip of that result.

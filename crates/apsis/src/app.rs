@@ -2059,24 +2059,16 @@ impl AppModel {
         })
     }
 
-    /// The banners over the list at `now`: the backup disk not connected, the reminder due,
-    /// the disk nearly full. Not connected has no space to warn about.
+    /// The banners over the list at `now`: the backup disk not connected (while a list is
+    /// still shown; without one the empty state says it), the reminder due, the disk nearly
+    /// full. Not connected has no space to warn about.
     pub(super) fn banners_at(&self, now: jiff::civil::DateTime) -> Vec<Banner> {
         let not_connected = || Banner {
             text: fl!("banner-not-connected"),
             action: None,
         };
-        let status = match self.status_view_at(now) {
-            StatusView::Loaded(status) => status,
-            StatusView::Failed
-                if matches!(
-                    self.listing,
-                    Listing::Failed(CliError::DeviceNotFound { .. })
-                ) =>
-            {
-                return vec![not_connected()];
-            }
-            StatusView::Failed | StatusView::Unloaded => return Vec::new(),
+        let StatusView::Loaded(status) = self.status_view_at(now) else {
+            return Vec::new();
         };
         let mut banners = Vec::new();
         if matches!(status.disk, apsis_core::DiskStatus::NotMounted) {
@@ -2142,8 +2134,16 @@ impl AppModel {
         };
         let status = match self.status_view_at(now) {
             StatusView::Loaded(status) => status,
-            StatusView::Failed => return plain(fl!("card-not-connected")),
-            StatusView::Unloaded => return plain(String::new()),
+            // A missing disk; any other failed list is named by the empty state.
+            StatusView::Failed
+                if matches!(
+                    self.listing,
+                    Listing::Failed(CliError::DeviceNotFound { .. })
+                ) =>
+            {
+                return plain(fl!("card-not-connected"));
+            }
+            StatusView::Failed | StatusView::Unloaded => return plain(String::new()),
         };
         if matches!(&self.listing, Listing::Loaded(list) if list.device.is_none()) {
             return plain(fl!("popup-no-disk"));
@@ -2189,10 +2189,6 @@ impl AppModel {
             return Task::none();
         };
         let name = row.name().to_owned();
-        let created = match row {
-            RowItem::Snapshot(snapshot) => Some(snapshot.created),
-            RowItem::Leftover(_) => None,
-        };
         self.selection.clear();
         self.selection.insert(name);
         self.anchor = Some(index);
@@ -2202,11 +2198,21 @@ impl AppModel {
                 self.open_delete();
                 Task::none()
             }
-            RowAction::CopyDate(_) => match created {
-                Some(created) => cosmic::iced::clipboard::write(fmt::when_long(created)),
+            RowAction::CopyDate(_) => match self.copy_date_text(index) {
+                Some(text) => cosmic::iced::clipboard::write(text),
                 None => Task::none(),
             },
         }
+    }
+
+    /// What Copy date puts on the clipboard for row `index`: the date as the row shows it,
+    /// a leftover's from its name. `None` past the last row.
+    pub(super) fn copy_date_text(&self, index: usize) -> Option<String> {
+        let created = match self.rows().get(index)? {
+            RowItem::Snapshot(snapshot) => snapshot.created,
+            RowItem::Leftover(name) => apsis_core::parse_snapshot_name(name)?,
+        };
+        Some(fmt::when_long(created))
     }
 
     /// What the Create dialog says a snapshot costs at `now`: the whole system for the first
@@ -2395,6 +2401,10 @@ impl AppModel {
             }
             Shortcut::Escape => {
                 if self.dialog.take().is_some() {
+                    return Task::none();
+                }
+                if self.details {
+                    self.close_details();
                     return Task::none();
                 }
                 if self.page != Page::List {
@@ -2703,6 +2713,7 @@ impl AppModel {
             }
             Err(CliError::Stopped) => {
                 self.status = Some(Status::Info(fl!("restore-stopped")));
+                return Task::batch([self.toast_status(), self.start_list()]);
             }
             Err(CliError::Busy) => {
                 self.helper_busy = true;
