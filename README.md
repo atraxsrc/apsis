@@ -26,7 +26,7 @@ it, so restoring the system does not touch your documents.
 * Click it to see how old the last snapshot is, how full the backup disk is, and the two
   newest snapshots. **Open Apsis** opens the window.
 
-![](docs/4.png) ![The popup while a snapshot is made](docs/5.png)
+![The panel popup](docs/4.png)
 
 ### Snapshots when you want them
 
