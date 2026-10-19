@@ -12,6 +12,26 @@
 use apsis_core::config::{self, Config, ConfigInfo, validate_signed_filter};
 use apsis_core::settings::Device;
 
+use crate::{fl, fmt};
+
+/// One row of the Location tab: a disk that can hold snapshots (`choice` is its index among
+/// [`SettingsView::candidates`]), the chosen disk that isn't connected (`warning`), or a
+/// Linux device that can't (dimmed, no `choice`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocationRow {
+    /// `sda1`, `data-root`, or `Not connected (1a2b…)`.
+    pub title: String,
+    /// `ext4 · 28.7G · label`, or why the disk can't be chosen.
+    pub subtitle: String,
+    /// The subtitle takes the warning colour.
+    pub warning: bool,
+    pub choice: Option<usize>,
+    /// The radio is on.
+    pub selected: bool,
+    /// On a removable disk (the icon); `None` when not known.
+    pub removable: Option<bool>,
+}
+
 /// One line of the settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Row {
@@ -209,6 +229,56 @@ impl SettingsView {
             .iter()
             .filter(|d| d.selectable())
             .collect()
+    }
+
+    /// The Location tab's rows: the choices, the chosen disk if it's away, then the Linux
+    /// devices that can't hold snapshots. `removable` answers for a kernel name.
+    pub fn location_rows(&self, removable: &dyn Fn(&str) -> Option<bool>) -> Vec<LocationRow> {
+        let candidates = self.candidates();
+        let chosen = &self.edited.backup_device_uuid;
+        let mut rows: Vec<LocationRow> = candidates
+            .iter()
+            .enumerate()
+            .map(|(index, device)| {
+                let mut subtitle = format!("{} · {}", device.fstype, fmt::size(device.size));
+                if !device.label.is_empty() {
+                    subtitle.push_str(&format!(" · {}", device.label));
+                }
+                LocationRow {
+                    title: fmt::device_name(&device.path()).to_owned(),
+                    subtitle,
+                    warning: false,
+                    choice: Some(index),
+                    selected: device.uuid == *chosen,
+                    removable: removable(&device.kname),
+                }
+            })
+            .collect();
+        if !chosen.is_empty() && !candidates.iter().any(|d| d.uuid == *chosen) {
+            rows.push(LocationRow {
+                title: fl!("device-away", id = fmt::short_uuid(chosen)),
+                subtitle: fl!("device-away-description"),
+                warning: true,
+                choice: None,
+                selected: true,
+                removable: None,
+            });
+        }
+        rows.extend(
+            self.info
+                .devices
+                .iter()
+                .filter(|d| d.is_linux() && !d.selectable())
+                .map(|device| LocationRow {
+                    title: fmt::device_name(&device.path()).to_owned(),
+                    subtitle: fl!("device-unusable-why"),
+                    warning: false,
+                    choice: None,
+                    selected: false,
+                    removable: None,
+                }),
+        );
+        rows
     }
 
     /// Picks the device with filesystem UUID `uuid` (one of [`SettingsView::candidates`]).
@@ -694,6 +764,40 @@ mod tests {
         assert!(!view.dirty());
         view.select_row(Row::Device);
         assert!(view.adjust_count(true).is_err());
+    }
+
+    #[test]
+    fn location_rows_put_choices_first_then_the_unusable_ones() {
+        let view = view();
+        let rows = view.location_rows(&|_| Some(false));
+        let choices: Vec<_> = rows.iter().filter(|r| r.choice.is_some()).collect();
+        assert_eq!(choices.len(), view.candidates().len());
+        assert!(!choices.is_empty());
+        assert!(rows[..choices.len()].iter().all(|r| !r.warning));
+        assert!(
+            rows[..choices.len()]
+                .iter()
+                .all(|r| r.removable == Some(false))
+        );
+        assert!(rows.iter().filter(|r| r.selected).count() == 1);
+        let rest = &rows[choices.len()..];
+        assert!(!rest.is_empty());
+        assert!(
+            rest.iter()
+                .all(|r| r.subtitle == "Encrypted or a container: can't hold snapshots.")
+        );
+        assert!(rest.iter().all(|r| r.choice.is_none() && !r.selected));
+        let mut away = view.clone();
+        away.edited.backup_device_uuid = "33333333-3333-3333-3333-333333333333".to_owned();
+        let rows = away.location_rows(&|_| None);
+        let missing = rows.iter().find(|r| r.warning).unwrap();
+        assert!(
+            missing.title.starts_with("Not connected ("),
+            "{}",
+            missing.title
+        );
+        assert!(missing.selected && missing.choice.is_none());
+        assert!(rows.iter().all(|r| r.removable.is_none()));
     }
 
     #[test]

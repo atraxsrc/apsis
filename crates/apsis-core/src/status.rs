@@ -205,6 +205,24 @@ pub fn disk_connected(by_uuid: &Path, uuid: &str) -> Option<bool> {
     Some(by_uuid.join(uuid).exists())
 }
 
+/// Where the kernel lists block devices: `<name>/removable` is `1` for a USB disk.
+pub const SYS_CLASS_BLOCK: &str = "/sys/class/block";
+
+/// Whether block device `name` (`sda`, `sda1`, `nvme0n1p3`) is on a removable disk, from
+/// `removable` in its own sysfs folder or its disk's (the folder above a partition's). `None`
+/// when neither says (a mapper device, a name that isn't one), so nothing is claimed.
+#[must_use]
+pub fn removable(sys_class_block: &Path, name: &str) -> Option<bool> {
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
+        return None;
+    }
+    let own = sys_class_block.join(name);
+    [own.join("removable"), own.join("../removable")]
+        .iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .map(|text| text.trim() == "1")
+}
+
 /// `now`, `5m`, `47h`, `3d`: the same steps as the popup's "5m ago".
 #[must_use]
 pub fn age_short(age: Duration) -> String {
@@ -563,5 +581,39 @@ mod tests {
         assert_eq!(size_short(512 * 1024 * 1024), "512M");
         assert_eq!(size_short(g * 3 / 2), "1.5G");
         assert_eq!(size_short(0), "0B");
+    }
+
+    #[test]
+    fn removable_reads_the_disks_flag_for_it_and_its_partitions() {
+        // Shaped like sysfs: `class/block/<name>` links into `devices/`, where a partition's
+        // folder sits inside its disk's.
+        let root = std::env::temp_dir().join(format!("apsis-removable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (dev, class) = (root.join("devices"), root.join("class"));
+        std::fs::create_dir_all(dev.join("sda/sda1")).unwrap();
+        std::fs::write(dev.join("sda/removable"), "1\n").unwrap();
+        std::fs::create_dir_all(dev.join("nvme0n1/nvme0n1p3")).unwrap();
+        std::fs::write(dev.join("nvme0n1/removable"), "0\n").unwrap();
+        std::fs::create_dir_all(dev.join("dm-0")).unwrap();
+        std::fs::create_dir_all(&class).unwrap();
+        for (name, target) in [
+            ("sda", "sda"),
+            ("sda1", "sda/sda1"),
+            ("nvme0n1p3", "nvme0n1/nvme0n1p3"),
+            ("dm-0", "dm-0"),
+        ] {
+            std::os::unix::fs::symlink(dev.join(target), class.join(name)).unwrap();
+        }
+        assert_eq!(removable(&class, "sda"), Some(true));
+        assert_eq!(removable(&class, "sda1"), Some(true));
+        assert_eq!(removable(&class, "nvme0n1p3"), Some(false));
+        assert_eq!(
+            removable(&class, "dm-0"),
+            None,
+            "a mapper device has no disk"
+        );
+        assert_eq!(removable(&class, "missing"), None);
+        assert_eq!(removable(&class, "../devices/sda"), None);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

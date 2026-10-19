@@ -1035,51 +1035,64 @@ impl AppModel {
     }
 }
 
-/// Location: the disks that can hold snapshots (radio), and the others dimmed with why not.
+/// Location: one list. The disks that can hold snapshots (a radio and a drive icon), the
+/// chosen one when it's away (its subtitle in the warning colour), and the Linux devices
+/// that can't (dimmed, with why); then where snapshots go.
 fn location_tab(view: &SettingsView) -> Element<'_, Message> {
-    let candidates = view.candidates();
-    let selected = candidates
-        .iter()
-        .position(|d| d.uuid == view.edited.backup_device_uuid);
+    let rows = view.location_rows(&|name| {
+        apsis_core::status::removable(
+            std::path::Path::new(apsis_core::status::SYS_CLASS_BLOCK),
+            name,
+        )
+    });
+    let selected = rows.iter().find(|r| r.selected).and_then(|r| r.choice);
     let mut section = settings::section().title(fl!("location-title"));
-    for (index, device) in candidates.iter().enumerate() {
-        let mut description = format!("{} · {}", device.fstype, fmt::size(device.size));
-        if !device.label.is_empty() {
-            description.push_str(&format!(" · {}", device.label));
+    for row in rows {
+        let name = if row.removable == Some(true) {
+            "drive-removable-media-symbolic"
+        } else {
+            "drive-harddisk-symbolic"
+        };
+        let faded = row.choice.is_none() && !row.warning;
+        let mut drive = icon::icon(icon::from_name(name).handle()).size(20);
+        if faded {
+            drive = drive.class(theme::Svg::Custom(Rc::new(faded_svg)));
         }
-        section = section.add(
-            settings::item::builder(device.path())
-                .description(description)
-                .radio(index, selected, Message::PickDevice),
-        );
+        section = match row.choice {
+            Some(index) => section.add(
+                settings::item::builder(row.title)
+                    .description(row.subtitle)
+                    .icon(drive)
+                    .radio(index, selected, Message::PickDevice),
+            ),
+            None => {
+                let subtitle = caption(row.subtitle).class(theme::Text::Custom(if row.warning {
+                    warning_text
+                } else {
+                    dim_text
+                }));
+                let title: Element<'_, Message> = if faded {
+                    dim(row.title)
+                } else {
+                    body(row.title).into()
+                };
+                section.add(
+                    widget::row::with_children(vec![
+                        drive.into(),
+                        widget::column::with_children(vec![title, subtitle.into()])
+                            .spacing(2)
+                            .width(Length::Fill)
+                            .into(),
+                    ])
+                    .spacing(12)
+                    .align_y(Alignment::Center),
+                )
+            }
+        };
     }
-    if selected.is_none() && !view.edited.backup_device_uuid.is_empty() {
-        section = section.add(
-            settings::item::builder(fl!(
-                "device-away",
-                id = fmt::short_uuid(&view.edited.backup_device_uuid)
-            ))
-            .description(fl!("device-away-description"))
-            .control(body(String::new())),
-        );
-    }
-    let others: Vec<String> = view
-        .info
-        .devices
-        .iter()
-        .filter(|d| d.is_linux() && !d.selectable())
-        .map(|d| {
-            fl!(
-                "device-unusable",
-                path = d.path(),
-                fstype = d.fstype.clone()
-            )
-        })
-        .collect();
-    let mut children = vec![body(fl!("location-help")).into(), section.into()];
-    children.extend(others.into_iter().map(dim));
-    children.push(dim(fl!("location-note")));
-    widget::column::with_children(children).spacing(12).into()
+    widget::column::with_children(vec![section.into(), dim(fl!("location-note"))])
+        .spacing(12)
+        .into()
 }
 
 /// Include: `/root` and `/home`, with what they mean.

@@ -18,6 +18,9 @@ All notable changes to Apsis are listed here. The format follows
   banners at the top of the window, each with its one button where one helps. The settings
   page no longer shows the list's result line; it says "Unsaved changes" instead while
   there are any.
+- **Settings, Location is one list.** Every disk is a row with a drive icon; the ones that
+  can't hold snapshots are dimmed with the reason underneath, and the chosen disk says
+  "Not connected" when it's unplugged.
 
 ## [0.6.3] - 2026-10-08
 
