@@ -650,6 +650,16 @@ fn date_of(name: &str) -> String {
         .unwrap_or_else(|| name.to_owned())
 }
 
+/// The list area without rows: the icon, one line, at most one button.
+#[derive(Debug, Clone)]
+pub struct EmptyState {
+    pub line: String,
+    /// The button's label and what it sends.
+    pub action: Option<(String, Message)>,
+    /// The line is a failure (the destructive colour).
+    pub error: bool,
+}
+
 /// Keyboard shortcuts (the man page and README list them; the UI doesn't).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shortcut {
@@ -1865,6 +1875,41 @@ impl AppModel {
             .map(RowItem::Snapshot)
             .chain(list.leftovers.iter().map(|n| RowItem::Leftover(n)))
             .collect()
+    }
+
+    /// What the list area says without rows: one line and at most one button. `None` while
+    /// there are rows.
+    pub(super) fn empty_state(&self) -> Option<EmptyState> {
+        if !self.rows().is_empty() {
+            return None;
+        }
+        let plain = |line: String, action: Option<(String, Message)>| EmptyState {
+            line,
+            action,
+            error: false,
+        };
+        Some(match &self.listing {
+            Listing::NotLoaded if self.helper_busy => plain(fl!("busy-background"), None),
+            Listing::NotLoaded => plain(fl!("loading"), None),
+            Listing::Loaded(list) if list.device.is_none() => plain(
+                fl!("empty-no-disk"),
+                (self.mode == Mode::Window).then(|| (fl!("choose-disk"), Message::SettingsClicked)),
+            ),
+            Listing::Loaded(_) => plain(
+                fl!("empty"),
+                self.can_create()
+                    .then(|| (fl!("create-snapshot"), Message::CreateClicked)),
+            ),
+            Listing::Failed(CliError::DeviceNotFound { .. }) => {
+                plain(fl!("empty-not-connected"), None)
+            }
+            Listing::Failed(error) => EmptyState {
+                line: error_summary(error, self.known_uuid.as_deref()),
+                action: (!matches!(error, CliError::NoHelper) && !self.loading)
+                    .then(|| (fl!("retry"), Message::Refresh)),
+                error: true,
+            },
+        })
     }
 
     /// Row `index`'s two lines at `now`: the comment (or the date) over the date and the age,

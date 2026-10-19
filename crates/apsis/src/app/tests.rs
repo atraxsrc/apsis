@@ -388,6 +388,52 @@ fn delete_counts_the_selection_and_remove_opens_delete_for_a_leftover() {
 }
 
 #[test]
+fn empty_states_have_one_line_and_at_most_one_button() {
+    let mut app = window();
+    assert!(app.empty_state().is_none());
+    let mut list = fixture();
+    list.snapshots.clear();
+    list.leftovers.clear();
+    app.on_listed(Ok(list));
+    let state = app.empty_state().unwrap();
+    assert_eq!(state.line, "No snapshots yet.");
+    assert!(
+        matches!(state.action, Some((label, Message::CreateClicked)) if label == "Create snapshot")
+    );
+    assert!(!state.error);
+    let mut list = fixture();
+    list.snapshots.clear();
+    list.leftovers.clear();
+    list.device = None;
+    app.on_listed(Ok(list));
+    let state = app.empty_state().unwrap();
+    assert_eq!(state.line, "Choose where snapshots are saved.");
+    assert!(
+        matches!(state.action, Some((label, Message::SettingsClicked)) if label == "Choose a backup disk")
+    );
+    app.on_listed(Err(CliError::DeviceNotFound {
+        device: FIXTURE_UUID.to_owned(),
+    }));
+    let state = app.empty_state().unwrap();
+    assert_eq!(state.line, "Backup disk not connected. Plug it in.");
+    assert!(state.action.is_none() && !state.error);
+    app.on_listed(Err(CliError::Other("boom".to_owned())));
+    let state = app.empty_state().unwrap();
+    assert!(state.error);
+    assert!(matches!(state.action, Some((label, Message::Refresh)) if label == "Try again"));
+}
+
+#[test]
+fn leftovers_alone_are_rows_not_an_empty_state() {
+    let mut app = window();
+    let mut list = fixture();
+    list.snapshots.clear();
+    app.on_listed(Ok(list));
+    assert!(app.empty_state().is_none());
+    assert_eq!(app.rows().len(), 1);
+}
+
+#[test]
 fn delete_asks_about_the_selection_in_list_order_then_deletes_several_as_one_job() {
     let mut app = window();
     click(&mut app, 5, Modifiers::empty());

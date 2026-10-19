@@ -20,8 +20,7 @@ use cosmic::widget::{self, icon, settings};
 use cosmic::{Theme, theme};
 
 use super::{
-    AppModel, CliError, Dialog, Listing, Message, Page, RowItem, SettingsLoad, Status, Tone,
-    error_summary,
+    AppModel, Dialog, Listing, Message, Page, RowItem, SettingsLoad, Status, Tone, error_summary,
 };
 use crate::settings_view::{MAX_REMIND_DAYS, Row, Section, SettingsView};
 use crate::status::{DiskStrip, PopupStatus, StatusView};
@@ -380,39 +379,28 @@ impl AppModel {
         widget::scrollable(column).height(Length::Fill).into()
     }
 
-    /// What the list area says without rows: loading, no helper, no device, empty, an error.
+    /// The list area without rows: the orbit icon faded, one line, at most one button
+    /// (`empty_state`).
     fn list_message(&self) -> Element<'_, Message> {
-        let lines: Vec<Element<'_, Message>> = match &self.listing {
-            Listing::NotLoaded if self.helper_busy => vec![body(fl!("busy-background")).into()],
-            Listing::NotLoaded => vec![body(fl!("loading")).into()],
-            Listing::Loaded(list) if list.device.is_none() => {
-                let mut lines = vec![body(fl!("no-device")).into()];
-                if self.mode == super::Mode::Window {
-                    lines.push(
-                        widget::button::standard(fl!("choose-disk"))
-                            .on_press(Message::SettingsClicked)
-                            .into(),
-                    );
-                }
-                lines
-            }
-            Listing::Loaded(_) => vec![body(fl!("empty")).into()],
-            Listing::Failed(error) => {
-                let mut lines = vec![
-                    widget::text(error_summary(error, self.known_uuid.as_deref()))
-                        .class(theme::Text::Custom(error_text))
-                        .into(),
-                ];
-                if !matches!(error, CliError::NoHelper) {
-                    lines.push(
-                        widget::button::standard(fl!("retry"))
-                            .on_press_maybe((!self.loading).then_some(Message::Refresh))
-                            .into(),
-                    );
-                }
-                lines
-            }
+        let Some(state) = self.empty_state() else {
+            return widget::space::vertical().into();
         };
+        let mut lines: Vec<Element<'_, Message>> = vec![
+            icon::icon(self.icon.clone())
+                .size(64)
+                .class(theme::Svg::Custom(Rc::new(faded_svg)))
+                .into(),
+        ];
+        lines.push(if state.error {
+            widget::text(state.line)
+                .class(theme::Text::Custom(error_text))
+                .into()
+        } else {
+            body(state.line).into()
+        });
+        if let Some((label, message)) = state.action {
+            lines.push(widget::button::suggested(label).on_press(message).into());
+        }
         widget::column::with_children(lines)
             .spacing(12)
             .align_x(Alignment::Center)
@@ -1284,6 +1272,14 @@ fn job_bar<'a>(fraction: Option<f32>) -> Element<'a, Message> {
 fn plain_svg(theme: &Theme) -> iced_svg::Style {
     iced_svg::Style {
         color: Some(Color::from(theme.cosmic().background(theme.transparent).on)),
+    }
+}
+
+/// The big icon behind an empty list: the text colour, faded.
+fn faded_svg(theme: &Theme) -> iced_svg::Style {
+    let on = theme.cosmic().background(theme.transparent).on;
+    iced_svg::Style {
+        color: Some(Color::from(on).scale_alpha(0.35)),
     }
 }
 

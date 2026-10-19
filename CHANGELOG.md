@@ -12,6 +12,8 @@ All notable changes to Apsis are listed here. The format follows
   age underneath, instead of two columns. A snapshot in the older format says so under its
   name rather than in a tooltip. Leftovers of unfinished snapshots have their own Remove
   button, and Delete says how many rows are selected ("Delete 2").
+- **Empty states.** Without snapshots the window shows the Apsis icon, one line and one
+  button: "Create snapshot", or "Choose a backup disk" before a disk is set.
 
 ## [0.6.3] - 2026-10-08
 
