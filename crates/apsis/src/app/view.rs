@@ -23,7 +23,7 @@ use super::{
     AppModel, Dialog, Listing, Message, Page, RowItem, SettingsLoad, Status, Tone, error_summary,
 };
 use crate::settings_view::{MAX_REMIND_DAYS, Row, Section, SettingsView};
-use crate::status::{DiskStrip, PopupStatus, StatusView};
+use crate::status::{PopupStatus, StatusView};
 use crate::{fl, fmt};
 
 /// Width of the `+`/`-` in front of a filter, so the patterns line up.
@@ -259,10 +259,12 @@ impl AppModel {
             Page::Settings => self.settings_page(),
             Page::About => self.about_page(),
         };
-        widget::container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        widget::toaster(
+            &self.toasts,
+            widget::container(content)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
     }
 
     /// The header bar's buttons in the window: refresh and About.
@@ -409,16 +411,54 @@ impl AppModel {
             .into()
     }
 
-    /// The bottom of the window: last snapshot and backup disk; while a job runs, its line,
-    /// bar and Stop; after one, how it went; the list's warnings.
+    /// The bottom of the window: a card with the backup disk (its icon, name and size, the
+    /// free space on the right) and its bar, then the running job (its line, bar and Stop)
+    /// or the last snapshot's age and how the last job went; the list's warnings under it.
     fn status_area(&self) -> Element<'_, Message> {
-        let strip = self.status_view().strip();
-        let mut children = self.status_lines(&strip);
-        if let Some(job) = self.job_line() {
-            children.push(job);
-        } else if let Some(line) = self.result_line() {
-            children.push(line);
+        let card = self.disk_card_at(jiff::Zoned::now().datetime());
+        let drive = if self.disk_removable == Some(true) {
+            "drive-removable-media-symbolic"
+        } else {
+            "drive-harddisk-symbolic"
+        };
+        let mut head: Vec<Element<'_, Message>> = vec![
+            icon::from_name(drive).size(20).into(),
+            body(card.title).into(),
+            widget::space::horizontal().into(),
+        ];
+        if !card.right.is_empty() {
+            head.push(
+                caption(card.right)
+                    .class(theme::Text::Custom(dim_text))
+                    .into(),
+            );
         }
+        let mut lines: Vec<Element<'_, Message>> = vec![
+            widget::row::with_children(head)
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .into(),
+        ];
+        if let Some(usage) = card.usage {
+            lines.push(disk_bar(usage));
+        }
+        if let Some(job) = self.job_line() {
+            lines.push(job);
+        } else {
+            if !card.last.is_empty() {
+                lines.push(body(card.last).into());
+            }
+            if let Some(line) = self.result_line() {
+                lines.push(line);
+            }
+        }
+        let mut children: Vec<Element<'_, Message>> = vec![
+            widget::container(widget::column::with_children(lines).spacing(8))
+                .class(theme::Container::Card)
+                .padding(12)
+                .width(Length::Fill)
+                .into(),
+        ];
         if let Listing::Loaded(list) = &self.listing {
             children.extend(list.warnings.iter().map(|warning| {
                 widget::text(warning.clone())
@@ -427,53 +467,6 @@ impl AppModel {
             }));
         }
         widget::column::with_children(children).spacing(8).into()
-    }
-
-    /// `Last snapshot  12 hours ago` and `Backup disk  sda1  372G / 596G · 62% used · 224G
-    /// free` with its bar.
-    fn status_lines(&self, strip: &crate::status::Strip) -> Vec<Element<'_, Message>> {
-        let label = |text: String| -> Element<'_, Message> {
-            heading(text).width(Length::Fixed(110.0)).into()
-        };
-        let mut last = vec![label(fl!("last-snapshot")), body(strip.last.clone()).into()];
-        if let Some(note) = &strip.last_note {
-            last.push(
-                widget::text(note.clone())
-                    .class(theme::Text::Custom(warning_text))
-                    .into(),
-            );
-        }
-        let mut disk = vec![label(fl!("backup-disk"))];
-        let mut lines = vec![widget::row::with_children(last).spacing(8).into()];
-        match &strip.disk {
-            DiskStrip::Mounted {
-                device,
-                size,
-                usage,
-                used_free,
-                note,
-            } => {
-                disk.push(body(format!("{device}  {size} · {used_free}")).into());
-                if let Some((text, severity)) = note {
-                    let class: fn(&Theme) -> iced_text::Style = match severity {
-                        Severity::Critical => error_text,
-                        _ => warning_text,
-                    };
-                    disk.push(
-                        widget::text(text.clone())
-                            .class(theme::Text::Custom(class))
-                            .into(),
-                    );
-                }
-                lines.push(widget::row::with_children(disk).spacing(8).into());
-                lines.push(disk_bar(*usage));
-            }
-            DiskStrip::Text(text) => {
-                disk.push(body(text.clone()).into());
-                lines.push(widget::row::with_children(disk).spacing(8).into());
-            }
-        }
-        lines
     }
 
     /// The running job (this window's or another's): which, its line in the window and how

@@ -21,6 +21,10 @@ All notable changes to Apsis are listed here. The format follows
 - **Settings, Location is one list.** Every disk is a row with a drive icon; the ones that
   can't hold snapshots are dimmed with the reason underneath, and the chosen disk says
   "Not connected" when it's unplugged.
+- **The backup disk is a card.** The bottom of the window shows the disk's name and size
+  with its free space on the right, the bar, and the last snapshot's age or the running
+  job. "Snapshot created", "Deleted …", "Settings saved" and the like also appear as a
+  short toast.
 
 ## [0.6.3] - 2026-10-08
 

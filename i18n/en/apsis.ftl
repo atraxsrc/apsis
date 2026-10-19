@@ -22,15 +22,11 @@ menu-remove-or-move = Remove or move applet…
 menu-close = Close
 
 # Status: last snapshot and backup disk (window status area, popup)
-last-snapshot = Last snapshot
 backup-disk = Backup disk
-strip-last-none = none yet
-strip-over = (over { $days } days)
-strip-under = (under { $pct }%)
+card-free = { $free } free
+card-last = Last snapshot { $age }
+card-not-connected = Not connected
 strip-used-free = { $pct }% used · { $free } free
-strip-disk-not-connected = not connected
-strip-disk-unknown = unknown
-strip-next-manual = manual only
 
 # Popup: one status line and the bar (the backup disk, or the running job)
 open-apsis = Open Apsis

@@ -25,9 +25,9 @@ use apsis_core::restore::filter::Home;
 use apsis_core::restore::plan;
 use apsis_core::restore::refusal::{Refusal, Unreadable};
 use apsis_core::restore::state::{Outcome, RestoreResult, ResultState};
-use apsis_core::status::{BY_UUID, disk_connected};
+use apsis_core::status::{BY_UUID, SYS_CLASS_BLOCK, disk_connected, removable};
 use apsis_core::{
-    ApsisStatus, MAX_COMMENT_CHARS, Progress, Snapshot, SnapshotList, validate_comment,
+    ApsisStatus, DiskUsage, MAX_COMMENT_CHARS, Progress, Snapshot, SnapshotList, validate_comment,
 };
 use cosmic::applet::token::subscription::{
     TokenRequest, TokenUpdate, activation_token_subscription,
@@ -39,6 +39,7 @@ use cosmic::iced::keyboard::{self, Key, Modifiers, key::Named};
 use cosmic::iced::platform_specific::shell::wayland::commands::popup::{destroy_popup, get_popup};
 use cosmic::iced::{Limits, Size, Subscription, event, time, window, window::Id};
 use cosmic::prelude::*;
+use cosmic::widget::toaster::{Toast, ToastId, Toasts};
 use cosmic::widget::{self, icon, segmented_button};
 
 use crate::config::Config;
@@ -197,6 +198,11 @@ pub struct AppModel {
     disk_seen: Option<bool>,
     /// Where to look for it: [`BY_UUID`] (the tests use a folder of their own).
     disk_links: std::path::PathBuf,
+    /// Whether the backup disk is on a removable disk (its icon); `None` when not known.
+    disk_removable: Option<bool>,
+    /// The toasts over the window ("Snapshot created"), and how many are up.
+    toasts: Toasts<Message>,
+    toasts_up: usize,
     /// A create or delete this window started, running in the helper.
     running: Option<Operation>,
     /// The helper's job, as `Job` and `JobChanged` say: this window's or anyone else's.
@@ -650,6 +656,20 @@ fn date_of(name: &str) -> String {
         .unwrap_or_else(|| name.to_owned())
 }
 
+/// The card at the bottom of the window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskCard {
+    /// `sda1 · 28G`, or `Backup disk` when there's no disk to name.
+    pub title: String,
+    /// `17G free`, aligned right; empty without a mounted disk.
+    pub right: String,
+    /// The bar's numbers; `None` draws no bar.
+    pub usage: Option<DiskUsage>,
+    /// `Last snapshot 3 minutes ago`, `No snapshot yet`, `Not connected`, `No backup disk
+    /// chosen`; empty before the first list.
+    pub last: String,
+}
+
 /// A warning strip over the list: one line, and at most one button.
 #[derive(Debug, Clone)]
 pub struct Banner {
@@ -714,6 +734,8 @@ pub enum Message {
     RowClicked(usize),
     /// Remove on a leftover row: selects only it and asks, as Delete would.
     RemoveLeftover(String),
+    /// A toast's time is up, or it was closed.
+    ToastClosed(ToastId),
     /// Toolbar.
     CreateClicked,
     DeleteClicked,
@@ -999,6 +1021,9 @@ impl AppModel {
             mode,
             popup: None,
             menu: None,
+            disk_removable: None,
+            toasts: Toasts::new(Message::ToastClosed),
+            toasts_up: 0,
             config,
             listing: Listing::NotLoaded,
             loading: false,
@@ -1070,6 +1095,10 @@ impl AppModel {
                 self.selection.insert(name);
                 self.anchor = None;
                 self.open_delete();
+            }
+            Message::ToastClosed(id) => {
+                self.toasts.remove(id);
+                self.toasts_up = self.toasts_up.saturating_sub(1);
             }
             Message::BusyRetry => return self.start_list(),
             Message::WindowShown => return self.make_window_resizable(),
@@ -1494,6 +1523,12 @@ impl AppModel {
             Ok(mut list) => {
                 list.snapshots.sort_by_key(|s| std::cmp::Reverse(s.created));
                 self.known_uuid.clone_from(&list.uuid);
+                self.disk_removable = list.device.as_deref().and_then(|device| {
+                    removable(
+                        std::path::Path::new(SYS_CLASS_BLOCK),
+                        fmt::device_name(device),
+                    )
+                });
                 // It listed, so the disk is there (or none is set).
                 self.disk_seen = list.uuid.is_some().then_some(true);
                 // Rows that are gone leave the selection.
@@ -1647,7 +1682,7 @@ impl AppModel {
             }
         });
         // The safety snapshot stays and is in the list.
-        self.start_list()
+        Task::batch([self.toast_status(), self.start_list()])
     }
 
     /// After a failed restore: the normal dialog for the same snapshot.
@@ -2027,6 +2062,61 @@ impl AppModel {
         matches!(&self.settings, SettingsLoad::Ready(v) if v.dirty()).then(|| fl!("unsaved-hint"))
     }
 
+    /// The card at the bottom of the window at `now`: the backup disk's name and size, its
+    /// free space, its bar's numbers, and the last snapshot's age (or why there's no disk).
+    pub(super) fn disk_card_at(&self, now: jiff::civil::DateTime) -> DiskCard {
+        let plain = |last: String| DiskCard {
+            title: fl!("backup-disk"),
+            right: String::new(),
+            usage: None,
+            last,
+        };
+        let status = match self.status_view_at(now) {
+            StatusView::Loaded(status) => status,
+            StatusView::Failed => return plain(fl!("card-not-connected")),
+            StatusView::Unloaded => return plain(String::new()),
+        };
+        if matches!(&self.listing, Listing::Loaded(list) if list.device.is_none()) {
+            return plain(fl!("popup-no-disk"));
+        }
+        let last = match status.last {
+            Some(age) => fl!("card-last", age = fmt::age_long(age)),
+            None => fl!("popup-no-snapshot"),
+        };
+        match &status.disk {
+            apsis_core::DiskStatus::Mounted { device, usage } => DiskCard {
+                title: format!(
+                    "{} · {}",
+                    fmt::device_name(device),
+                    fmt::size_short(usage.total)
+                ),
+                right: fl!("card-free", free = fmt::size_short(usage.free)),
+                usage: Some(*usage),
+                last,
+            },
+            apsis_core::DiskStatus::NotMounted => plain(fl!("card-not-connected")),
+            apsis_core::DiskStatus::Unknown => plain(last),
+        }
+    }
+
+    /// A toast for the status line when it's good news (`Status::Info`): the line stays,
+    /// the toast goes by itself.
+    fn toast_status(&mut self) -> Task<cosmic::Action<Message>> {
+        let Some(Status::Info(text)) = &self.status else {
+            return Task::none();
+        };
+        self.toasts_up += 1;
+        self.toasts
+            .push(Toast::new(text.clone()))
+            .map(cosmic::Action::App)
+    }
+
+    /// How many toasts are up.
+    #[cfg(test)]
+    pub(super) fn toast_count(&self) -> usize {
+        self.toasts_up
+    }
+
     /// `Delete`, or `Delete 2` with more than one row selected.
     pub(super) fn delete_label(&self) -> String {
         match self.selection.len() {
@@ -2380,10 +2470,11 @@ impl AppModel {
             }
             (Operation::Restore { .. }, _) => unreachable!("handled above"),
         });
+        let toast = self.toast_status();
         if ran {
-            return self.start_list();
+            return Task::batch([toast, self.start_list()]);
         }
-        Task::none()
+        toast
     }
 
     /// This window's restore preparation ended: ready at the prompt, refused, stopped or
@@ -2554,7 +2645,7 @@ impl AppModel {
         // doesn't change the list, and a list is never a job. A Busy from a write that was
         // running or waiting is retried by the [`BUSY_RETRY_EVERY`] timer.
         if changed {
-            return self.start_list();
+            return Task::batch([self.toast_status(), self.start_list()]);
         }
         Task::none()
     }
@@ -2663,7 +2754,7 @@ impl AppModel {
         });
         if written {
             self.settings = SettingsLoad::NotLoaded;
-            return Task::batch([self.load_settings(), self.start_list()]);
+            return Task::batch([self.toast_status(), self.load_settings(), self.start_list()]);
         }
         Task::none()
     }

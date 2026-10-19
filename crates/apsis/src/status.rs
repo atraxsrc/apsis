@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! The one place that turns [`ApsisStatus`] into text: the panel label, the tooltip and the
-//! icon's severity. Later phases (the strip in the popup and window) call the same functions.
+//! The one place that turns [`ApsisStatus`] into text: the panel label, the tooltip, the
+//! icon's severity and the popup's line.
 //! No widgets and no theme, so it is unit-testable; colours are chosen by the caller.
 
 use std::time::Duration;
@@ -56,65 +56,6 @@ impl StatusView {
                 fl!("tooltip-next-manual"),
                 disk_line(&status.disk)
             ),
-        }
-    }
-
-    /// The apsis strip's text (window, and later the popup).
-    #[must_use]
-    pub fn strip(&self) -> Strip {
-        let next = fl!("strip-next-manual");
-        match self {
-            Self::Unloaded => Strip {
-                last: "-".to_owned(),
-                last_note: None,
-                next,
-                disk: DiskStrip::Text("-".to_owned()),
-            },
-            Self::Failed => Strip {
-                last: "-".to_owned(),
-                last_note: None,
-                next,
-                disk: DiskStrip::Text(fl!("strip-disk-not-connected")),
-            },
-            Self::Loaded(status) => {
-                let (last, last_note) = match (status.last, status.due()) {
-                    (Some(age), Due::Overdue { days }) => {
-                        (ago(age), Some(fl!("strip-over", days = days.to_string())))
-                    }
-                    (Some(age), _) => (ago(age), None),
-                    (None, Due::Never { days }) => (
-                        fl!("strip-last-none"),
-                        Some(fl!("strip-over", days = days.to_string())),
-                    ),
-                    (None, _) => (fl!("strip-last-none"), None),
-                };
-                let disk = match &status.disk {
-                    DiskStatus::Mounted { device, usage } => DiskStrip::Mounted {
-                        device: fmt::device_name(device).to_owned(),
-                        size: format!(
-                            "{} / {}",
-                            fmt::size_short(usage.used),
-                            fmt::size_short(usage.total)
-                        ),
-                        usage: *usage,
-                        used_free: fl!(
-                            "strip-used-free",
-                            pct = status.used_pct().unwrap_or(0).to_string(),
-                            free = fmt::size_short(usage.free)
-                        ),
-                        note: low_limit(status)
-                            .map(|(pct, severity)| (fl!("strip-under", pct = pct), severity)),
-                    },
-                    DiskStatus::NotMounted => DiskStrip::Text(fl!("strip-disk-not-connected")),
-                    DiskStatus::Unknown => DiskStrip::Text(fl!("strip-disk-unknown")),
-                };
-                Strip {
-                    last,
-                    last_note,
-                    next,
-                    disk,
-                }
-            }
         }
     }
 
@@ -192,37 +133,6 @@ pub struct PopupStatus {
     pub figures: Option<String>,
 }
 
-/// The apsis strip's text: the time column and the disk column. No widgets; `app.rs` lays it out
-/// and picks the colours (`Severity` says which role a phrase takes).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Strip {
-    /// `12h ago`, `none yet`, or `-` before the first list.
-    pub last: String,
-    /// `(over 7 days)` when the reminder is due; the phrase that takes the warning colour.
-    pub last_note: Option<String>,
-    /// `manual only` (no scheduler).
-    pub next: String,
-    pub disk: DiskStrip,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DiskStrip {
-    Mounted {
-        /// `sda1`
-        device: String,
-        /// `372G / 596G`
-        size: String,
-        /// The numbers for the bar.
-        usage: DiskUsage,
-        /// `62% used · 224G free`
-        used_free: String,
-        /// `(under 10%)` with the role it takes, when space is low.
-        note: Option<(String, Severity)>,
-    },
-    /// `not connected`, `unknown`, or `-`.
-    Text(String),
-}
-
 /// `12h ago`, or `just now`.
 fn ago(age: Duration) -> String {
     match age_short(age).as_str() {
@@ -275,18 +185,6 @@ fn disk_line(disk: &DiskStatus) -> String {
         }
         DiskStatus::NotMounted => fl!("tooltip-disk-not-connected"),
         DiskStatus::Unknown => fl!("tooltip-disk-unknown"),
-    }
-}
-
-/// The limit free space is under, as a whole percent, and the role it takes: `("10", Warning)`
-/// or `("5", Critical)`. `None` when there is plenty, or nothing is known.
-fn low_limit(status: &ApsisStatus) -> Option<(String, Severity)> {
-    if status.disk_critical() {
-        Some((percent(DISK_CRITICAL), Severity::Critical))
-    } else if status.disk_warning() {
-        Some((percent(DISK_LOW), Severity::Warning))
-    } else {
-        None
     }
 }
 
@@ -418,64 +316,6 @@ mod tests {
     fn limits_print_as_whole_percents() {
         assert_eq!(percent(DISK_LOW), "10");
         assert_eq!(percent(DISK_CRITICAL), "5");
-    }
-
-    #[test]
-    fn strip_says_time_and_disk_in_words() {
-        let strip = loaded(Some(12), Some(7), disk(372 * G, 224 * G)).strip();
-        assert_eq!(strip.last, "12h ago");
-        assert_eq!(strip.last_note, None);
-        assert_eq!(strip.next, "manual only");
-        let DiskStrip::Mounted {
-            device,
-            size,
-            used_free,
-            note,
-            ..
-        } = strip.disk
-        else {
-            panic!("{:?}", strip.disk)
-        };
-        assert_eq!(device, "sdx1");
-        assert_eq!(size, "372G / 596G");
-        assert_eq!(used_free, "63% used · 224G free");
-        assert_eq!(note, None);
-    }
-
-    #[test]
-    fn strip_names_the_overdue_phrase_and_the_low_limit() {
-        let strip = loaded(Some(9 * 24), Some(7), disk(960 * G, 40 * G)).strip();
-        assert_eq!(strip.last, "9d ago");
-        assert_eq!(strip.last_note.as_deref(), Some("(over 7 days)"));
-        let DiskStrip::Mounted { note, .. } = strip.disk else {
-            panic!()
-        };
-        assert_eq!(note, Some(("(under 5%)".to_owned(), Severity::Critical)));
-        let low = loaded(Some(1), None, disk(899 * G, 99 * G)).strip();
-        let DiskStrip::Mounted { note, .. } = low.disk else {
-            panic!()
-        };
-        assert_eq!(note, Some(("(under 10%)".to_owned(), Severity::Warning)));
-        let none = loaded(None, Some(7), disk(G, 99 * G)).strip();
-        assert_eq!(none.last, "none yet");
-        assert_eq!(none.last_note.as_deref(), Some("(over 7 days)"));
-    }
-
-    #[test]
-    fn strip_without_a_disk_or_a_list() {
-        let text = |view: StatusView| match view.strip().disk {
-            DiskStrip::Text(text) => text,
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(text(StatusView::Unloaded), "-");
-        assert_eq!(text(StatusView::Failed), "not connected");
-        assert_eq!(
-            text(loaded(Some(1), None, DiskStatus::NotMounted)),
-            "not connected"
-        );
-        assert_eq!(text(loaded(Some(1), None, DiskStatus::Unknown)), "unknown");
-        assert_eq!(StatusView::Unloaded.strip().last, "-");
-        assert_eq!(StatusView::Failed.strip().next, "manual only");
     }
 
     #[test]

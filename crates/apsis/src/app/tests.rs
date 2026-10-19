@@ -8,7 +8,6 @@ use apsis_core::config::System;
 use cosmic::iced::keyboard::Modifiers;
 
 use super::*;
-use crate::status::DiskStrip;
 
 /// A fresh, empty folder for one `/dev/disk/by-uuid` stand-in. Tests run on parallel threads, so
 /// each call gets its own (pid and a counter); the first call of a run removes earlier runs'.
@@ -474,6 +473,66 @@ fn the_settings_page_hints_at_unsaved_changes() {
     assert_eq!(app.unsaved_hint(), None);
     send(&mut app, Message::Include(Row::IncludeHome, true));
     assert_eq!(app.unsaved_hint().as_deref(), Some("Unsaved changes"));
+}
+
+#[test]
+fn the_disk_card_names_the_disk_its_free_space_and_the_last_snapshot() {
+    let mut app = window();
+    let Listing::Loaded(list) = &mut app.listing else {
+        panic!()
+    };
+    list.usage = Some(DiskUsage {
+        total: 28 * G,
+        used: 11 * G,
+        free: 17 * G,
+    });
+    let now = apsis_core::parse_snapshot_name("2026-09-25_11-31-53").unwrap();
+    let card = app.disk_card_at(now);
+    assert_eq!(
+        (card.title.as_str(), card.right.as_str()),
+        ("sdX1 · 28G", "17G free")
+    );
+    assert_eq!(card.last, "Last snapshot 3 minutes ago");
+    assert!(card.usage.is_some());
+    app.disk_seen = Some(false);
+    let card = app.disk_card_at(now);
+    assert_eq!(
+        (card.title.as_str(), card.last.as_str()),
+        ("Backup disk", "Not connected")
+    );
+    assert!(card.usage.is_none() && card.right.is_empty());
+    let mut list = fixture();
+    list.device = None;
+    app.on_listed(Ok(list));
+    assert_eq!(app.disk_card_at(now).last, "No backup disk chosen");
+}
+
+#[test]
+fn results_are_toasts_and_errors_are_not() {
+    let mut app = window();
+    assert_eq!(app.toast_count(), 0);
+    app.running = Some(Operation::Create("x".to_owned()));
+    send(
+        &mut app,
+        Message::Finished(Operation::Create("x".to_owned()), Ok(())),
+    );
+    assert_eq!(app.toast_count(), 1);
+    assert_eq!(
+        app.status,
+        Some(Status::Info("Snapshot created".to_owned()))
+    );
+    app.running = Some(Operation::Create("y".to_owned()));
+    send(
+        &mut app,
+        Message::Finished(
+            Operation::Create("y".to_owned()),
+            Err(CliError::Other("no".to_owned())),
+        ),
+    );
+    assert_eq!(app.toast_count(), 1, "a failure is no toast");
+    assert!(matches!(app.status, Some(Status::Error(..))));
+    send(&mut app, Message::SettingsWritten(Ok(String::new())));
+    assert_eq!(app.toast_count(), 2, "settings saved is a toast");
 }
 
 #[test]
@@ -1167,12 +1226,10 @@ fn an_unplugged_disk_reads_not_connected_and_plugging_in_lists() {
     app.disk_links = unplugged();
     send(&mut app, Message::DiskCheck);
     assert_eq!(app.disk_seen, Some(false));
-    let view = app.status_view();
-    assert_eq!(
-        view.strip().disk,
-        DiskStrip::Text(fl!("strip-disk-not-connected"))
-    );
-    assert_ne!(view.strip().last, "-", "the time side stays");
+    let card = app.disk_card_at(jiff::Zoned::now().datetime());
+    assert_eq!(card.last, "Not connected");
+    assert_eq!(card.title, "Backup disk");
+    assert!(card.usage.is_none());
     assert!(!app.can_create());
     app.disk_links = plugged_in();
     send(&mut app, Message::DiskCheck);
