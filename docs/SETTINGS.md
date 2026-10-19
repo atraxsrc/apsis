@@ -2,19 +2,21 @@
 
 The settings in detail, deleting snapshots, passwords and keyboard shortcuts.
 
-**Location**: the disk snapshots go to. Only disks that can hold snapshots can be picked (a
-Linux filesystem, not encrypted); the others are listed with the reason.
+**Location**: the disk snapshots go to, one row per disk. Only disks that can hold snapshots
+have a radio (a Linux filesystem, not encrypted); the others are dimmed with the reason under
+their name. The chosen disk says "Not connected" while it's unplugged.
 
 **Include**: the system is always included. `/root` is the root user's home folder (on by
 default). `/home` is every user's home folder: documents, photos and settings (off by
 default). With `/home` included, a full restore puts your documents back as they were
 in the snapshot too.
 
-**Filters**: each line is `+` (keep) or `-` (leave out) and a pattern. rsync takes the
-**first** line that matches, top to bottom, so order matters: new lines go on top, and Move Up
-/ Move Down reorder them. Add Folder and Add File pick a path; Add Pattern takes a typed one
-(start it with `+ ` to include; anything else is excluded). Built-in excludes (`/proc`, `/dev`,
-`/tmp`, caches, other mounts) always come first.
+**Filters**: each row is a pattern with **Keep** (`+` in the config file) or **Leave out**
+(`-`). rsync takes the **first** row that matches, top to bottom, so order matters: new rows
+go on top, and the up and down buttons on the selected row reorder them. Add folder and Add
+file pick a path; Add pattern takes a typed one (start it with `+ ` to keep; anything else is
+left out). Built-in excludes (`/proc`, `/dev`, `/tmp`, caches, other mounts) always come
+first; "Built-in excludes" under the list unfolds them.
 
 - `*` matches any name within one folder level; it doesn't cross a `/`.
 - `**` matches anything, across folders.
@@ -29,8 +31,8 @@ in the snapshot too.
 | `- /home/*/Downloads/***` | leave out every user's Downloads folder (with `/home` included) |
 | `+ /home/you/Projects/***` | keep one folder of your home even with `/home` left out |
 
-**Misc** (saved at once, for you only): **Remind me** after this many days without a snapshot
-(0 turns it off), and the **Panel label**.
+**General** (saved at once, for you only): the **Reminder** (remind me when the last snapshot
+is older than this many days; 0 turns it off), and the **Panel** label beside the icon.
 
 ## Deleting snapshots
 

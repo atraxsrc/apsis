@@ -22,8 +22,9 @@ it, so restoring the system does not touch your documents.
   beside the icon shows both at a glance.
 * The icon turns the warning colour when the last snapshot is older than you chose, or the
   disk is nearly full.
-* Click it to see how full the backup disk is and how old the last snapshot is.
-  **Open Apsis** opens the window.
+* The icon takes the accent colour while a snapshot or a restore's preparation runs.
+* Click it to see how old the last snapshot is, how full the backup disk is, and the two
+  newest snapshots. **Open Apsis** opens the window.
 
 ![](docs/4.png) ![The popup while a snapshot is made](docs/5.png)
 
@@ -33,6 +34,7 @@ it, so restoring the system does not touch your documents.
   system; later ones copy only what changed. rsync runs at idle priority, so the desktop
   stays responsive.
 * **Delete** removes one or several snapshots. Nothing is created or deleted on a schedule.
+* Right-click a snapshot for Restore, Delete and Copy date.
 * **Stop** ends a snapshot while it is being made; what it copied so far is removed.
 * Creating, deleting and saving settings touch system files, so your system asks for your
   password (polkit). The window itself never runs as root.
@@ -51,7 +53,7 @@ it, so restoring the system does not touch your documents.
 ### What is included
 
 * The system is always included. `/root` and `/home` are tick boxes.
-* **Filters** leave out (`-`) or keep (`+`) folders, files or patterns, as in Timeshift.
+* **Filters** keep or leave out folders, files or patterns, as in Timeshift.
 * With `/home` included, a restore can put your documents back as they were in the
   snapshot, or keep them as they are now.
 
