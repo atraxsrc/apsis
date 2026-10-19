@@ -660,6 +660,22 @@ fn date_of(name: &str) -> String {
         .unwrap_or_else(|| name.to_owned())
 }
 
+/// What a row's right-click menu offers, each with the row's index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowAction {
+    Restore(usize),
+    Delete(usize),
+    CopyDate(usize),
+}
+
+impl widget::menu::Action for RowAction {
+    type Message = Message;
+
+    fn message(&self) -> Message {
+        Message::RowAction(*self)
+    }
+}
+
 /// The card at the bottom of the window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiskCard {
@@ -746,6 +762,8 @@ pub enum Message {
     CloseDetails,
     /// Folds or unfolds the built-in excludes in the Filters tab.
     ToggleBuiltin,
+    /// A row's right-click menu.
+    RowAction(RowAction),
     /// Toolbar.
     CreateClicked,
     DeleteClicked,
@@ -1136,6 +1154,7 @@ impl AppModel {
             }
             Message::CloseDetails => self.close_details(),
             Message::ToggleBuiltin => self.show_builtin = !self.show_builtin,
+            Message::RowAction(action) => return self.row_action(action),
             Message::BusyRetry => return self.start_list(),
             Message::WindowShown => return self.make_window_resizable(),
             Message::PopupClosed(id) => {
@@ -2146,6 +2165,47 @@ impl AppModel {
             },
             apsis_core::DiskStatus::NotMounted => plain(fl!("card-not-connected")),
             apsis_core::DiskStatus::Unknown => plain(last),
+        }
+    }
+
+    /// A row's right-click menu: Restore (not for a leftover), Delete and Copy date.
+    pub(super) fn row_menu(&self, index: usize) -> Vec<(String, RowAction)> {
+        let mut items = Vec::new();
+        if matches!(self.rows().get(index), Some(RowItem::Snapshot(_))) {
+            items.push((fl!("menu-restore"), RowAction::Restore(index)));
+        }
+        items.push((fl!("menu-delete"), RowAction::Delete(index)));
+        items.push((fl!("menu-copy-date"), RowAction::CopyDate(index)));
+        items
+    }
+
+    /// A row's menu item: selects only that row, then restores, asks to delete, or copies
+    /// the date as the row shows it.
+    fn row_action(&mut self, action: RowAction) -> Task<cosmic::Action<Message>> {
+        let (RowAction::Restore(index) | RowAction::Delete(index) | RowAction::CopyDate(index)) =
+            action;
+        let rows = self.rows();
+        let Some(row) = rows.get(index) else {
+            return Task::none();
+        };
+        let name = row.name().to_owned();
+        let created = match row {
+            RowItem::Snapshot(snapshot) => Some(snapshot.created),
+            RowItem::Leftover(_) => None,
+        };
+        self.selection.clear();
+        self.selection.insert(name);
+        self.anchor = Some(index);
+        match action {
+            RowAction::Restore(_) => self.open_restore(),
+            RowAction::Delete(_) => {
+                self.open_delete();
+                Task::none()
+            }
+            RowAction::CopyDate(_) => match created {
+                Some(created) => cosmic::iced::clipboard::write(fmt::when_long(created)),
+                None => Task::none(),
+            },
         }
     }
 

@@ -16,7 +16,7 @@ use cosmic::iced::widget::text as iced_text;
 use cosmic::iced::{Alignment, Color, Length};
 use cosmic::prelude::*;
 use cosmic::widget::text::{body, caption, heading, title4};
-use cosmic::widget::{self, icon, settings};
+use cosmic::widget::{self, icon, menu, settings};
 use cosmic::{Theme, theme};
 
 use super::{
@@ -400,6 +400,16 @@ impl AppModel {
             } else {
                 lines.into()
             };
+            // Right click: the same actions as the toolbar, for this row.
+            let items: Vec<menu::Item<super::RowAction, String>> = self
+                .row_menu(index)
+                .into_iter()
+                .map(|(label, action)| menu::Item::Button(label, None, action))
+                .collect();
+            let content = widget::context_menu(
+                content,
+                Some(menu::items(&std::collections::HashMap::new(), items)),
+            );
             column = column.add(
                 widget::list::button(content)
                     .selected(self.selection.contains(row.name()))

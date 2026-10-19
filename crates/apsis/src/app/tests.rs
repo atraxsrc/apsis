@@ -553,6 +553,31 @@ fn create_says_what_the_snapshot_costs() {
 }
 
 #[test]
+fn row_actions_select_the_row_and_open_the_dialog() {
+    let mut app = window();
+    send(&mut app, Message::RowAction(RowAction::Delete(1)));
+    assert_eq!(selected(&app), vec![SECOND.to_owned()]);
+    assert!(matches!(&app.dialog, Some(Dialog::Delete { names }) if names == &[SECOND.to_owned()]));
+    send(&mut app, Message::DialogCancel);
+    send(&mut app, Message::RowAction(RowAction::Restore(0)));
+    assert_eq!(selected(&app), vec![NEWEST.to_owned()]);
+    assert_eq!(
+        app.checking.as_deref(),
+        Some(NEWEST),
+        "restore asked the helper"
+    );
+    // A leftover can't be restored; the action does nothing to it.
+    app.checking = None;
+    send(&mut app, Message::RowAction(RowAction::Restore(5)));
+    assert!(app.checking.is_none());
+    assert_eq!(selected(&app), vec![LEFTOVER.to_owned()]);
+    assert_eq!(app.row_menu(5).len(), 2, "Delete and Copy date only");
+    assert_eq!(app.row_menu(0).len(), 3);
+    send(&mut app, Message::RowAction(RowAction::CopyDate(0)));
+    assert_eq!(selected(&app), vec![NEWEST.to_owned()]);
+}
+
+#[test]
 fn leftovers_alone_are_rows_not_an_empty_state() {
     let mut app = window();
     let mut list = fixture();
