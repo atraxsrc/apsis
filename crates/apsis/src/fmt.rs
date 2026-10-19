@@ -25,15 +25,15 @@ pub fn when_short(created: DateTime) -> String {
     created.strftime("%-d %b, %H:%M").to_string()
 }
 
-/// `just now`, `5 minutes ago`, `22 hours ago` (under two days), `12 days ago`: an age in
-/// words, for the rows, the disk card and the dialogs.
+/// `just now`, `5 minutes ago`, `22 hours ago`, `1 day ago` (from 24 hours), `12 days ago`:
+/// an age in words, for the rows, the disk card and the dialogs.
 #[must_use]
 pub fn age_long(age: Duration) -> String {
     let minutes = age.as_secs() / 60;
     let (count, unit) = match minutes {
         ..1 => return "just now".to_owned(),
         1..60 => (minutes, "minute"),
-        60..2880 => (minutes / 60, "hour"),
+        60..1440 => (minutes / 60, "hour"),
         _ => (minutes / 1440, "day"),
     };
     let plural = if count == 1 { "" } else { "s" };
@@ -131,8 +131,9 @@ mod tests {
         assert_eq!(age_long(s(60)), "1 minute ago");
         assert_eq!(age_long(s(5 * 60)), "5 minutes ago");
         assert_eq!(age_long(s(3600)), "1 hour ago");
-        assert_eq!(age_long(s(22 * 3600)), "22 hours ago");
-        assert_eq!(age_long(s(47 * 3600)), "47 hours ago");
+        assert_eq!(age_long(s(23 * 3600)), "23 hours ago");
+        assert_eq!(age_long(s(24 * 3600)), "1 day ago");
+        assert_eq!(age_long(s(35 * 3600)), "1 day ago");
         assert_eq!(age_long(s(48 * 3600)), "2 days ago");
         assert_eq!(age_long(s(12 * 86400)), "12 days ago");
     }

@@ -594,20 +594,8 @@ fn row_actions_select_the_row_and_open_the_dialog() {
     send(&mut app, Message::RowAction(RowAction::Restore(5)));
     assert!(app.checking.is_none());
     assert_eq!(selected(&app), vec![LEFTOVER.to_owned()]);
-    assert_eq!(app.row_menu(5).len(), 2, "Delete and Copy date only");
-    assert_eq!(app.row_menu(0).len(), 3);
-    send(&mut app, Message::RowAction(RowAction::CopyDate(0)));
-    assert_eq!(selected(&app), vec![NEWEST.to_owned()]);
-    // Copy date works on a leftover too: its date is in its name.
-    assert_eq!(
-        app.copy_date_text(5).as_deref(),
-        Some("Sat 26 Sep 2026, 14:02")
-    );
-    assert_eq!(
-        app.copy_date_text(0).as_deref(),
-        Some("Fri 25 Sep 2026, 11:28")
-    );
-    assert_eq!(app.copy_date_text(6), None);
+    assert_eq!(app.row_menu(5).len(), 1, "Delete only");
+    assert_eq!(app.row_menu(0).len(), 2);
 }
 
 #[test]

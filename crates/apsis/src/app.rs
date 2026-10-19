@@ -665,7 +665,6 @@ fn date_of(name: &str) -> String {
 pub enum RowAction {
     Restore(usize),
     Delete(usize),
-    CopyDate(usize),
 }
 
 impl widget::menu::Action for RowAction {
@@ -2168,22 +2167,19 @@ impl AppModel {
         }
     }
 
-    /// A row's right-click menu: Restore (not for a leftover), Delete and Copy date.
+    /// A row's right-click menu: Restore (not for a leftover) and Delete.
     pub(super) fn row_menu(&self, index: usize) -> Vec<(String, RowAction)> {
         let mut items = Vec::new();
         if matches!(self.rows().get(index), Some(RowItem::Snapshot(_))) {
             items.push((fl!("menu-restore"), RowAction::Restore(index)));
         }
         items.push((fl!("menu-delete"), RowAction::Delete(index)));
-        items.push((fl!("menu-copy-date"), RowAction::CopyDate(index)));
         items
     }
 
-    /// A row's menu item: selects only that row, then restores, asks to delete, or copies
-    /// the date as the row shows it.
+    /// A row's menu item: selects only that row, then restores or asks to delete.
     fn row_action(&mut self, action: RowAction) -> Task<cosmic::Action<Message>> {
-        let (RowAction::Restore(index) | RowAction::Delete(index) | RowAction::CopyDate(index)) =
-            action;
+        let (RowAction::Restore(index) | RowAction::Delete(index)) = action;
         let rows = self.rows();
         let Some(row) = rows.get(index) else {
             return Task::none();
@@ -2198,21 +2194,7 @@ impl AppModel {
                 self.open_delete();
                 Task::none()
             }
-            RowAction::CopyDate(_) => match self.copy_date_text(index) {
-                Some(text) => cosmic::iced::clipboard::write(text),
-                None => Task::none(),
-            },
         }
-    }
-
-    /// What Copy date puts on the clipboard for row `index`: the date as the row shows it,
-    /// a leftover's from its name. `None` past the last row.
-    pub(super) fn copy_date_text(&self, index: usize) -> Option<String> {
-        let created = match self.rows().get(index)? {
-            RowItem::Snapshot(snapshot) => snapshot.created,
-            RowItem::Leftover(name) => apsis_core::parse_snapshot_name(name)?,
-        };
-        Some(fmt::when_long(created))
     }
 
     /// What the Create dialog says a snapshot costs at `now`: the whole system for the first

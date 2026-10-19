@@ -41,7 +41,7 @@ All notable changes to Apsis are listed here. The format follows
   says when space is freed. Restore puts its warning at the top, and the safety snapshot is
   a switch with one line under it. Dates in dialogs and results read like a calendar
   ("Fri 25 Sep 2026, 11:28").
-- **Right-click a snapshot** for Restore, Delete and Copy date.
+- **Right-click a snapshot** for Restore and Delete.
 
 ## [0.6.3] - 2026-10-08
 

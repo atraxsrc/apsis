@@ -34,7 +34,7 @@ it, so restoring the system does not touch your documents.
   system; later ones copy only what changed. rsync runs at idle priority, so the desktop
   stays responsive.
 * **Delete** removes one or several snapshots. Nothing is created or deleted on a schedule.
-* Right-click a snapshot for Restore, Delete and Copy date.
+* Right-click a snapshot for Restore and Delete.
 * **Stop** ends a snapshot while it is being made; what it copied so far is removed.
 * Creating, deleting and saving settings touch system files, so your system asks for your
   password (polkit). The window itself never runs as root.

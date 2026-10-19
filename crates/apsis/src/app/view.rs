@@ -402,33 +402,53 @@ impl AppModel {
         ])
         .spacing(2)
         .width(Length::Fill);
-        let content: Element<'_, Message> = if leftover {
-            widget::row::with_children(vec![
-                lines.into(),
+        // A selected row gets a bar in the accent colour at its left, so the selection shows
+        // whatever the theme's hover tint is.
+        let mut parts: Vec<Element<'_, Message>> = Vec::new();
+        if self.selection.contains(row.name()) {
+            parts.push(
+                widget::container(widget::space::vertical().height(Length::Fill))
+                    .width(Length::Fixed(3.0))
+                    .height(Length::Fill)
+                    .class(theme::Container::custom(accent_bar))
+                    .into(),
+            );
+        }
+        parts.push(lines.into());
+        if leftover {
+            parts.push(
                 widget::button::standard(fl!("remove"))
                     .on_press_maybe(
                         self.can_create()
                             .then(|| Message::RemoveLeftover(row.name().to_owned())),
                     )
                     .into(),
-            ])
+            );
+        }
+        let content = widget::row::with_children(parts)
             .spacing(12)
-            .align_y(Alignment::Center)
-            .into()
-        } else {
-            lines.into()
-        };
-        // Right click: the same actions as the toolbar, for this row.
+            .align_y(Alignment::Center);
+        // Right click: the same actions as the toolbar, for this row. On Wayland the menu is
+        // a popup surface of the window, so it needs the window and the surface handler.
+        // The press selects the row (as a left click would), the release opens the menu.
         let items: Vec<menu::Item<super::RowAction, String>> = self
             .row_menu(index)
             .into_iter()
             .map(|(label, action)| menu::Item::Button(label, None, action))
             .collect();
-        widget::context_menu(
+        let menu = widget::context_menu(
             content,
             Some(menu::items(&std::collections::HashMap::new(), items)),
         )
-        .into()
+        .on_surface_action(Message::Surface)
+        .window_id(
+            self.core
+                .main_window_id()
+                .unwrap_or(cosmic::iced::window::Id::RESERVED),
+        );
+        widget::mouse_area(menu)
+            .on_right_press(Message::RowClicked(index))
+            .into()
     }
 
     /// The list area without rows: the orbit icon faded, one line, at most one button
@@ -1118,11 +1138,12 @@ impl AppModel {
                 .add(
                     settings::item::builder(fl!("remind-title"))
                         .description(fl!("remind-description"))
+                        // The number alone: "6 days" wraps in the spin button's label.
                         .control(widget::spin_button(
                             if days == 0 {
                                 fl!("remind-off")
                             } else {
-                                fl!("remind-days", days = days.to_string())
+                                days.to_string()
                             },
                             fl!("remind-title"),
                             days,
@@ -1403,6 +1424,22 @@ fn banner<'a>(banner: super::Banner) -> Element<'a, Message> {
     .padding(10)
     .width(Length::Fill)
     .into()
+}
+
+/// The bar at the left of a selected row: the accent colour.
+fn accent_bar(theme: &Theme) -> widget::container::Style {
+    let cosmic = theme.cosmic();
+    widget::container::Style {
+        background: Some(cosmic::iced::Background::Color(
+            cosmic.accent_color().into(),
+        )),
+        border: cosmic::iced::Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: cosmic.corner_radii.radius_xs.into(),
+        },
+        ..widget::container::Style::default()
+    }
 }
 
 /// A strip in the theme's destructive colours, as the warning widget's in the warning ones.
