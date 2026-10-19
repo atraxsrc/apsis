@@ -25,6 +25,10 @@ All notable changes to Apsis are listed here. The format follows
   with its free space on the right, the bar, and the last snapshot's age or the running
   job. "Snapshot created", "Deleted …", "Settings saved" and the like also appear as a
   short toast.
+- **Restore outcome with details.** After a restore, the outcome is a banner (warning or
+  destructive, or a plain line when all went well) with a Details button that opens a side
+  panel: the snapshot, the home folders, the safety snapshot and what happened, which used
+  to be a tooltip.
 
 ## [0.6.3] - 2026-10-08
 

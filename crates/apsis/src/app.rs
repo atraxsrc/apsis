@@ -203,6 +203,8 @@ pub struct AppModel {
     /// The toasts over the window ("Snapshot created"), and how many are up.
     toasts: Toasts<Message>,
     toasts_up: usize,
+    /// The restore details drawer is open.
+    details: bool,
     /// A create or delete this window started, running in the helper.
     running: Option<Operation>,
     /// The helper's job, as `Job` and `JobChanged` say: this window's or anyone else's.
@@ -736,6 +738,10 @@ pub enum Message {
     RemoveLeftover(String),
     /// A toast's time is up, or it was closed.
     ToastClosed(ToastId),
+    /// Details on the restore outcome's banner: opens the drawer.
+    ShowDetails,
+    /// The drawer's close button.
+    CloseDetails,
     /// Toolbar.
     CreateClicked,
     DeleteClicked,
@@ -912,6 +918,24 @@ impl cosmic::Application for AppModel {
             .flatten()
     }
 
+    /// The restore details, from the outcome banner's Details button.
+    fn context_drawer(&self) -> Option<cosmic::app::ContextDrawer<'_, Self::Message>> {
+        if !self.details || self.mode != Mode::Window || self.result_text().is_none() {
+            return None;
+        }
+        Some(
+            cosmic::app::context_drawer(self.details_view(), Message::CloseDetails)
+                .title(fl!("details-title")),
+        )
+    }
+
+    fn on_context_drawer(&mut self) -> Task<cosmic::Action<Self::Message>> {
+        if !self.core.window.show_context {
+            self.details = false;
+        }
+        Task::none()
+    }
+
     fn header_end(&self) -> Vec<Element<'_, Self::Message>> {
         if self.mode != Mode::Window {
             return Vec::new();
@@ -1024,6 +1048,7 @@ impl AppModel {
             disk_removable: None,
             toasts: Toasts::new(Message::ToastClosed),
             toasts_up: 0,
+            details: false,
             config,
             listing: Listing::NotLoaded,
             loading: false,
@@ -1100,6 +1125,11 @@ impl AppModel {
                 self.toasts.remove(id);
                 self.toasts_up = self.toasts_up.saturating_sub(1);
             }
+            Message::ShowDetails => {
+                self.details = true;
+                self.core.set_show_context(true);
+            }
+            Message::CloseDetails => self.close_details(),
             Message::BusyRetry => return self.start_list(),
             Message::WindowShown => return self.make_window_resizable(),
             Message::PopupClosed(id) => {
@@ -1175,6 +1205,7 @@ impl AppModel {
                 if let Ok(result) = result {
                     self.restore_result =
                         matches!(result.state, ResultState::Ended(_)).then_some(result);
+                    self.close_details();
                 }
             }
             Message::WindowResized(height) => self.window_height = height,
@@ -1584,6 +1615,7 @@ impl AppModel {
         let snapshot = self.selected_names().remove(0);
         self.checking = Some(snapshot.clone());
         self.status = None;
+        self.close_details();
         let link = self.helper.clone();
         cosmic::task::future(async move {
             let result = check_restore(link, &snapshot).await;
@@ -1776,6 +1808,16 @@ impl AppModel {
         })
     }
 
+    /// The banner's tone for the last restore: warning for problems, a kept boot and a
+    /// restore that didn't start, destructive for a broken boot and a failure; `None` for a
+    /// restore that went fine (a plain line), or none at all.
+    fn result_tone(&self) -> Option<Tone> {
+        match self.restore_result.as_ref()?.state {
+            ResultState::Ended(Outcome::NotStarted) => Some(Tone::Warning),
+            _ => self.result_phrase().map(|parts| parts.tone),
+        }
+    }
+
     /// The last restore's line for the status area and its tooltip.
     fn result_text(&self) -> Option<(String, String)> {
         let result = self.restore_result.as_ref()?;
@@ -1797,7 +1839,9 @@ impl AppModel {
             .unwrap_or_else(|| fl!("result-safety-none"));
         let reason = result.message.as_str();
         let line = match self.result_phrase() {
-            Some(parts) => format!("{} {} {}", parts.before, parts.phrase, parts.after),
+            Some(parts) => format!("{} {} {}", parts.before, parts.phrase, parts.after)
+                .trim_end()
+                .to_owned(),
             None if outcome == Outcome::Done => fl!("result-done", date = date.as_str()),
             None => fl!(
                 "result-not-started",
@@ -2096,6 +2140,61 @@ impl AppModel {
             },
             apsis_core::DiskStatus::NotMounted => plain(fl!("card-not-connected")),
             apsis_core::DiskStatus::Unknown => plain(last),
+        }
+    }
+
+    /// Closes the restore details drawer.
+    fn close_details(&mut self) {
+        self.details = false;
+        self.core.set_show_context(false);
+    }
+
+    /// The restore details drawer's lines, label and text: the snapshot, the home folders,
+    /// the safety snapshot, and what happened (the full account the line used to keep in a
+    /// tooltip). Empty without an ended restore.
+    pub(super) fn details_lines(&self) -> Vec<(String, String)> {
+        let Some(result) = self.restore_result.as_ref() else {
+            return Vec::new();
+        };
+        let Some((_, what)) = self.result_text() else {
+            return Vec::new();
+        };
+        let snapshot = result
+            .snapshot
+            .as_deref()
+            .map(|name| self.snapshot_line(name))
+            .unwrap_or_default();
+        let home = match result.home {
+            Some(Home::Keep) => fl!("result-home-kept"),
+            Some(Home::Restore) => fl!("result-home-restored"),
+            None => String::new(),
+        };
+        let safety = result
+            .safety_snapshot
+            .clone()
+            .unwrap_or_else(|| fl!("result-safety-none"));
+        vec![
+            (fl!("details-snapshot"), snapshot),
+            (fl!("details-home"), home),
+            (fl!("details-safety"), safety),
+            (fl!("details-what"), what),
+        ]
+    }
+
+    /// `Fri 25 Sep 2026, 11:28 · before driver update`: a snapshot named in a dialog or the
+    /// drawer.
+    pub(super) fn snapshot_line(&self, name: &str) -> String {
+        let date = apsis_core::parse_snapshot_name(name)
+            .map(fmt::when_long)
+            .unwrap_or_else(|| name.to_owned());
+        match self
+            .snapshots()
+            .iter()
+            .find(|s| s.name == name)
+            .and_then(|s| s.comment.as_deref())
+        {
+            Some(comment) => fl!("restore-muted", date = date.as_str(), comment = comment),
+            None => date,
         }
     }
 

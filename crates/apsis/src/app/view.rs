@@ -448,7 +448,7 @@ impl AppModel {
             if !card.last.is_empty() {
                 lines.push(body(card.last).into());
             }
-            if let Some(line) = self.result_line() {
+            if let Some(line) = self.window_result() {
                 lines.push(line);
             }
         }
@@ -911,6 +911,58 @@ impl AppModel {
         )
     }
 
+    /// The window's result: how the last job went (`result_line`), or the last restore's
+    /// outcome as a banner with Details (and Restore again after a failure); a restore that
+    /// went fine is a plain line with Details.
+    fn window_result(&self) -> Option<Element<'_, Message>> {
+        if self.status.is_some() {
+            return self.result_line();
+        }
+        let (text, _) = self.result_text()?;
+        let mut row: Vec<Element<'_, Message>> = vec![
+            widget::text(text)
+                .width(Length::Fill)
+                .wrapping(iced_text::Wrapping::Word)
+                .into(),
+            widget::button::standard(fl!("details"))
+                .on_press(Message::ShowDetails)
+                .into(),
+        ];
+        if self.restore_again_available() {
+            row.push(
+                widget::button::standard(fl!("restore-again"))
+                    .on_press(Message::RestoreAgain)
+                    .into(),
+            );
+        }
+        let row = widget::row::with_children(row)
+            .spacing(12)
+            .align_y(Alignment::Center);
+        let style: Option<fn(&Theme) -> widget::container::Style> = match self.result_tone() {
+            Some(Tone::Warning) => Some(widget::warning_container),
+            Some(Tone::Error) => Some(destructive_container),
+            None => None,
+        };
+        Some(match style {
+            Some(style) => widget::container(row)
+                .class(theme::Container::custom(style))
+                .padding(10)
+                .width(Length::Fill)
+                .into(),
+            None => row.into(),
+        })
+    }
+
+    /// The restore details drawer: a label over each line.
+    pub(super) fn details_view(&self) -> Element<'_, Message> {
+        let mut lines: Vec<Element<'_, Message>> = Vec::new();
+        for (label, text) in self.details_lines() {
+            lines.push(heading(label).into());
+            lines.push(body(text).wrapping(iced_text::Wrapping::Word).into());
+        }
+        widget::column::with_children(lines).spacing(6).into()
+    }
+
     /// Settings: a back button, Cancel and Save, the tabs, and the active tab. Cancel is
     /// always clickable: it drops any change and leaves the page.
     fn settings_page(&self) -> Element<'_, Message> {
@@ -1261,6 +1313,24 @@ fn banner<'a>(banner: super::Banner) -> Element<'a, Message> {
     .padding(10)
     .width(Length::Fill)
     .into()
+}
+
+/// A strip in the theme's destructive colours, as the warning widget's in the warning ones.
+fn destructive_container(theme: &Theme) -> widget::container::Style {
+    let cosmic = theme.cosmic();
+    widget::container::Style {
+        icon_color: Some(cosmic.destructive.on.into()),
+        text_color: Some(cosmic.destructive.on.into()),
+        background: Some(cosmic::iced::Background::Color(
+            cosmic.destructive_color().into(),
+        )),
+        border: cosmic::iced::Border {
+            color: Color::TRANSPARENT,
+            width: 1.0,
+            radius: cosmic.corner_radii.radius_0.into(),
+        },
+        ..widget::container::Style::default()
+    }
 }
 
 fn dim<'a>(text: String) -> Element<'a, Message> {

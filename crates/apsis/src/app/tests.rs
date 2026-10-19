@@ -2642,6 +2642,49 @@ mod restore {
         app
     }
 
+    #[test]
+    fn the_outcome_opens_a_drawer_and_a_new_restore_closes_it() {
+        let mut app = with_result(
+            Outcome::Problems,
+            "rsync-log: 12 files",
+            Home::Keep,
+            Some("2026-09-23_08-33-55"),
+        );
+        let lines = app.details_lines();
+        assert_eq!(lines[0].0, "Snapshot");
+        assert!(
+            lines[0].1.contains("before driver update"),
+            "{}",
+            lines[0].1
+        );
+        assert_eq!(
+            lines[1],
+            (
+                "Home folders".to_owned(),
+                "Home folders were kept.".to_owned()
+            )
+        );
+        assert_eq!(
+            lines[2],
+            (
+                "Safety snapshot".to_owned(),
+                "2026-09-23_08-33-55".to_owned()
+            )
+        );
+        assert_eq!(lines[3].0, "What happened");
+        assert!(lines[3].1.contains("rsync-log"), "{}", lines[3].1);
+        assert!(!app.details);
+        send(&mut app, Message::ShowDetails);
+        assert!(app.details && app.core.window.show_context);
+        send(&mut app, Message::CloseDetails);
+        assert!(!app.details && !app.core.window.show_context);
+        send(&mut app, Message::ShowDetails);
+        click(&mut app, 0, Modifiers::empty());
+        send(&mut app, Message::RestoreClicked);
+        assert!(app.checking.is_some());
+        assert!(!app.details && !app.core.window.show_context);
+    }
+
     /// The line and the tooltip of that result.
     fn shown(
         outcome: Outcome,
@@ -2708,10 +2751,7 @@ mod restore {
         const KERNEL: &str =
             "the kernel from before the restore couldn't be removed (Read-only file system)";
         let (line, tooltip) = shown(Outcome::Problems, FILES, Home::Keep, Some(SECOND));
-        assert_eq!(
-            line,
-            "Restore finished · some files were not restored · point here for details"
-        );
+        assert_eq!(line, "Restore finished · some files were not restored");
         assert_eq!(
             tooltip,
             "Restored from snapshot 2026-09-25_11-28-53. Home folders were kept. Safety \
@@ -2719,10 +2759,7 @@ mod restore {
              deleted; see /var/lib/apsis/restore/rsync-log"
         );
         let (line, tooltip) = shown(Outcome::Problems, KERNEL, Home::Restore, None);
-        assert_eq!(
-            line,
-            "Restore finished · a cleanup step failed · point here for details"
-        );
+        assert_eq!(line, "Restore finished · a cleanup step failed");
         assert_eq!(
             tooltip,
             "Restored from snapshot 2026-09-25_11-28-53. Home folders were restored too. Safety \
