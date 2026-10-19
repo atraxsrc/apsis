@@ -61,24 +61,20 @@
   </keywords>
   <screenshots>
     <screenshot type="default">
-      <caption>The window: the snapshot list, the last snapshot and the backup disk</caption>
-      <image type="source" width="730" height="529">https://raw.githubusercontent.com/atraxsrc/apsis/63dbc9918dc52a66c05eb01fc99c70f3eed585e5/docs/1.png</image>
+      <caption>The window: the snapshots, the backup disk and the last restore</caption>
+      <image type="source" width="960" height="705">https://raw.githubusercontent.com/atraxsrc/apsis/8b3c095dbc7fed9f98b65c87af2c5c4c18ae70c6/docs/1.png</image>
     </screenshot>
     <screenshot>
-      <caption>The panel popup: how full the backup disk is and how old the last snapshot is</caption>
-      <image type="source" width="359" height="201">https://raw.githubusercontent.com/atraxsrc/apsis/63dbc9918dc52a66c05eb01fc99c70f3eed585e5/docs/4.png</image>
-    </screenshot>
-    <screenshot>
-      <caption>The panel popup while a snapshot is made</caption>
-      <image type="source" width="359" height="201">https://raw.githubusercontent.com/atraxsrc/apsis/63dbc9918dc52a66c05eb01fc99c70f3eed585e5/docs/5.png</image>
+      <caption>The panel popup: the last snapshot, the backup disk and the newest snapshots</caption>
+      <image type="source" width="487" height="362">https://raw.githubusercontent.com/atraxsrc/apsis/8b3c095dbc7fed9f98b65c87af2c5c4c18ae70c6/docs/4.png</image>
     </screenshot>
     <screenshot>
       <caption>Settings: the disk where snapshots are saved</caption>
-      <image type="source" width="733" height="528">https://raw.githubusercontent.com/atraxsrc/apsis/63dbc9918dc52a66c05eb01fc99c70f3eed585e5/docs/2.png</image>
+      <image type="source" width="960" height="705">https://raw.githubusercontent.com/atraxsrc/apsis/8b3c095dbc7fed9f98b65c87af2c5c4c18ae70c6/docs/2.png</image>
     </screenshot>
     <screenshot>
-      <caption>Settings: include /root and /home; the system is always included</caption>
-      <image type="source" width="733" height="528">https://raw.githubusercontent.com/atraxsrc/apsis/63dbc9918dc52a66c05eb01fc99c70f3eed585e5/docs/3.png</image>
+      <caption>Settings: what a snapshot includes</caption>
+      <image type="source" width="960" height="705">https://raw.githubusercontent.com/atraxsrc/apsis/8b3c095dbc7fed9f98b65c87af2c5c4c18ae70c6/docs/3.png</image>
     </screenshot>
   </screenshots>
   <releases>
