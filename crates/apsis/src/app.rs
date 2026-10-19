@@ -205,6 +205,8 @@ pub struct AppModel {
     toasts_up: usize,
     /// The restore details drawer is open.
     details: bool,
+    /// The Filters tab's built-in excludes are unfolded.
+    show_builtin: bool,
     /// A create or delete this window started, running in the helper.
     running: Option<Operation>,
     /// The helper's job, as `Job` and `JobChanged` say: this window's or anyone else's.
@@ -742,6 +744,8 @@ pub enum Message {
     ShowDetails,
     /// The drawer's close button.
     CloseDetails,
+    /// Folds or unfolds the built-in excludes in the Filters tab.
+    ToggleBuiltin,
     /// Toolbar.
     CreateClicked,
     DeleteClicked,
@@ -1049,6 +1053,7 @@ impl AppModel {
             toasts: Toasts::new(Message::ToastClosed),
             toasts_up: 0,
             details: false,
+            show_builtin: false,
             config,
             listing: Listing::NotLoaded,
             loading: false,
@@ -1130,6 +1135,7 @@ impl AppModel {
                 self.core.set_show_context(true);
             }
             Message::CloseDetails => self.close_details(),
+            Message::ToggleBuiltin => self.show_builtin = !self.show_builtin,
             Message::BusyRetry => return self.start_list(),
             Message::WindowShown => return self.make_window_resizable(),
             Message::PopupClosed(id) => {

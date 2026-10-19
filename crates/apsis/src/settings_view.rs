@@ -110,6 +110,17 @@ pub struct SettingsView {
     pub discard_armed: bool,
 }
 
+/// The excludes every snapshot has before the user's filters, in order: Timeshift's defaults
+/// (`/dev/*`, `/proc/*`, caches, …). For the Filters tab's folded list.
+#[must_use]
+pub fn builtin_excludes() -> Vec<String> {
+    apsis_core::native::exclude::DEFAULT
+        .iter()
+        .chain(apsis_core::native::exclude::DEFAULT_EXTRA.iter())
+        .map(|pattern| (*pattern).to_owned())
+        .collect()
+}
+
 /// rsync's wildcard characters, escaped with `\` in a picked path.
 const WILDCARDS: [char; 4] = ['\\', '*', '?', '['];
 

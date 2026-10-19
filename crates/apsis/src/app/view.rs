@@ -26,8 +26,6 @@ use crate::settings_view::{MAX_REMIND_DAYS, Row, Section, SettingsView};
 use crate::status::{PopupStatus, StatusView};
 use crate::{fl, fmt};
 
-/// Width of the `+`/`-` in front of a filter, so the patterns line up.
-const SIGN_WIDTH: f32 = 12.0;
 /// Height of the disk and progress bars.
 const BAR_GIRTH: f32 = 8.0;
 /// What the restore dialog needs besides its scrolling body: its padding, title, the muted
@@ -1041,7 +1039,7 @@ impl AppModel {
                 tab.push(match self.active_section() {
                     Section::Location => location_tab(view),
                     Section::Include => include_tab(view),
-                    Section::Filters => filters_tab(view),
+                    Section::Filters => filters_tab(view, self.show_builtin),
                     Section::Misc => self.misc_tab(view),
                 });
                 widget::column::with_children(tab).spacing(12).into()
@@ -1194,60 +1192,15 @@ fn include_tab(view: &SettingsView) -> Element<'_, Message> {
     .into()
 }
 
-/// Filters: the `+`/`-` list (click selects, the checkbox keeps or leaves out), the buttons,
-/// and how the list is read.
-fn filters_tab(view: &SettingsView) -> Element<'_, Message> {
+/// Filters: the Add buttons, then one row per filter (the pattern, Keep or Leave out, and
+/// on the selected row the move and remove buttons), how the list is read, and the built-in
+/// excludes behind a fold.
+fn filters_tab(view: &SettingsView, show_builtin: bool) -> Element<'_, Message> {
     let selected = match view.current() {
         Row::Filter(index) => Some(index),
         _ => None,
     };
-    let list: Element<'_, Message> = if view.edited.filters.is_empty() {
-        dim(fl!("filters-none"))
-    } else {
-        let heads = widget::row::with_children(vec![
-            heading(fl!("filter-keep")).into(),
-            heading(fl!("pattern")).width(Length::Fill).into(),
-        ])
-        .spacing(16)
-        .padding([0, 16]);
-        let mut column = widget::list_column();
-        for (index, filter) in view.edited.filters.iter().enumerate() {
-            let include = view.is_include(index);
-            let pattern = filter
-                .strip_prefix("+ ")
-                .or_else(|| filter.strip_prefix("- "))
-                .unwrap_or(filter);
-            // Checked keeps the path (`+`), unchecked leaves it out (`-`); the sign stays in
-            // front of the pattern, in the accent colour, as the config writes it.
-            let keep =
-                widget::checkbox(include).on_toggle(move |on| Message::FilterSign(index, on));
-            let line = widget::row::with_children(vec![
-                keep.into(),
-                widget::container(
-                    widget::text(if include { "+" } else { "-" }).class(theme::Text::Accent),
-                )
-                .width(Length::Fixed(SIGN_WIDTH))
-                .center_x(Length::Fixed(SIGN_WIDTH))
-                .into(),
-                body(pattern.to_owned())
-                    .width(Length::Fill)
-                    .wrapping(iced_text::Wrapping::WordOrGlyph)
-                    .into(),
-            ])
-            .spacing(12)
-            .align_y(Alignment::Center);
-            column = column.add(
-                widget::list::button(line)
-                    .selected(selected == Some(index))
-                    .on_press(Message::FilterClicked(index)),
-            );
-        }
-        widget::column::with_children(vec![heads.into(), column.into()])
-            .spacing(4)
-            .into()
-    };
-    let last = view.edited.filters.len().saturating_sub(1);
-    let buttons = widget::flex_row(vec![
+    let add = widget::flex_row(vec![
         widget::button::standard(fl!("add-folder"))
             .on_press(Message::AddFolder)
             .into(),
@@ -1257,29 +1210,81 @@ fn filters_tab(view: &SettingsView) -> Element<'_, Message> {
         widget::button::standard(fl!("add-pattern"))
             .on_press(Message::AddPattern)
             .into(),
-        widget::button::standard(fl!("remove"))
-            .on_press_maybe(selected.map(|_| Message::RemoveFilter))
-            .into(),
-        widget::button::standard(fl!("move-up"))
-            .on_press_maybe(
-                selected
-                    .filter(|&i| i > 0)
-                    .map(|_| Message::MoveFilter(true)),
-            )
-            .into(),
-        widget::button::standard(fl!("move-down"))
-            .on_press_maybe(
-                selected
-                    .filter(|&i| i < last)
-                    .map(|_| Message::MoveFilter(false)),
-            )
-            .into(),
     ])
     .row_spacing(8)
     .column_spacing(8);
-    widget::column::with_children(vec![list, buttons.into(), dim(fl!("filters-help"))])
-        .spacing(12)
-        .into()
+    let last = view.edited.filters.len().saturating_sub(1);
+    let list: Element<'_, Message> = if view.edited.filters.is_empty() {
+        dim(fl!("filters-none"))
+    } else {
+        let mut column = widget::list_column();
+        for (index, filter) in view.edited.filters.iter().enumerate() {
+            let include = view.is_include(index);
+            let pattern = filter
+                .strip_prefix("+ ")
+                .or_else(|| filter.strip_prefix("- "))
+                .unwrap_or(filter);
+            // Keep is `+`, Leave out is `-`, as the config writes them.
+            let sign = widget::dropdown(
+                vec![fl!("filter-keep"), fl!("filter-leave-out")],
+                Some(usize::from(!include)),
+                move |choice| Message::FilterSign(index, choice == 0),
+            );
+            let mut line: Vec<Element<'_, Message>> = vec![
+                body(pattern.to_owned())
+                    .width(Length::Fill)
+                    .wrapping(iced_text::Wrapping::WordOrGlyph)
+                    .into(),
+                sign.into(),
+            ];
+            if selected == Some(index) {
+                line.extend([
+                    widget::button::icon(icon::from_name("go-up-symbolic"))
+                        .on_press_maybe((index > 0).then_some(Message::MoveFilter(true)))
+                        .into(),
+                    widget::button::icon(icon::from_name("go-down-symbolic"))
+                        .on_press_maybe((index < last).then_some(Message::MoveFilter(false)))
+                        .into(),
+                    widget::button::icon(icon::from_name("edit-delete-symbolic"))
+                        .on_press(Message::RemoveFilter)
+                        .into(),
+                ]);
+            }
+            column = column.add(
+                widget::list::button(
+                    widget::row::with_children(line)
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                )
+                .selected(selected == Some(index))
+                .on_press(Message::FilterClicked(index)),
+            );
+        }
+        column.into()
+    };
+    let glyph = if show_builtin { "▾" } else { "▸" };
+    let mut children: Vec<Element<'_, Message>> = vec![
+        add.into(),
+        list,
+        dim(fl!("filters-help")),
+        widget::button::text(fl!("builtin-excludes", glyph = glyph))
+            .on_press(Message::ToggleBuiltin)
+            .into(),
+    ];
+    if show_builtin {
+        children.push(
+            widget::column::with_children(
+                crate::settings_view::builtin_excludes()
+                    .into_iter()
+                    .map(|pattern| caption(pattern).class(theme::Text::Custom(dim_text)).into())
+                    .collect::<Vec<_>>(),
+            )
+            .spacing(2)
+            .padding([0, 16])
+            .into(),
+        );
+    }
+    widget::column::with_children(children).spacing(12).into()
 }
 
 /// What a conversion or import did, while it isn't saved yet.

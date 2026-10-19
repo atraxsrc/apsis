@@ -1421,6 +1421,19 @@ fn shortcuts_map_keys_and_leave_typing_alone() {
 }
 
 #[test]
+fn builtin_excludes_are_listed_and_the_expander_toggles() {
+    let mut app = in_settings();
+    assert!(!app.show_builtin);
+    send(&mut app, Message::ToggleBuiltin);
+    assert!(app.show_builtin);
+    send(&mut app, Message::ToggleBuiltin);
+    assert!(!app.show_builtin);
+    let built_in = crate::settings_view::builtin_excludes();
+    assert!(built_in.iter().any(|p| p == "/proc/*"), "{built_in:?}");
+    assert!(built_in.len() > 20);
+}
+
+#[test]
 fn the_misc_tab_saves_apsiss_own_settings_at_once() {
     let mut app = in_settings();
     send(&mut app, Message::ShowLabel(true));
