@@ -83,7 +83,7 @@ impl StatusView {
         };
         let (last, overdue) = match (status.last, status.due()) {
             (Some(age), due) => (
-                fl!("popup-last", age = ago(age)),
+                fl!("popup-last", age = fmt::age_long(age)),
                 matches!(due, Due::Overdue { .. }),
             ),
             (None, due) => (fl!("popup-no-snapshot"), matches!(due, Due::Never { .. })),
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn popup_says_the_age_and_has_the_disk_for_the_bar() {
         let popup = loaded(Some(12), Some(7), disk(372 * G, 224 * G)).popup(true);
-        assert_eq!(popup.last, "Last snapshot 12h ago");
+        assert_eq!(popup.last, "Last snapshot 12 hours ago");
         assert!(!popup.overdue);
         assert_eq!(popup.disk, "");
         assert_eq!(
