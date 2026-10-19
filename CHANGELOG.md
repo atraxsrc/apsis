@@ -4,6 +4,15 @@ All notable changes to Apsis are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **One snapshot per row.** The list shows the comment (or the date) with the date and the
+  age underneath, instead of two columns. A snapshot in the older format says so under its
+  name rather than in a tooltip. Leftovers of unfinished snapshots have their own Remove
+  button, and Delete says how many rows are selected ("Delete 2").
+
 ## [0.6.3] - 2026-10-08
 
 ### Security

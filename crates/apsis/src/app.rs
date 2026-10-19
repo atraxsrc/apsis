@@ -695,6 +695,8 @@ pub enum Message {
     Listed(Result<SnapshotList, CliError>),
     /// A click on a row (with the Ctrl and Shift state at the time).
     RowClicked(usize),
+    /// Remove on a leftover row: selects only it and asks, as Delete would.
+    RemoveLeftover(String),
     /// Toolbar.
     CreateClicked,
     DeleteClicked,
@@ -1046,6 +1048,12 @@ impl AppModel {
             }
             Message::Token(update) => return self.on_token(update),
             Message::DiskCheck => return self.check_disk(),
+            Message::RemoveLeftover(name) => {
+                self.selection.clear();
+                self.selection.insert(name);
+                self.anchor = None;
+                self.open_delete();
+            }
             Message::BusyRetry => return self.start_list(),
             Message::WindowShown => return self.make_window_resizable(),
             Message::PopupClosed(id) => {
@@ -1857,6 +1865,50 @@ impl AppModel {
             .map(RowItem::Snapshot)
             .chain(list.leftovers.iter().map(|n| RowItem::Leftover(n)))
             .collect()
+    }
+
+    /// Row `index`'s two lines at `now`: the comment (or the date) over the date and the age,
+    /// with `old format (no ACLs)` for a snapshot made without them; a leftover's two fixed
+    /// lines. `None` past the last row.
+    pub(super) fn row_text(
+        &self,
+        index: usize,
+        now: jiff::civil::DateTime,
+    ) -> Option<(String, String)> {
+        Some(match self.rows().get(index)? {
+            RowItem::Snapshot(snapshot) => {
+                let when = fmt::when_long(snapshot.created);
+                let secs = now.duration_since(snapshot.created).as_secs().max(0);
+                #[allow(clippy::cast_sign_loss, reason = "clamped at zero")]
+                let age = fmt::age_long(std::time::Duration::from_secs(secs as u64));
+                let mut subtitle = fl!("row-subtitle", when = when.as_str(), age = age);
+                let old = apsis_core::native::info::is_old_format(
+                    snapshot.rsync_flags.as_deref().unwrap_or_default(),
+                );
+                if old {
+                    subtitle.push_str(" · ");
+                    subtitle.push_str(&fl!("row-old-format"));
+                }
+                (snapshot.comment.clone().unwrap_or(when), subtitle)
+            }
+            RowItem::Leftover(name) => {
+                let when = apsis_core::parse_snapshot_name(name)
+                    .map(fmt::when_long)
+                    .unwrap_or_else(|| (*name).to_owned());
+                (
+                    fl!("row-leftover-title"),
+                    fl!("row-leftover-subtitle", when = when),
+                )
+            }
+        })
+    }
+
+    /// `Delete`, or `Delete 2` with more than one row selected.
+    pub(super) fn delete_label(&self) -> String {
+        match self.selection.len() {
+            0 | 1 => fl!("delete"),
+            count => fl!("delete-count", count = count.to_string()),
+        }
     }
 
     /// A click on row `index`: Ctrl adds or removes it, Shift selects the range from the last

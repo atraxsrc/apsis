@@ -262,10 +262,7 @@ fn the_list_is_newest_first_then_the_leftovers() {
     );
     // One text for an interrupted create and a cut or half-done delete;
     // the next create removes only the first kind.
-    assert_eq!(
-        fl!("leftover-row"),
-        "Unfinished snapshot or delete · Delete removes it"
-    );
+    assert_eq!(fl!("row-leftover-title"), "Unfinished snapshot or delete");
     assert_eq!(
         fl!("leftover-label", when = "09-26 14:02"),
         "unfinished snapshot or delete from 09-26 14:02"
@@ -328,6 +325,66 @@ fn a_new_list_keeps_the_selection_of_what_is_still_there() {
     assert_eq!(selected(&app), [NEWEST]);
     app.on_listed(Err(CliError::NoHelper));
     assert!(selected(&app).is_empty());
+}
+
+#[test]
+fn rows_have_a_title_and_a_subtitle() {
+    let mut app = window();
+    // The fixture has no rsync flags (the old format); these rows are about the dates.
+    let Listing::Loaded(list) = &mut app.listing else {
+        panic!()
+    };
+    for snapshot in &mut list.snapshots {
+        snapshot.rsync_flags = Some(apsis_core::native::info::RSYNC_FLAGS.to_owned());
+    }
+    let now = apsis_core::parse_snapshot_name("2026-09-28_11-28-53").unwrap();
+    let (title, subtitle) = app.row_text(0, now).unwrap();
+    assert_eq!(title, "before driver update");
+    assert_eq!(subtitle, "Fri 25 Sep 2026, 11:28 · 3 days ago");
+    let (title, subtitle) = app.row_text(1, now).unwrap();
+    assert_eq!(title, "Wed 23 Sep 2026, 08:33");
+    assert_eq!(subtitle, "Wed 23 Sep 2026, 08:33 · 5 days ago");
+    let (title, subtitle) = app.row_text(5, now).unwrap();
+    assert_eq!(title, "Unfinished snapshot or delete");
+    assert_eq!(
+        subtitle,
+        "Sat 26 Sep 2026, 14:02 · leftover, nothing to restore"
+    );
+    assert_eq!(app.row_text(6, now), None);
+}
+
+#[test]
+fn an_old_format_snapshot_says_so_in_its_subtitle() {
+    let mut app = window();
+    // The fixture's `rsync_flags: None` is the old format; give the newest (listed first)
+    // the new flags.
+    let Listing::Loaded(list) = &mut app.listing else {
+        panic!()
+    };
+    list.snapshots[0].rsync_flags = Some(apsis_core::native::info::RSYNC_FLAGS.to_owned());
+    let now = list.snapshots[0].created;
+    assert!(!app.row_text(0, now).unwrap().1.contains("old format"));
+    assert!(
+        app.row_text(1, now)
+            .unwrap()
+            .1
+            .ends_with("· old format (no ACLs)")
+    );
+}
+
+#[test]
+fn delete_counts_the_selection_and_remove_opens_delete_for_a_leftover() {
+    let mut app = window();
+    assert_eq!(app.delete_label(), "Delete");
+    click(&mut app, 0, Modifiers::empty());
+    assert_eq!(app.delete_label(), "Delete");
+    click(&mut app, 1, Modifiers::CTRL);
+    assert_eq!(app.delete_label(), "Delete 2");
+    send(&mut app, Message::RemoveLeftover(LEFTOVER.to_owned()));
+    assert_eq!(selected(&app), vec![LEFTOVER.to_owned()]);
+    assert!(
+        matches!(&app.dialog, Some(Dialog::Delete { names }) if names == &[LEFTOVER.to_owned()])
+    );
 }
 
 #[test]
@@ -1291,12 +1348,19 @@ fn the_window_and_every_settings_tab_fit_the_smallest_window() {
         used: 950_000_000_000,
         free: 50_203_837_440,
     });
+    // A long comment wraps inside the row instead of widening the window.
+    list.snapshots[0].comment = Some("word ".repeat(40));
     app.running = Some(Operation::Create(String::new()));
     app.job = Some(job(JobKind::Create, JobState::Running, NEWEST));
     let Some(node) = layout(app.window_view(), WINDOW_MIN_SIZE) else {
         return;
     };
     assert!(node.bounds().height <= WINDOW_MIN_SIZE.height + 0.5);
+    assert!(
+        node.bounds().width <= WINDOW_MIN_SIZE.width + 0.5,
+        "{:?}",
+        node.bounds()
+    );
     // Toolbar, list, divider, status area: the list keeps some rows.
     let parts = node.children()[0].children();
     assert!(

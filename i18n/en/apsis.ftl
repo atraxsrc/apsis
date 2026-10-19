@@ -46,9 +46,11 @@ popup-ready = Ready to restore
 create = Create
 delete = Delete
 settings = Settings
-column-snapshot = Snapshot
-column-comment = Comment
-leftover-row = Unfinished snapshot or delete · Delete removes it
+delete-count = Delete { $count }
+row-subtitle = { $when } · { $age }
+row-old-format = old format (no ACLs)
+row-leftover-title = Unfinished snapshot or delete
+row-leftover-subtitle = { $when } · leftover, nothing to restore
 leftover-label = unfinished snapshot or delete from { $when }
 loading = Reading snapshots…
 empty = No snapshots yet. Click Create to make one.
@@ -157,7 +159,6 @@ about-source = Source code
 
 # Restore (0.5.0)
 restore = Restore
-old-format-row = Older format: made without ACLs and extended attributes
 restore-title = Restore the system?
 restore-muted = { $date } · { $comment }
 restore-body = Puts system files back to this snapshot and restarts twice.

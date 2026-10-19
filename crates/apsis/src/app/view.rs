@@ -27,8 +27,6 @@ use crate::settings_view::{MAX_REMIND_DAYS, Row, Section, SettingsView};
 use crate::status::{DiskStrip, PopupStatus, StatusView};
 use crate::{fl, fmt};
 
-/// Width of the snapshot list's date column.
-const DATE_WIDTH: f32 = 150.0;
 /// Width of the `+`/`-` in front of a filter, so the patterns line up.
 const SIGN_WIDTH: f32 = 12.0;
 /// Height of the disk and progress bars.
@@ -303,7 +301,7 @@ impl AppModel {
                 .leading_icon(icon::from_name("document-revert-symbolic"))
                 .on_press_maybe(self.can_restore().then_some(Message::RestoreClicked))
                 .into(),
-            widget::button::standard(fl!("delete"))
+            widget::button::standard(self.delete_label())
                 .leading_icon(icon::from_name("edit-delete-symbolic"))
                 .on_press_maybe(self.can_delete().then_some(Message::DeleteClicked))
                 .into(),
@@ -324,7 +322,8 @@ impl AppModel {
         .into()
     }
 
-    /// The snapshot list, with its column heads; or why there's none.
+    /// The snapshot list: one two-line row per snapshot (the comment or the date over the
+    /// date and the age), then the leftovers with their Remove button; or why there's none.
     fn list(&self) -> Element<'_, Message> {
         let rows = self.rows();
         if rows.is_empty() {
@@ -335,48 +334,42 @@ impl AppModel {
                 .center_y(Length::Fill)
                 .into();
         }
-        let heads = widget::row::with_children(vec![
-            heading(fl!("column-snapshot"))
-                .width(Length::Fixed(DATE_WIDTH))
-                .into(),
-            heading(fl!("column-comment")).width(Length::Fill).into(),
-        ])
-        .padding([0, 16]);
+        let now = jiff::Zoned::now().datetime();
         let mut column = widget::list_column();
         for (index, row) in rows.iter().enumerate() {
-            let (date, comment): (Element<'_, Message>, Element<'_, Message>) = match row {
-                RowItem::Snapshot(snapshot) => (
-                    body(fmt::when(snapshot.created)).into(),
-                    body(snapshot.comment.clone().unwrap_or_default())
-                        .wrapping(iced_text::Wrapping::None)
-                        .into(),
-                ),
-                RowItem::Leftover(name) => (
-                    dim(apsis_core::parse_snapshot_name(name)
-                        .map(fmt::when)
-                        .unwrap_or_else(|| (*name).to_owned())),
-                    dim(fl!("leftover-row")),
-                ),
+            let Some((title, subtitle)) = self.row_text(index, now) else {
+                continue;
             };
-            let line = widget::row::with_children(vec![
-                widget::container(date)
-                    .width(Length::Fixed(DATE_WIDTH))
+            let leftover = matches!(row, RowItem::Leftover(_));
+            let title: Element<'_, Message> = if leftover {
+                dim(title)
+            } else {
+                body(title).wrapping(iced_text::Wrapping::Word).into()
+            };
+            let lines = widget::column::with_children(vec![
+                title,
+                caption(subtitle)
+                    .class(theme::Text::Custom(dim_text))
+                    .wrapping(iced_text::Wrapping::Word)
                     .into(),
-                widget::container(comment).width(Length::Fill).into(),
             ])
-            .align_y(Alignment::Center);
-            // An old-format snapshot (0.4.1): the row's tooltip says so; no glyph or column.
-            let old_format = matches!(row, RowItem::Snapshot(s)
-                if apsis_core::native::info::is_old_format(s.rsync_flags.as_deref().unwrap_or_default()));
-            let content: Element<'_, Message> = if old_format {
-                widget::tooltip(
-                    line,
-                    body(fl!("old-format-row")),
-                    widget::tooltip::Position::Bottom,
-                )
+            .spacing(2)
+            .width(Length::Fill);
+            let content: Element<'_, Message> = if leftover {
+                widget::row::with_children(vec![
+                    lines.into(),
+                    widget::button::standard(fl!("remove"))
+                        .on_press_maybe(
+                            self.can_create()
+                                .then(|| Message::RemoveLeftover(row.name().to_owned())),
+                        )
+                        .into(),
+                ])
+                .spacing(12)
+                .align_y(Alignment::Center)
                 .into()
             } else {
-                line.into()
+                lines.into()
             };
             column = column.add(
                 widget::list::button(content)
@@ -384,13 +377,7 @@ impl AppModel {
                     .on_press(Message::RowClicked(index)),
             );
         }
-        widget::column::with_children(vec![
-            heads.into(),
-            widget::scrollable(column).height(Length::Fill).into(),
-        ])
-        .spacing(4)
-        .height(Length::Fill)
-        .into()
+        widget::scrollable(column).height(Length::Fill).into()
     }
 
     /// What the list area says without rows: loading, no helper, no device, empty, an error.

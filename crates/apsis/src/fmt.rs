@@ -2,6 +2,8 @@
 
 //! Plain-text formatting for the popup and tooltip. No widgets, so it's unit-testable.
 
+use std::time::Duration;
+
 use apsis_core::Snapshot;
 use jiff::civil::DateTime;
 
@@ -9,6 +11,27 @@ use jiff::civil::DateTime;
 #[must_use]
 pub fn when(created: DateTime) -> String {
     created.strftime("%Y-%m-%d %H:%M").to_string()
+}
+
+/// `Wed 7 Oct 2026, 10:16`: a date as the list rows and dialogs show it.
+#[must_use]
+pub fn when_long(created: DateTime) -> String {
+    created.strftime("%a %-d %b %Y, %H:%M").to_string()
+}
+
+/// `just now`, `5 minutes ago`, `22 hours ago` (under two days), `12 days ago`: an age in
+/// words, for the rows, the disk card and the dialogs.
+#[must_use]
+pub fn age_long(age: Duration) -> String {
+    let minutes = age.as_secs() / 60;
+    let (count, unit) = match minutes {
+        ..1 => return "just now".to_owned(),
+        1..60 => (minutes, "minute"),
+        60..2880 => (minutes / 60, "hour"),
+        _ => (minutes / 1440, "day"),
+    };
+    let plural = if count == 1 { "" } else { "s" };
+    format!("{count} {unit}{plural} ago")
 }
 
 /// `09-27 09:12 "bulk 1"`, or `09-27 09:12` without a comment: a snapshot as the delete
@@ -82,9 +105,30 @@ pub fn device_name(device: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use apsis_core::Tag;
     use jiff::civil::date;
+
+    #[test]
+    fn long_dates_read_like_a_calendar() {
+        let at = date(2026, 10, 7).at(10, 16, 0, 0);
+        assert_eq!(when_long(at), "Wed 7 Oct 2026, 10:16");
+    }
+
+    #[test]
+    fn ages_in_words() {
+        let s = Duration::from_secs;
+        assert_eq!(age_long(s(30)), "just now");
+        assert_eq!(age_long(s(60)), "1 minute ago");
+        assert_eq!(age_long(s(5 * 60)), "5 minutes ago");
+        assert_eq!(age_long(s(3600)), "1 hour ago");
+        assert_eq!(age_long(s(22 * 3600)), "22 hours ago");
+        assert_eq!(age_long(s(47 * 3600)), "47 hours ago");
+        assert_eq!(age_long(s(48 * 3600)), "2 days ago");
+        assert_eq!(age_long(s(12 * 86400)), "12 days ago");
+    }
 
     #[test]
     fn labels_are_the_short_date_and_the_quoted_comment() {
