@@ -36,6 +36,11 @@ All notable changes to Apsis are listed here. The format follows
   the move and remove buttons sit on the selected row; Add folder, Add file and Add
   pattern are above the list; the built-in excludes can be unfolded underneath.
 - **The Misc tab is now General**, with a Reminder section and a Panel section.
+- **Dialogs say what happens.** Create says whether the whole system or only the changes
+  since the last snapshot are copied. Delete lists the snapshots as the window does and
+  says when space is freed. Restore puts its warning at the top, and the safety snapshot is
+  a switch with one line under it. Dates in dialogs and results read like a calendar
+  ("Fri 25 Sep 2026, 11:28").
 
 ## [0.6.3] - 2026-10-08
 

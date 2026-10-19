@@ -656,7 +656,7 @@ struct ResultPhrase {
 /// `2026-09-25 11:28` for a snapshot name, or the name itself.
 fn date_of(name: &str) -> String {
     apsis_core::parse_snapshot_name(name)
-        .map(fmt::when)
+        .map(fmt::when_long)
         .unwrap_or_else(|| name.to_owned())
 }
 
@@ -2146,6 +2146,20 @@ impl AppModel {
             },
             apsis_core::DiskStatus::NotMounted => plain(fl!("card-not-connected")),
             apsis_core::DiskStatus::Unknown => plain(last),
+        }
+    }
+
+    /// What the Create dialog says a snapshot costs at `now`: the whole system for the first
+    /// one, only the changes since the newest otherwise.
+    pub(super) fn create_cost_line_at(&self, now: jiff::civil::DateTime) -> String {
+        match self.snapshots().first() {
+            Some(newest) => {
+                let secs = now.duration_since(newest.created).as_secs().max(0);
+                #[allow(clippy::cast_sign_loss, reason = "clamped at zero")]
+                let age = fmt::age_long(std::time::Duration::from_secs(secs as u64));
+                fl!("create-since", age = age)
+            }
+            None => fl!("create-first"),
         }
     }
 

@@ -668,6 +668,7 @@ impl AppModel {
                 if let SettingsLoad::Ready(view) = &self.settings {
                     controls.push(dim(SettingsView::includes_line(&view.edited)));
                 }
+                controls.push(dim(self.create_cost_line_at(jiff::Zoned::now().datetime())));
                 if let Some(error) = error {
                     controls.push(
                         widget::text(error.clone())
@@ -685,15 +686,44 @@ impl AppModel {
                     .into()
             }
             Dialog::Delete { names } => {
-                let labels: Vec<String> = names.iter().map(|n| self.snapshot_label(n)).collect();
                 let title = if names.len() == 1 {
                     fl!("delete-title-one")
                 } else {
                     fl!("delete-title-many", count = names.len().to_string())
                 };
+                // The snapshots as the list shows them, then what deleting means.
+                let now = jiff::Zoned::now().datetime();
+                let rows = self.rows();
+                let mut list = widget::list_column();
+                for name in names {
+                    let text = rows
+                        .iter()
+                        .position(|r| r.name() == name)
+                        .and_then(|index| self.row_text(index, now));
+                    let (title, subtitle) = text.unwrap_or_else(|| (name.clone(), String::new()));
+                    list = list.add(
+                        widget::column::with_children(vec![
+                            body(title).wrapping(iced_text::Wrapping::Word).into(),
+                            caption(subtitle)
+                                .class(theme::Text::Custom(dim_text))
+                                .into(),
+                        ])
+                        .spacing(2),
+                    );
+                }
+                let body_height = (self.window_height - DIALOG_CHROME).max(80.0);
                 widget::dialog()
                     .title(title)
-                    .body(format!("{}\n\n{}", labels.join("\n"), fl!("delete-body")))
+                    .control(
+                        widget::column::with_children(vec![
+                            widget::container(widget::scrollable(list))
+                                .max_height(body_height)
+                                .into(),
+                            body(fl!("delete-body")).into(),
+                            dim(fl!("delete-space")),
+                        ])
+                        .spacing(12),
+                    )
                     .primary_action(
                         widget::button::destructive(fl!("delete")).on_press(Message::DialogConfirm),
                     )
@@ -824,7 +854,13 @@ impl AppModel {
         safety_snapshot: bool,
     ) -> Element<'_, Message> {
         let date = super::date_of(snapshot);
-        let mut body_lines: Vec<Element<'_, Message>> = vec![body(fl!("restore-body")).into()];
+        let mut body_lines: Vec<Element<'_, Message>> = vec![
+            banner(super::Banner {
+                text: fl!("restore-experimental"),
+                action: None,
+            }),
+            body(fl!("restore-body")).into(),
+        ];
         if check.has_home {
             let restore_too = settings::item::builder(fl!("restore-restore-home"));
             let restore_too = if dialog.lost_for_good() {
@@ -849,14 +885,14 @@ impl AppModel {
             settings::section()
                 .add(
                     settings::item::builder(fl!("restore-safety"))
-                        .checkbox(safety_snapshot, Message::RestoreSafety),
+                        .description(fl!("restore-safety-description"))
+                        .toggler(safety_snapshot, Message::RestoreSafety),
                 )
                 .into(),
         );
         for line in dialog.extra_lines() {
             body_lines.push(body(line).into());
         }
-        body_lines.push(dim(fl!("restore-experimental")));
         let body_height = (self.window_height - DIALOG_CHROME).max(80.0);
         widget::dialog()
             .title(fl!("restore-title"))
@@ -883,20 +919,10 @@ impl AppModel {
             .into()
     }
 
-    /// `2026-09-25 11:28 · before driver update`: the date as the list shows it, then the
-    /// comment if there is one; muted, one line.
+    /// `Fri 25 Sep 2026, 11:28 · before driver update`: the date as the list shows it, then
+    /// the comment if there is one; muted, one line.
     fn muted_line(&self, snapshot: &str) -> Element<'_, Message> {
-        let date = super::date_of(snapshot);
-        let text = match self
-            .snapshots()
-            .iter()
-            .find(|s| s.name == snapshot)
-            .and_then(|s| s.comment.as_deref())
-        {
-            Some(comment) => fl!("restore-muted", date = date.as_str(), comment = comment),
-            None => date,
-        };
-        widget::text(text)
+        widget::text(self.snapshot_line(snapshot))
             .class(theme::Text::Custom(dim_text))
             .wrapping(iced_text::Wrapping::None)
             .into()

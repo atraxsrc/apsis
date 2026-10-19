@@ -536,6 +536,23 @@ fn results_are_toasts_and_errors_are_not() {
 }
 
 #[test]
+fn create_says_what_the_snapshot_costs() {
+    let mut app = window();
+    let now = apsis_core::parse_snapshot_name("2026-09-28_11-28-53").unwrap();
+    assert_eq!(
+        app.create_cost_line_at(now),
+        "Last snapshot 3 days ago · only changes since then are copied."
+    );
+    let mut list = fixture();
+    list.snapshots.clear();
+    app.on_listed(Ok(list));
+    assert_eq!(
+        app.create_cost_line_at(now),
+        "The first snapshot copies the whole system."
+    );
+}
+
+#[test]
 fn leftovers_alone_are_rows_not_an_empty_state() {
     let mut app = window();
     let mut list = fixture();
@@ -2622,7 +2639,7 @@ mod restore {
         };
         send(&mut app, Message::RestoreResultRead(Ok(done)));
         let shown = app.result_text().expect("a result line");
-        assert_eq!(shown.0, fl!("result-done", date = "2026-09-25 11:28"));
+        assert_eq!(shown.0, fl!("result-done", date = "Fri 25 Sep 2026, 11:28"));
         assert!(!app.restore_again_available());
         let failed = RestoreResult {
             state: apsis_core::restore::state::ResultState::Ended(Outcome::Failed),
@@ -2780,7 +2797,7 @@ mod restore {
             ),
         ] {
             let (line, shown) = shown(Outcome::Done, "", home, safety);
-            assert_eq!(line, "System restored to 2026-09-25 11:28");
+            assert_eq!(line, "System restored to Fri 25 Sep 2026, 11:28");
             assert_eq!(shown, tooltip);
         }
         assert_eq!(tone(Outcome::Done, ""), None);
@@ -2838,7 +2855,7 @@ mod restore {
         );
         assert_eq!(
             tooltip,
-            "Restored to 2026-09-25 11:28, but the boot files are not in order and the \
+            "Restored to Fri 25 Sep 2026, 11:28, but the boot files are not in order and the \
              computer may not start the next time you restart. Before you restart, read \"If \
              a restore goes wrong\" in Apsis's README. What went wrong: the boot refresh \
              failed (kernelstub exited 1); the boot files from before couldn't be put back \
@@ -2869,7 +2886,7 @@ mod restore {
             );
             assert_eq!(
                 tooltip,
-                "Restored to 2026-09-25 11:28. The boot files couldn't be refreshed, so the \
+                "Restored to Fri 25 Sep 2026, 11:28. The boot files couldn't be refreshed, so the \
                  computer keeps the ones it had and runs the kernel from before the restore. \
                  The next kernel update should set this right. See \"If a restore goes \
                  wrong\" in Apsis's README."
