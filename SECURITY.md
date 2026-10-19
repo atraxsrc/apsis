@@ -19,7 +19,8 @@ credit to you, unless you'd rather not be named.
 
 | Version | Supported |
 |---|---|
-| 0.6.x | yes |
+| 0.7.x | yes |
+| 0.6.x | no |
 | 0.5.x | no |
 | 0.4.x | no |
 | 0.3.x | no |

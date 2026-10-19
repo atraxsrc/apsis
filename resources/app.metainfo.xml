@@ -78,6 +78,20 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.7.0" date="2026-10-19">
+      <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.7.0</url>
+      <description>
+        <p>The COSMIC look: the window and the popup use COSMIC's own patterns.</p>
+        <ul>
+          <li>One snapshot per row, with the date and age underneath; a Remove button on leftovers</li>
+          <li>Banners for a missing disk, an overdue snapshot and low space; the backup disk as a card; results as toasts</li>
+          <li>The restore outcome with a Details panel</li>
+          <li>The popup shows the free space and the newest snapshots</li>
+          <li>Settings: Location and Filters as lists, a General tab; dialogs say what happens</li>
+          <li>Right-click a snapshot for Restore and Delete</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.6.3" date="2026-10-08">
       <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.6.3</url>
       <description>

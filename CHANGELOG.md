@@ -4,7 +4,7 @@ All notable changes to Apsis are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.7.0] - 2026-10-19
 
 ### Changed
 
@@ -42,6 +42,7 @@ All notable changes to Apsis are listed here. The format follows
   a switch with one line under it. Dates in dialogs and results read like a calendar
   ("Fri 25 Sep 2026, 11:28").
 - **Right-click a snapshot** for Restore and Delete.
+- **Ages in words.** "4 minutes ago", "1 day ago", in the rows, the card and the popup.
 
 ## [0.6.3] - 2026-10-08
 
@@ -493,6 +494,7 @@ First release.
   password every time.
 - App and symbolic icons, AppStream metainfo, desktop entries, `just install` / `just uninstall`.
 
+[0.7.0]: https://github.com/atraxsrc/apsis/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/atraxsrc/apsis/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/atraxsrc/apsis/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/atraxsrc/apsis/compare/v0.6.0...v0.6.1

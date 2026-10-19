@@ -1,6 +1,6 @@
 .\" SPDX-License-Identifier: GPL-3.0-only
 .\" Man page for apsis, written directly in roff. Check with: man -l docs/apsis.1
-.TH APSIS 1 "2026-10-08" "apsis 0.6.3" "User Commands"
+.TH APSIS 1 "2026-10-19" "apsis 0.7.0" "User Commands"
 .\" No hyphenation: action names and paths must stay whole.
 .nh
 .SH NAME
@@ -190,12 +190,12 @@ The system is always included.
 (every user's home folder, off by default).
 .TP
 .B Filters
-An ordered list; each line is
-.B +
-(keep) or
-.B \-
-(leave out) and an rsync pattern, and the first line that matches wins.
-New lines go on top; Move Up and Move Down reorder them.
+An ordered list; each row is an rsync pattern with Keep (written as
+.BR + )
+or Leave out (written as
+.BR \- ),
+and the first row that matches wins.
+New rows go on top; the up and down buttons on the selected row reorder them.
 Add Folder and Add File use the file chooser (a folder becomes
 .IR <folder>/*** );
 Add Pattern takes a typed one, an exclude unless it starts with
@@ -218,7 +218,7 @@ not
 .IR /home/you/Downloads .
 Built\-in excludes (caches, /proc, /tmp, other mounts) always come first.
 .TP
-.B Misc
+.B General
 Per user, saved at once: the reminder (the panel icon turns the warning colour when the newest
 snapshot is older than this many days; default 7, 0 turns it off) and the panel label (the
 last snapshot's age and the disk use beside the icon).
