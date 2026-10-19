@@ -69,7 +69,7 @@ impl Row {
             Self::Device => Section::Location,
             Self::IncludeRoot | Self::IncludeHome => Section::Include,
             Self::Filter(_) | Self::AddFilter => Section::Filters,
-            Self::Remind | Self::PanelLabel => Section::Misc,
+            Self::Remind | Self::PanelLabel => Section::General,
         }
     }
 }
@@ -80,11 +80,12 @@ pub enum Section {
     Location,
     Include,
     Filters,
-    Misc,
+    /// The reminder and the panel label: Apsis's own settings.
+    General,
 }
 
 impl Section {
-    pub const ALL: [Self; 4] = [Self::Location, Self::Include, Self::Filters, Self::Misc];
+    pub const ALL: [Self; 4] = [Self::Location, Self::Include, Self::Filters, Self::General];
 }
 
 /// Apsis's own per-user settings, as the settings show and change them. The app saves them
@@ -614,7 +615,7 @@ mod tests {
         );
         assert!(!view.dirty());
         assert_eq!(Row::IncludeHome.section(), Section::Include);
-        assert_eq!(Row::Remind.section(), Section::Misc);
+        assert_eq!(Row::Remind.section(), Section::General);
     }
 
     #[test]

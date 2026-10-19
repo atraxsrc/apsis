@@ -122,7 +122,7 @@ discard = Discard
 tab-location = Location
 tab-include = Include
 tab-filters = Filters
-tab-misc = Misc
+tab-general = General
 settings-reading = Reading the settings…
 settings-read-failed = Couldn't read the settings:
 settings-saving = Saving the settings…
@@ -150,12 +150,14 @@ filters-help = First match wins, top to bottom.
 builtin-excludes = { $glyph } Built-in excludes (always first)
 pick-folder = Choose a folder
 pick-file = Choose a file
-remind-title = Remind me
-remind-description = When the newest snapshot is older than this, the panel icon turns the warning colour. 0 turns it off.
+section-reminder = Reminder
+section-panel = Panel
+remind-title = Remind me when the last snapshot is older than
+remind-description = The panel icon turns the warning colour. 0 turns the reminder off.
 remind-days = { $days } days
 remind-off = Off
-label-title = Panel label
-label-description = Shows the last snapshot's age and the disk use next to the panel icon.
+label-title = Show a label beside the icon
+label-description = The last snapshot's age and the disk's use, like "12h · 62%".
 
 # About
 about-source = Source code

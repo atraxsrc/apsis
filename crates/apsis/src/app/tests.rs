@@ -1297,13 +1297,16 @@ fn view(app: &AppModel) -> &SettingsView {
 }
 
 #[test]
-fn the_tabs_are_location_include_filters_and_misc() {
+fn the_tabs_are_location_include_filters_and_general() {
     let mut app = in_settings();
     assert_eq!(app.active_section(), Section::Location);
     let entities: Vec<_> = app.tabs.iter().collect();
     assert_eq!(entities.len(), 4);
     send(&mut app, Message::Tab(entities[2]));
     assert_eq!(app.active_section(), Section::Filters);
+    let titles: Vec<String> = Section::ALL.iter().map(|s| section_title(*s)).collect();
+    assert_eq!(titles, ["Location", "Include", "Filters", "General"]);
+    assert_eq!(Row::Remind.section(), Section::General);
 }
 
 #[test]
@@ -1434,7 +1437,7 @@ fn builtin_excludes_are_listed_and_the_expander_toggles() {
 }
 
 #[test]
-fn the_misc_tab_saves_apsiss_own_settings_at_once() {
+fn the_general_tab_saves_apsiss_own_settings_at_once() {
     let mut app = in_settings();
     send(&mut app, Message::ShowLabel(true));
     assert!(view(&app).backend.show_label);

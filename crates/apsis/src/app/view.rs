@@ -1040,7 +1040,7 @@ impl AppModel {
                     Section::Location => location_tab(view),
                     Section::Include => include_tab(view),
                     Section::Filters => filters_tab(view, self.show_builtin),
-                    Section::Misc => self.misc_tab(view),
+                    Section::General => self.general_tab(view),
                 });
                 widget::column::with_children(tab).spacing(12).into()
             }
@@ -1060,33 +1060,42 @@ impl AppModel {
             .unwrap_or(Section::Location)
     }
 
-    /// Misc: the reminder and the panel label (Apsis's own, saved at once).
-    fn misc_tab(&self, view: &SettingsView) -> Element<'_, Message> {
+    /// General: the reminder and the panel label, two sections (Apsis's own settings, saved
+    /// at once).
+    fn general_tab(&self, view: &SettingsView) -> Element<'_, Message> {
         let days = view.backend.remind_days;
-        settings::section()
-            .add(
-                settings::item::builder(fl!("remind-title"))
-                    .description(fl!("remind-description"))
-                    .control(widget::spin_button(
-                        if days == 0 {
-                            fl!("remind-off")
-                        } else {
-                            fl!("remind-days", days = days.to_string())
-                        },
-                        fl!("remind-title"),
-                        days,
-                        1,
-                        0,
-                        MAX_REMIND_DAYS,
-                        Message::RemindDays,
-                    )),
-            )
-            .add(
-                settings::item::builder(fl!("label-title"))
-                    .description(fl!("label-description"))
-                    .toggler(view.backend.show_label, Message::ShowLabel),
-            )
-            .into()
+        widget::column::with_children(vec![
+            settings::section()
+                .title(fl!("section-reminder"))
+                .add(
+                    settings::item::builder(fl!("remind-title"))
+                        .description(fl!("remind-description"))
+                        .control(widget::spin_button(
+                            if days == 0 {
+                                fl!("remind-off")
+                            } else {
+                                fl!("remind-days", days = days.to_string())
+                            },
+                            fl!("remind-title"),
+                            days,
+                            1,
+                            0,
+                            MAX_REMIND_DAYS,
+                            Message::RemindDays,
+                        )),
+                )
+                .into(),
+            settings::section()
+                .title(fl!("section-panel"))
+                .add(
+                    settings::item::builder(fl!("label-title"))
+                        .description(fl!("label-description"))
+                        .toggler(view.backend.show_label, Message::ShowLabel),
+                )
+                .into(),
+        ])
+        .spacing(12)
+        .into()
     }
 
     /// About: the app's name, version, license and link.

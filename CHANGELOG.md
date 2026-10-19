@@ -35,6 +35,7 @@ All notable changes to Apsis are listed here. The format follows
 - **Settings, Filters as rows.** Each filter chooses Keep or Leave out beside its pattern;
   the move and remove buttons sit on the selected row; Add folder, Add file and Add
   pattern are above the list; the built-in excludes can be unfolded underneath.
+- **The Misc tab is now General**, with a Reminder section and a Panel section.
 
 ## [0.6.3] - 2026-10-08
 

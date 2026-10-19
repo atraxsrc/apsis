@@ -1031,7 +1031,7 @@ fn section_title(section: Section) -> String {
         Section::Location => fl!("tab-location"),
         Section::Include => fl!("tab-include"),
         Section::Filters => fl!("tab-filters"),
-        Section::Misc => fl!("tab-misc"),
+        Section::General => fl!("tab-general"),
     }
 }
 
@@ -2885,7 +2885,7 @@ impl AppModel {
         Task::none()
     }
 
-    /// Saves Apsis's own settings (the Misc tab) to cosmic-config, at once.
+    /// Saves Apsis's own settings (the General tab) to cosmic-config, at once.
     fn set_backend(&mut self, choice: ApsisChoice) -> Task<cosmic::Action<Message>> {
         let saved =
             cosmic_config::Config::new(<Self as cosmic::Application>::APP_ID, Config::VERSION)
