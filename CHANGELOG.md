@@ -4,6 +4,14 @@ All notable changes to Apsis are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.1] - 2026-11-02
+
+### Changed
+
+- **The panel still knows the last snapshot with the disk unplugged.** The popup and the
+  panel tooltip keep showing its age beside "not connected", also after a restart, and the
+  overdue reminder keeps working.
+
 ## [0.7.0] - 2026-10-19
 
 ### Changed
@@ -494,6 +502,7 @@ First release.
   password every time.
 - App and symbolic icons, AppStream metainfo, desktop entries, `just install` / `just uninstall`.
 
+[0.7.1]: https://github.com/atraxsrc/apsis/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/atraxsrc/apsis/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/atraxsrc/apsis/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/atraxsrc/apsis/compare/v0.6.1...v0.6.2

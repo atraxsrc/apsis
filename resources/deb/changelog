@@ -1,3 +1,10 @@
+apsis (0.7.1-1) noble; urgency=medium
+
+  * New upstream release, see CHANGELOG.md: the panel still knows the last
+    snapshot with the backup disk unplugged, also after a restart.
+
+ -- atraxsrc <92285717+atraxsrc@users.noreply.github.com>  Mon, 02 Nov 2026 22:54:00 +1100
+
 apsis (0.7.0-1) noble; urgency=medium
 
   * New upstream release, see CHANGELOG.md: the COSMIC look. One snapshot

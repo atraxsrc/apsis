@@ -78,6 +78,12 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.7.1" date="2026-11-02">
+      <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.7.1</url>
+      <description>
+        <p>The panel still knows the last snapshot while the backup disk is unplugged, also after a restart, and the overdue reminder keeps working.</p>
+      </description>
+    </release>
     <release version="0.7.0" date="2026-10-19">
       <url type="details">https://github.com/atraxsrc/apsis/releases/tag/v0.7.0</url>
       <description>
