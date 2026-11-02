@@ -530,6 +530,94 @@ fn the_disk_card_names_the_disk_its_free_space_and_the_last_snapshot() {
     );
 }
 
+/// The list of an unplugged disk, at a time the fixture's newest snapshot is two days old.
+fn remembering(config_value: &str) -> (AppModel, jiff::civil::DateTime) {
+    let mut app = window();
+    app.config.last_snapshot = config_value.to_owned();
+    app.config.remind_days = 7;
+    app.on_listed(Err(CliError::DeviceNotFound {
+        device: FIXTURE_UUID.to_owned(),
+    }));
+    let now = jiff::civil::date(2026, 9, 27).at(12, 0, 0, 0);
+    (app, now)
+}
+
+#[test]
+fn a_missing_disk_shows_the_remembered_snapshot() {
+    let (app, now) = remembering("2026-09-25T11:28:53");
+    let popup = app.status_view_at(now).popup(true);
+    assert_eq!(popup.last, "Last snapshot 2 days ago");
+    assert!(!popup.overdue);
+    assert_eq!(popup.disk, "Backup disk not connected");
+}
+
+#[test]
+fn a_remembered_snapshot_can_be_overdue() {
+    let (app, _) = remembering("2026-09-25T11:28:53");
+    let now = jiff::civil::date(2026, 10, 5).at(12, 0, 0, 0);
+    assert!(app.status_view_at(now).popup(true).overdue);
+}
+
+#[test]
+fn the_window_says_the_same_about_a_missing_disk_with_a_remembered_snapshot() {
+    let (app, now) = remembering("2026-09-25T11:28:53");
+    assert!(app.banners_at(now).is_empty());
+    assert_eq!(app.disk_card_at(now).last, "Not connected");
+    assert_eq!(
+        app.empty_state().unwrap().line,
+        "Backup disk not connected. Plug it in."
+    );
+}
+
+#[test]
+fn nothing_remembered_or_unreadable_leaves_a_missing_disk_failed() {
+    for value in ["", "not a date"] {
+        let (app, now) = remembering(value);
+        assert_eq!(app.status_view_at(now), StatusView::Failed);
+    }
+}
+
+#[test]
+fn only_a_missing_disk_uses_the_remembered_snapshot() {
+    let mut app = window();
+    app.config.last_snapshot = "2026-09-25T11:28:53".to_owned();
+    app.on_listed(Err(CliError::NoHelper));
+    let now = jiff::civil::date(2026, 9, 27).at(12, 0, 0, 0);
+    assert_eq!(app.status_view_at(now), StatusView::Failed);
+}
+
+#[test]
+fn the_popup_has_no_error_line_for_a_missing_disk() {
+    let (app, _) = remembering("");
+    assert_eq!(app.popup_list_error(), None);
+    let mut app = window();
+    app.on_listed(Err(CliError::NoHelper));
+    assert!(app.popup_list_error().is_some());
+}
+
+#[test]
+fn a_list_with_a_disk_remembers_its_newest_snapshot() {
+    assert_eq!(
+        last_to_remember(&Ok(fixture())).as_deref(),
+        Some("2026-09-25T11:28:53")
+    );
+}
+
+#[test]
+fn a_disk_without_snapshots_forgets_the_remembered_one() {
+    let mut list = fixture();
+    list.snapshots.clear();
+    assert_eq!(last_to_remember(&Ok(list)).as_deref(), Some(""));
+}
+
+#[test]
+fn a_list_without_a_disk_or_a_failed_one_changes_nothing() {
+    let mut list = fixture();
+    list.device = None;
+    assert_eq!(last_to_remember(&Ok(list)), None);
+    assert_eq!(last_to_remember(&Err(CliError::Busy)), None);
+}
+
 #[test]
 fn results_are_toasts_and_errors_are_not() {
     let mut app = window();

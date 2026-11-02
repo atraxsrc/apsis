@@ -1181,8 +1181,7 @@ impl AppModel {
                 match result {
                     Some(result) => {
                         self.helper_found = true;
-                        // A failure (disk unplugged) clears the reminder: nothing to judge by.
-                        self.on_listed(result);
+                        self.take_list(result);
                     }
                     None => {
                         self.helper_found = false;
@@ -1196,7 +1195,7 @@ impl AppModel {
             Message::Shortcut(shortcut) => return self.on_shortcut(shortcut),
             Message::ModifiersChanged(modifiers) => self.modifiers = modifiers,
             Message::Refresh => return self.start_list(),
-            Message::Listed(result) => self.on_listed(result),
+            Message::Listed(result) => self.take_list(result),
             Message::RowClicked(index) => self.click_row(index),
             Message::CreateClicked => return self.open_create(),
             Message::DeleteClicked => self.open_delete(),
@@ -1564,6 +1563,24 @@ impl AppModel {
         self.loading = true;
         let link = self.helper.clone();
         cosmic::task::future(async move { Message::Listed(list_snapshots(link).await) })
+    }
+
+    /// A list came in: shows it, and remembers its newest snapshot for when the disk is
+    /// unplugged. Saved here, not in `on_listed`, which the tests call: they must not touch the
+    /// real settings.
+    fn take_list(&mut self, result: Result<SnapshotList, CliError>) {
+        let remember = last_to_remember(&result);
+        self.on_listed(result);
+        let Some(value) = remember else {
+            return;
+        };
+        let saved =
+            cosmic_config::Config::new(<Self as cosmic::Application>::APP_ID, Config::VERSION)
+                .and_then(|context| self.config.set_last_snapshot(&context, value.clone()));
+        if saved.is_err() {
+            // Not worth an error line: it still holds until the panel restarts.
+            self.config.last_snapshot = value;
+        }
     }
 
     fn on_listed(&mut self, result: Result<SnapshotList, CliError>) {
@@ -2066,6 +2083,9 @@ impl AppModel {
             text: fl!("banner-not-connected"),
             action: None,
         };
+        if matches!(self.listing, Listing::Failed(_)) {
+            return Vec::new();
+        }
         let StatusView::Loaded(status) = self.status_view_at(now) else {
             return Vec::new();
         };
@@ -2995,6 +3015,16 @@ impl AppModel {
         }
     }
 
+    /// Why the list failed, for the popup. An unplugged disk is no error: the popup's disk line
+    /// says it.
+    pub(super) fn popup_list_error(&self) -> Option<String> {
+        match &self.listing {
+            Listing::Failed(CliError::DeviceNotFound { .. }) => None,
+            Listing::Failed(error) => Some(self.error_text(error)),
+            _ => None,
+        }
+    }
+
     /// Why something failed, as a line of text.
     fn error_text(&self, error: &CliError) -> String {
         error_summary(error, self.known_uuid.as_deref())
@@ -3014,6 +3044,16 @@ impl AppModel {
                     StatusView::Loaded(status.disk_gone())
                 } else {
                     StatusView::Loaded(status)
+                }
+            }
+            Listing::Failed(CliError::DeviceNotFound { .. }) => {
+                match self.config.last_snapshot.parse() {
+                    Ok(created) => StatusView::Loaded(ApsisStatus::remembered(
+                        created,
+                        self.config.remind_days,
+                        now,
+                    )),
+                    Err(_) => StatusView::Failed,
                 }
             }
             Listing::Failed(_) => StatusView::Failed,
@@ -3281,6 +3321,15 @@ fn bulk_delete_details(deleted: &[String], left: &[String]) -> String {
         ),
     ]
     .join("\n")
+}
+
+/// What a list leaves to remember: when the newest snapshot on the backup disk was taken, empty
+/// when it has none. `None` keeps what's remembered: a failed list, or one with no disk to
+/// speak for.
+fn last_to_remember(result: &Result<SnapshotList, CliError>) -> Option<String> {
+    let list = result.as_ref().ok().filter(|list| list.device.is_some())?;
+    let newest = list.snapshots.iter().map(|s| s.created).max();
+    Some(newest.map_or_else(String::new, |created| created.to_string()))
 }
 
 /// `Backup disk not connected (UUID 1a2b…). Plug it in.` Names the disk by the UUID from the

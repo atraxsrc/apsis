@@ -95,6 +95,17 @@ impl ApsisStatus {
         }
     }
 
+    /// The backup disk is unplugged, and an earlier list showed its newest snapshot was taken
+    /// at `created`: the age and the reminder go on from that.
+    #[must_use]
+    pub fn remembered(created: DateTime, remind_days: u32, now: DateTime) -> Self {
+        Self {
+            last: Some(age(created, now)),
+            remind: (remind_days > 0).then_some(remind_days),
+            disk: DiskStatus::NotMounted,
+        }
+    }
+
     /// The same, with the backup disk gone since the list (its UUID left `/dev/disk/by-uuid`):
     /// the disk reads `not connected`; the time side stays as the list showed it (time and disk
     /// fail independently).
@@ -529,6 +540,19 @@ mod tests {
         let s = ApsisStatus::from_list(&unset, 7, now);
         assert_eq!(s.disk, DiskStatus::NotMounted);
         assert_eq!(s.due(), Due::Off);
+    }
+
+    #[test]
+    fn remembered_keeps_the_age_and_the_reminder_without_a_disk() {
+        let now = date(2026, 9, 29).at(18, 0, 0, 0);
+        let status = ApsisStatus::remembered(date(2026, 9, 27).at(18, 0, 0, 0), 7, now);
+        assert_eq!(status.last, Some(Duration::from_secs(48 * 3600)));
+        assert_eq!(status.disk, DiskStatus::NotMounted);
+        assert_eq!(status.due(), Due::Ok);
+        let old = ApsisStatus::remembered(date(2026, 9, 20).at(18, 0, 0, 0), 7, now);
+        assert_eq!(old.due(), Due::Overdue { days: 7 });
+        let off = ApsisStatus::remembered(date(2026, 9, 20).at(18, 0, 0, 0), 0, now);
+        assert_eq!(off.due(), Due::Off);
     }
 
     #[test]

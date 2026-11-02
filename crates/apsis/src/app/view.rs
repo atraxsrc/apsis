@@ -19,9 +19,7 @@ use cosmic::widget::text::{body, caption, heading, title4};
 use cosmic::widget::{self, icon, menu, settings};
 use cosmic::{Theme, theme};
 
-use super::{
-    AppModel, Dialog, Listing, Message, Page, RowItem, SettingsLoad, Status, Tone, error_summary,
-};
+use super::{AppModel, Dialog, Listing, Message, Page, RowItem, SettingsLoad, Status, Tone};
 use crate::settings_view::{MAX_REMIND_DAYS, Row, Section, SettingsView};
 use crate::status::{PopupStatus, StatusView};
 use crate::{fl, fmt};
@@ -163,17 +161,14 @@ impl AppModel {
             };
             children.push(job_bar(fraction));
         } else {
-            let line = if status.last.is_empty() {
-                fl!("loading")
-            } else {
-                status.last.clone()
-            };
-            let line = widget::text(line);
-            children.push(if status.overdue {
-                line.class(theme::Text::Custom(warning_text)).into()
-            } else {
-                line.into()
-            });
+            if let Some(line) = status.line() {
+                let line = widget::text(line);
+                children.push(if status.overdue {
+                    line.class(theme::Text::Custom(warning_text)).into()
+                } else {
+                    line.into()
+                });
+            }
             match (status.usage, &status.figures) {
                 (Some(usage), Some(figures)) => children.push(
                     widget::tooltip(
@@ -263,9 +258,9 @@ impl AppModel {
     /// end well. Lines that only say something went fine are the window's.
     fn popup_errors(&self) -> Vec<Element<'_, Message>> {
         let mut lines = Vec::new();
-        if let Listing::Failed(error) = &self.listing {
+        if let Some(error) = self.popup_list_error() {
             lines.push(
-                widget::text(error_summary(error, self.known_uuid.as_deref()))
+                widget::text(error)
                     .class(theme::Text::Custom(error_text))
                     .into(),
             );

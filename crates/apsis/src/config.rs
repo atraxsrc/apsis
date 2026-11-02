@@ -14,6 +14,9 @@ pub struct Config {
     pub remind_days: u32,
     /// Show `12h · 62%` beside the panel icon (horizontal panels only). Off by default.
     pub show_label: bool,
+    /// When the newest snapshot on the backup disk was taken, as the last list showed it
+    /// (`2026-09-25T11:28:53`): what the panel says while the disk is unplugged. Empty: none.
+    pub last_snapshot: String,
 }
 
 impl Default for Config {
@@ -22,6 +25,7 @@ impl Default for Config {
             demo: String::new(),
             remind_days: crate::settings_view::DEFAULT_REMIND_DAYS,
             show_label: false,
+            last_snapshot: String::new(),
         }
     }
 }

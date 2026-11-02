@@ -18,6 +18,7 @@ pub enum StatusView {
     Unloaded,
     /// The last list failed: the backup disk is most likely not connected.
     Failed,
+    /// From a list, or from the snapshot remembered while the disk is unplugged.
     Loaded(ApsisStatus),
 }
 
@@ -139,6 +140,19 @@ pub struct PopupStatus {
     pub figures: Option<String>,
     /// `11G free of 28G`, under the bar.
     pub free_of: Option<String>,
+}
+
+impl PopupStatus {
+    /// The popup's first line: `last`, or `Reading snapshots…` while nothing is known at all.
+    /// With no `last` and a reason in `disk`, there's nothing being read: no line.
+    #[must_use]
+    pub fn line(&self) -> Option<String> {
+        match (self.last.is_empty(), self.disk.is_empty()) {
+            (false, _) => Some(self.last.clone()),
+            (true, true) => Some(fl!("loading")),
+            (true, false) => None,
+        }
+    }
 }
 
 /// `12h ago`, or `just now`.
@@ -373,5 +387,21 @@ mod tests {
         assert_eq!(unchosen.usage, None);
         let unloaded = StatusView::Unloaded.popup(true);
         assert_eq!((unloaded.last.as_str(), unloaded.disk.as_str()), ("", ""));
+    }
+
+    #[test]
+    fn popup_says_reading_only_while_nothing_is_known() {
+        assert_eq!(
+            StatusView::Unloaded.popup(true).line().as_deref(),
+            Some("Reading snapshots…")
+        );
+        assert_eq!(StatusView::Failed.popup(true).line(), None);
+        assert_eq!(
+            loaded(Some(48), None, DiskStatus::NotMounted)
+                .popup(true)
+                .line()
+                .as_deref(),
+            Some("Last snapshot 2 days ago")
+        );
     }
 }
