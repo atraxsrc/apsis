@@ -73,13 +73,13 @@ The settings in detail: [docs/SETTINGS.md](docs/SETTINGS.md).
 
 ## Supported systems
 
-- **Desktop:** COSMIC, on Pop!_OS 24.04 or any distribution shipping it. `rsync` and a
+- **Desktop:** COSMIC, on Pop!_OS 24.04 or 26.04, or any distribution shipping it. `rsync` and a
   polkit agent (COSMIC has one).
 - **System disk:** plain, or encrypted the way Pop!_OS's installer does it with "Encrypt
   drive" (an LVM volume inside one LUKS partition). Restore supports both.
 - **Backup disk:** a plain, unencrypted Linux filesystem (ext4, btrfs, xfs...). The backup
   disk cannot be LUKS-encrypted; the system disk can.
-- **Restore:** UEFI with systemd-boot (kernelstub), as on Pop!_OS 24.04. GRUB, BIOS boot,
+- **Restore:** UEFI with systemd-boot (kernelstub), as on Pop!_OS 24.04 and 26.04. GRUB, BIOS boot,
   btrfs and a system split over `/boot`, `/usr` or `/var` partitions are refused before
   anything happens.
 
@@ -120,7 +120,8 @@ Your snapshots stay on the backup disk.
 
 ## Known limitations of restore
 
-- Experimental, for Pop!_OS 24.04 with systemd-boot only.
+- Experimental, for Pop!_OS with systemd-boot only. Tested on 24.04; on 26.04 snapshots
+  work and a full restore hasn't been tried yet.
   Restore is new: a report of how it went on your hardware, good or bad, helps.
 - An encrypted system disk works in Pop!_OS's "Encrypt drive" layout only. Its passphrase
   is asked twice: at the restart that runs the restore, and at the start after it.

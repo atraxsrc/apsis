@@ -11,6 +11,7 @@ What the messages mean, what to do about them, upgrading from older versions and
 | Apsis needs apsis-helper | reinstall the .deb, or `sudo just install` |
 | apt stops with "apsis: an Apsis job is running; try again when it has finished" | a snapshot, a delete, a restore's preparation or a settings save is running: let it finish (or stop it), then run apt again. The package is as it was |
 | apt stops with "apsis: a restore is armed and couldn't be disarmed" | a restore waits for its restart and couldn't be cancelled; run the two commands apt printed, then apt again |
+| Apsis is gone after upgrading Pop!_OS 24.04 to 26.04 | the release upgrade can uninstall it; install the .deb again (see "Upgrading Pop!_OS") |
 | the applet doesn't show after installing | log out and back in, or re-add it in *Configure panel applets* |
 | Can't restore this snapshot | the dialog says why and what to do; see "Known limitations of restore" |
 | Not deleted: a restart to restore is waiting | "Restart now" was clicked and the restore waits for the restart; restart the computer, or wait ten minutes for it to time out, then delete |
@@ -56,6 +57,12 @@ saved (a note at the top says what changed: a home folder set to "everything" be
 `/home` choice, "hidden files only" becomes a `+` filter); snapshots keep holding the same
 files. Click Save. File restore is gone in 0.4: anything already in `~/Apsis-restored/`, and
 any `*.apsis-before-*` file next to an original, is yours and can be deleted by hand.
+
+**Upgrading Pop!_OS from 24.04 to 26.04.** The release upgrade can uninstall Apsis: the
+applet and the window are gone, and `dpkg -l apsis` shows `rc` (removed, settings kept).
+Your snapshots and settings stay. Install the .deb again with `sudo apt install ./apsis_*.deb`,
+log out and back in, and take a new snapshot. Snapshots taken on 24.04 can still be restored
+on 26.04, and doing so puts the computer back on 24.04.
 
 ## Uninstall
 
